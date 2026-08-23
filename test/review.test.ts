@@ -32,6 +32,7 @@ describe("buildReviewPrompt", () => {
     assert.match(prompt, /# General Code Reviewing/)
     assert.match(prompt, /## Pass 1: Ship Risk/)
     assert.match(prompt, /## Pass 2: Simplicity/)
+    assert.match(prompt, /Use it directly without calling the skill tool/)
     assert.doesNotMatch(prompt, /name: general-code-reviewing/)
     assert.doesNotMatch(prompt, /adversarial-code-reviewing|simplicity-review/)
     assert.doesNotMatch(prompt, /^---$/m)
