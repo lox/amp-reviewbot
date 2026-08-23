@@ -8,25 +8,25 @@ import {
 } from "../src/review.js"
 import type { ReviewJob } from "../src/types.js"
 
-const job: ReviewJob = {
-  id: "job-1",
-  sourceDeliveryId: "delivery-1",
-  eventType: "pull_request.opened",
-  installationId: "1",
-  repositoryId: "2",
-  repositoryFullName: "lox/example",
-  pullNumber: 42,
-  baseSha: "base-sha",
-  headSha: "head-sha",
-  ampProject: "lox/example",
-  checkRunId: null,
-  ampThreadId: null,
-  status: "queued",
-  attempts: 0,
-}
-
 describe("buildReviewPrompt", () => {
   it("embeds the review skills while preserving the trusted diff and output contract", () => {
+    const job: ReviewJob = {
+      id: "job-1",
+      sourceDeliveryId: "delivery-1",
+      eventType: "pull_request.opened",
+      installationId: "1",
+      repositoryId: "2",
+      repositoryFullName: "lox/example",
+      pullNumber: 42,
+      baseSha: "base-sha",
+      headSha: "head-sha",
+      ampProject: "lox/example",
+      checkRunId: null,
+      ampThreadId: null,
+      status: "queued",
+      attempts: 0,
+    }
+
     const prompt = buildReviewPrompt(job)
 
     assert.match(prompt, /# General Code Reviewing/)
@@ -42,7 +42,10 @@ describe("buildReviewPrompt", () => {
 
 describe("reviewThreadTitle", () => {
   it("identifies the repository and pull request consistently", () => {
-    assert.equal(reviewThreadTitle(job), "Review lox/example#42")
+    assert.equal(
+      reviewThreadTitle({ repositoryFullName: "lox/example", pullNumber: 42 }),
+      "Review lox/example#42",
+    )
   })
 })
 

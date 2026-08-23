@@ -67,7 +67,9 @@ Return only JSON matching this exact shape, with at most 20 findings:
 }`
 }
 
-export function reviewThreadTitle(job: ReviewJob): string {
+export function reviewThreadTitle(
+  job: Pick<ReviewJob, "repositoryFullName" | "pullNumber">,
+): string {
   return `Review ${job.repositoryFullName}#${job.pullNumber}`
 }
 
