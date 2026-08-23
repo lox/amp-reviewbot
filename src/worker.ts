@@ -146,7 +146,7 @@ export class ReviewWorkers {
             await this.github.failCheck(
               job,
               checkRunId,
-              "Amp Review could not complete. Use GitHub's re-run control to try again.",
+              "Code review could not complete. Use GitHub's re-run control to try again.",
             )
           }
         } catch (checkError) {

@@ -10,6 +10,13 @@ const annotationLevel: Record<Severity, "failure" | "warning" | "notice"> = {
   low: "notice",
 }
 
+const severityLabel: Record<Severity, string> = {
+  critical: "Critical",
+  high: "High",
+  medium: "Medium",
+  low: "Low",
+}
+
 export class GitHubClient {
   private readonly app: App
 
@@ -26,7 +33,7 @@ export class GitHubClient {
     const response = await octokit.rest.checks.create({
       owner,
       repo,
-      name: "Amp Review",
+      name: "Code review",
       head_sha: job.headSha,
       status: "queued",
       external_id: job.id,
@@ -90,10 +97,12 @@ export class GitHubClient {
       changedLines.get(finding.path)?.has(finding.startLine),
     )
     const omitted = result.findings.length - findings.length
+    const conclusion = checkConclusion({ ...result, findings }, this.config.failOn)
+    const title = checkTitle(findings.length, conclusion)
     const summary = [
-      result.summary,
+      `**${title}.**${conclusion === "failure" ? " Resolve the findings below before merging." : findings.length > 0 ? " This check does not block merging." : ""}`,
+      omitted === 0 ? `\n\n${result.summary}` : "",
       omitted > 0 ? `\n\n_${omitted} finding(s) omitted because they did not reference a changed line._` : "",
-      job.ampThreadId ? `\n\n[Open the Amp review thread](https://ampcode.com/threads/${job.ampThreadId})` : "",
     ].join("")
 
     await octokit.rest.checks.update({
@@ -102,12 +111,12 @@ export class GitHubClient {
       check_run_id: Number(checkRunId),
       status: "completed",
       completed_at: new Date().toISOString(),
-      conclusion: checkConclusion(result, this.config.failOn),
+      conclusion,
       ...(job.ampThreadId
         ? { details_url: `https://ampcode.com/threads/${job.ampThreadId}` }
         : {}),
       output: {
-        title: checkTitle(result.findings.length),
+        title,
         summary,
         annotations: findings.map((finding) => {
           const lines = changedLines.get(finding.path)!
@@ -120,8 +129,8 @@ export class GitHubClient {
             start_line: finding.startLine,
             end_line: endLine,
             annotation_level: annotationLevel[finding.severity],
-            title: `[${finding.severity}] ${finding.title}`.slice(0, 255),
-            message: finding.message,
+            title: `${severityLabel[finding.severity]} · ${finding.title}`.slice(0, 255),
+            message: `${finding.message}\n\n**Suggested fix:** ${finding.suggestion}`,
           }
         }),
       },
@@ -163,9 +172,13 @@ function splitRepository(fullName: string): { owner: string; repo: string } {
   return { owner, repo }
 }
 
-function checkTitle(findings: number): string {
-  if (findings === 0) return "No actionable issues found"
-  return `Amp found ${findings} actionable ${findings === 1 ? "issue" : "issues"}`
+export function checkTitle(
+  findings: number,
+  conclusion: "success" | "neutral" | "failure",
+): string {
+  if (findings === 0) return "No issues found"
+  const kind = conclusion === "failure" ? "blocking" : "advisory"
+  return `${findings} ${kind} ${findings === 1 ? "issue" : "issues"}`
 }
 
 export function parseChangedLines(patch: string): Set<number> {

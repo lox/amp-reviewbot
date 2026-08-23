@@ -9,7 +9,7 @@ Each review gets an Amp thread labeled `reviewbot`. GitHub delivery IDs and a Po
 ```text
 GitHub pull_request webhook
   -> Fly.io service verifies the signature and queues a job
-  -> worker creates an "Amp Review" check run
+  -> worker creates a "Code review" check run
   -> Amp SDK starts a fresh orb for the repository's Amp project
   -> Amp reviews base SHA...head SHA and returns structured JSON
   -> service validates changed paths and publishes annotations

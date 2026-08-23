@@ -4,6 +4,7 @@ export type ReviewFinding = {
   severity: Severity
   title: string
   message: string
+  suggestion: string
   path: string
   startLine: number
   endLine?: number
