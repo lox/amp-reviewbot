@@ -4,6 +4,7 @@
 
 Each review gets an Amp thread labeled `reviewbot`. GitHub delivery IDs and a Postgres job queue make webhook handling idempotent, and a newer PR revision cancels an obsolete review.
 Review threads are archived after each run; the corresponding GitHub check keeps a direct link to the archived thread.
+Interrupted worker jobs are recovered periodically and reuse their existing GitHub check with a fresh Amp thread. After three worker attempts, the check fails instead of remaining pending.
 
 ## How it works
 
@@ -132,6 +133,7 @@ The initial implementation receives the final review through the Amp SDK stream.
 - Findings below `FAIL_ON`: `neutral`
 - At least one finding at or above `FAIL_ON`: `failure`
 - Superseded review: `cancelled`
+- Review cancelled from its Amp thread: `cancelled`
 - Review infrastructure error: `failure`
 
 Amp output is schema-validated and capped at 20 findings. Findings outside GitHub's changed lines are omitted from annotations.

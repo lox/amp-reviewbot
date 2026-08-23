@@ -12,6 +12,8 @@ import type { ReviewJob } from "./types.js"
 
 const execFileAsync = promisify(execFile)
 const ampRetryDelaysMs = [5_000, 20_000]
+const staleRecoveryIntervalMs = 60_000
+const maxJobAttempts = 3
 const continuationPrompt =
   "Complete the review if necessary, then return only the final review JSON in the required schema."
 
@@ -81,12 +83,16 @@ export async function executeReviewWithRetries({
         }
         if (message.type === "result") {
           if (message.is_error) throw new Error(message.error)
+          signal.throwIfAborted()
           return message.result
         }
       }
       throw new TransientAmpError("Amp stream ended without a result")
     } catch (error) {
       signal.throwIfAborted()
+      if (isAmpCancellationError(error)) {
+        throw new AmpReviewCancelledError(errorMessage(error))
+      }
       if (!isTransientAmpError(error)) throw error
 
       if (assistantFallback && isValidReviewResult(assistantFallback)) {
@@ -127,6 +133,11 @@ function isValidReviewResult(text: string): boolean {
 
 class TransientAmpError extends Error {}
 class ReviewCallbackError extends Error {}
+class AmpReviewCancelledError extends Error {}
+
+export function isAmpCancellationError(error: unknown): boolean {
+  return /\buser cancel(?:l)?ed\b|\bcancel(?:l)?ed by (?:the )?user\b/i.test(errorMessage(error))
+}
 
 export function isTransientAmpError(error: unknown): boolean {
   if (error instanceof TransientAmpError) return true
@@ -145,6 +156,7 @@ export class ReviewWorkers {
   private stopping = false
   private readonly active = new Set<AbortController>()
   private readonly loops: Promise<void>[] = []
+  private readonly recoveryController = new AbortController()
 
   constructor(
     private readonly config: Config,
@@ -157,12 +169,52 @@ export class ReviewWorkers {
     for (let index = 0; index < this.config.workerConcurrency; index += 1) {
       this.loops.push(this.loop(index))
     }
+    this.loops.push(this.recoveryLoop())
   }
 
   async stop(): Promise<void> {
     this.stopping = true
+    this.recoveryController.abort(new Error("Service is shutting down"))
     for (const controller of this.active) controller.abort(new Error("Service is shutting down"))
     await Promise.all(this.loops)
+  }
+
+  private async recoveryLoop(): Promise<void> {
+    while (!this.stopping) {
+      try {
+        const recovery = await this.database.recoverStaleJobs(
+          this.config.reviewTimeoutMs,
+          maxJobAttempts,
+        )
+        if (recovery.requeued > 0) {
+          this.logger.warn({ jobs: recovery.requeued }, "recovered stale review jobs")
+        }
+        for (const job of recovery.exhausted) {
+          try {
+            if (job.checkRunId) {
+              await this.github.failCheck(
+                job,
+                job.checkRunId,
+                "Review stopped after repeated worker interruptions. Use GitHub's re-run control to try again.",
+              )
+            }
+            await this.database.finish(job.id, "failed", "Worker recovery attempts exhausted")
+            this.logger.error({ jobId: job.id, attempts: job.attempts }, "stale review recovery exhausted")
+          } catch (error) {
+            this.logger.error({ err: error, jobId: job.id }, "failed to finalize stale review")
+          }
+        }
+      } catch (error) {
+        this.logger.error({ err: error }, "stale review recovery failed")
+      }
+
+      try {
+        await sleep(staleRecoveryIntervalMs, this.recoveryController.signal)
+      } catch {
+        if (this.stopping) return
+        throw new Error("Stale review recovery interrupted")
+      }
+    }
   }
 
   private async loop(index: number): Promise<void> {
@@ -253,6 +305,7 @@ export class ReviewWorkers {
 
       const result = parseReviewResult(finalText)
       const changedLines = await this.github.changedLines(job)
+      controller.signal.throwIfAborted()
       await this.github.completeCheck(job, activeCheckRunId, result, changedLines)
       await this.database.finish(job.id, "succeeded")
       log.info({ findings: result.findings.length }, "review completed")
@@ -260,6 +313,13 @@ export class ReviewWorkers {
       if (error instanceof PullRequestHeadChangedError && checkRunId) {
         await this.github.cancelCheck(job, checkRunId, "A newer pull request revision is available.")
         await this.database.finish(job.id, "cancelled", "Pull request head changed")
+        return
+      }
+      if (error instanceof AmpReviewCancelledError) {
+        if (checkRunId) {
+          await this.github.cancelCheck(job, checkRunId, "The Amp review was cancelled.")
+        }
+        await this.database.finish(job.id, "cancelled", errorMessage(error))
         return
       }
       const reason = errorMessage(error)

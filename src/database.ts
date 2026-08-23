@@ -28,6 +28,11 @@ export type NewReviewJob = Omit<
   checkRunId?: string
 }
 
+export type StaleJobRecovery = {
+  requeued: number
+  exhausted: ReviewJob[]
+}
+
 function mapJob(row: JobRow): ReviewJob {
   return {
     id: row.id,
@@ -172,16 +177,40 @@ export class Database {
     }
   }
 
-  async recoverStaleJobs(reviewTimeoutMs: number): Promise<number> {
-    const result = await this.pool.query(
-      `UPDATE review_jobs
-       SET status = 'queued', started_at = NULL, updated_at = NOW(),
-           error = 'Recovered after worker interruption'
-       WHERE status = 'running'
-         AND updated_at < NOW() - ($1::text || ' milliseconds')::interval`,
-      [reviewTimeoutMs + 5 * 60_000],
-    )
-    return result.rowCount ?? 0
+  async recoverStaleJobs(reviewTimeoutMs: number, maxAttempts: number): Promise<StaleJobRecovery> {
+    const client = await this.pool.connect()
+    try {
+      await client.query("BEGIN")
+      const result = await client.query<JobRow>(
+        `SELECT * FROM review_jobs
+         WHERE status = 'running'
+           AND updated_at < NOW() - ($1::text || ' milliseconds')::interval
+         FOR UPDATE SKIP LOCKED`,
+        [reviewTimeoutMs + 5 * 60_000],
+      )
+      const recoverable = result.rows.filter((row) => row.attempts < maxAttempts)
+      if (recoverable.length > 0) {
+        await client.query(
+          `UPDATE review_jobs
+           SET status = 'queued', started_at = NULL, updated_at = NOW(),
+               error = 'Recovered after worker interruption'
+           WHERE id = ANY($1::bigint[])`,
+          [recoverable.map((row) => row.id)],
+        )
+      }
+      await client.query("COMMIT")
+      return {
+        requeued: recoverable.length,
+        exhausted: result.rows
+          .filter((row) => row.attempts >= maxAttempts)
+          .map(mapJob),
+      }
+    } catch (error) {
+      await rollback(client)
+      throw error
+    } finally {
+      client.release()
+    }
   }
 
   async setCheckRun(jobId: string, checkRunId: string): Promise<void> {

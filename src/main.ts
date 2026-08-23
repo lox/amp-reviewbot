@@ -10,8 +10,6 @@ const logger = pino({ level: config.logLevel })
 const database = new Database(config)
 
 await database.migrate()
-const recovered = await database.recoverStaleJobs(config.reviewTimeoutMs)
-if (recovered > 0) logger.warn({ jobs: recovered }, "recovered stale review jobs")
 
 const github = new GitHubClient(config)
 const workers = new ReviewWorkers(config, database, github, logger)
