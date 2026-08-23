@@ -12,7 +12,7 @@ const envSchema = z.object({
   GITHUB_WEBHOOK_SECRET: z.string().min(16),
   AMP_API_KEY: z.string().min(1),
   AMP_PROJECTS: z.string().default("{}"),
-  AMP_THREAD_VISIBILITY: z.enum(["private", "workspace"]).default("workspace"),
+  AMP_THREAD_VISIBILITY: z.enum(["private", "workspace"]).default("private"),
   WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(20).default(2),
   REVIEW_TIMEOUT_MINUTES: z.coerce.number().int().min(5).max(120).default(30),
   FAIL_ON: severitySchema.default("high"),

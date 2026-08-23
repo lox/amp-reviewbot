@@ -59,7 +59,7 @@ Copy `.env.example` and provide:
 | `GITHUB_WEBHOOK_SECRET` | Secret used to verify webhook signatures |
 | `AMP_API_KEY` | Amp access token used by the SDK |
 | `AMP_PROJECTS` | Optional repository-to-project JSON map |
-| `AMP_THREAD_VISIBILITY` | `workspace` (default) or `private` |
+| `AMP_THREAD_VISIBILITY` | `private` (default) or `workspace` |
 | `WORKER_CONCURRENCY` | Concurrent reviews, default `2` |
 | `REVIEW_TIMEOUT_MINUTES` | Per-review timeout, default `30` |
 | `FAIL_ON` | Lowest failing severity, default `high` |

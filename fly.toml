@@ -9,7 +9,7 @@ primary_region = "syd"
   WORKER_CONCURRENCY = "2"
   REVIEW_TIMEOUT_MINUTES = "30"
   FAIL_ON = "high"
-  AMP_THREAD_VISIBILITY = "workspace"
+  AMP_THREAD_VISIBILITY = "private"
 
 [http_service]
   internal_port = 8080
