@@ -1,6 +1,14 @@
 import assert from "node:assert/strict"
 import { describe, it } from "node:test"
-import { parseChangedLines } from "../src/github.js"
+import { checkTitle, parseChangedLines } from "../src/github.js"
+
+describe("checkTitle", () => {
+  it("describes clean, advisory, and blocking results", () => {
+    assert.equal(checkTitle(0, "success"), "No issues found")
+    assert.equal(checkTitle(1, "neutral"), "1 advisory issue")
+    assert.equal(checkTitle(2, "failure"), "2 blocking issues")
+  })
+})
 
 describe("parseChangedLines", () => {
   it("returns right-side line numbers for additions across hunks", () => {

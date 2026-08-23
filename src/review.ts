@@ -15,6 +15,7 @@ const findingSchema = z.object({
   severity: z.enum(["critical", "high", "medium", "low"]),
   title: z.string().trim().min(1).max(255),
   message: z.string().trim().min(1).max(8_000),
+  suggestion: z.string().trim().min(1).max(8_000),
   path: z.string().trim().min(1).max(1_000),
   startLine: z.number().int().positive(),
   endLine: z.number().int().positive().optional(),
@@ -58,7 +59,8 @@ Return only JSON matching this exact shape, with at most 20 findings:
     {
       "severity": "critical|high|medium|low",
       "title": "short title",
-      "message": "specific failure scenario and suggested direction",
+      "message": "specific impact or failure scenario",
+      "suggestion": "smallest concrete fix",
       "path": "repository-relative/path.ts",
       "startLine": 123,
       "endLine": 123

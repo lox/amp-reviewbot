@@ -57,7 +57,7 @@ describe("parseReviewResult", () => {
 
   it("accepts a fenced JSON response", () => {
     const result = parseReviewResult(`\`\`\`json
-{"summary":"One issue","findings":[{"severity":"high","title":"Race","message":"Two writers can overwrite each other.","path":"src/a.ts","startLine":12}]}
+{"summary":"One issue","findings":[{"severity":"high","title":"Race","message":"Two writers can overwrite each other.","suggestion":"Serialize updates.","path":"src/a.ts","startLine":12}]}
 \`\`\``)
     assert.equal(result.findings[0]?.path, "src/a.ts")
     assert.equal(result.findings[0]?.endLine, undefined)
@@ -79,6 +79,7 @@ describe("checkConclusion", () => {
   const finding = {
     title: "Issue",
     message: "Failure scenario",
+    suggestion: "Fix it",
     path: "src/a.ts",
     startLine: 1,
   }
