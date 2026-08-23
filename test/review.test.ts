@@ -9,7 +9,7 @@ import {
 import type { ReviewJob } from "../src/types.js"
 
 describe("buildReviewPrompt", () => {
-  it("embeds the review skills while preserving the trusted diff and output contract", () => {
+  it("embeds one self-contained methodology without skill metadata", () => {
     const job: ReviewJob = {
       id: "job-1",
       sourceDeliveryId: "delivery-1",
@@ -30,10 +30,11 @@ describe("buildReviewPrompt", () => {
     const prompt = buildReviewPrompt(job)
 
     assert.match(prompt, /# General Code Reviewing/)
-    assert.match(prompt, /# Adversarial Code Reviewing/)
-    assert.match(prompt, /# Simplicity Review/)
-    assert.match(prompt, /Do not use the skill tool; everything needed is embedded here/)
-    assert.doesNotMatch(prompt, /load these global skills/)
+    assert.match(prompt, /## Pass 1: Ship Risk/)
+    assert.match(prompt, /## Pass 2: Simplicity/)
+    assert.doesNotMatch(prompt, /name: general-code-reviewing/)
+    assert.doesNotMatch(prompt, /adversarial-code-reviewing|simplicity-review/)
+    assert.doesNotMatch(prompt, /^---$/m)
     assert.match(prompt, /Review only changes in base-sha\.\.\.head-sha/)
     assert.match(prompt, /Do not modify any files/)
     assert.match(prompt, /Return only JSON matching this exact shape/)
