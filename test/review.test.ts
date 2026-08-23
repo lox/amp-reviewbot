@@ -1,6 +1,11 @@
 import assert from "node:assert/strict"
 import { describe, it } from "node:test"
-import { buildReviewPrompt, checkConclusion, parseReviewResult } from "../src/review.js"
+import {
+  buildReviewPrompt,
+  checkConclusion,
+  parseReviewResult,
+  reviewThreadTitle,
+} from "../src/review.js"
 import type { ReviewJob } from "../src/types.js"
 
 describe("buildReviewPrompt", () => {
@@ -32,6 +37,15 @@ describe("buildReviewPrompt", () => {
     assert.match(prompt, /Review only changes in base-sha\.\.\.head-sha/)
     assert.match(prompt, /Do not modify any files/)
     assert.match(prompt, /Return only JSON matching this exact shape/)
+  })
+})
+
+describe("reviewThreadTitle", () => {
+  it("identifies the repository and pull request consistently", () => {
+    assert.equal(
+      reviewThreadTitle({ repositoryFullName: "lox/example", pullNumber: 42 }),
+      "Review lox/example#42",
+    )
   })
 })
 
