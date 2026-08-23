@@ -102,6 +102,11 @@ export class ReviewWorkers {
         if (message.type === "system" && message.session_id !== job.ampThreadId) {
           job = { ...job, ampThreadId: message.session_id }
           await this.database.setThread(job.id, message.session_id)
+          try {
+            await this.github.linkCheck(job, checkRunId, message.session_id)
+          } catch (error) {
+            log.warn({ err: error, threadId: message.session_id }, "failed to link running check")
+          }
           log.info({ threadId: message.session_id }, "Amp review started")
         }
         if (message.type === "result") {

@@ -46,6 +46,17 @@ export class GitHubClient {
     })
   }
 
+  async linkCheck(job: ReviewJob, checkRunId: string, ampThreadId: string): Promise<void> {
+    const { owner, repo } = splitRepository(job.repositoryFullName)
+    const octokit = await this.app.getInstallationOctokit(Number(job.installationId))
+    await octokit.rest.checks.update({
+      owner,
+      repo,
+      check_run_id: Number(checkRunId),
+      details_url: `https://ampcode.com/threads/${ampThreadId}`,
+    })
+  }
+
   async currentHead(job: ReviewJob): Promise<string> {
     const { owner, repo } = splitRepository(job.repositoryFullName)
     const octokit = await this.app.getInstallationOctokit(Number(job.installationId))
