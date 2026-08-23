@@ -99,7 +99,7 @@ export class ReviewWorkers {
           noArchiveAfterExecute: true,
         },
       })) {
-        if (message.type === "system" && !job.ampThreadId) {
+        if (message.type === "system" && message.session_id !== job.ampThreadId) {
           job = { ...job, ampThreadId: message.session_id }
           await this.database.setThread(job.id, message.session_id)
           log.info({ threadId: message.session_id }, "Amp review started")
