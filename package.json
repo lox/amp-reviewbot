@@ -1,0 +1,30 @@
+{
+  "name": "amp-reviewbot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "GitHub App that reviews pull requests in Amp orbs and publishes check runs.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx watch src/main.ts",
+    "start": "node dist/src/main.js",
+    "test": "node --import tsx --test test/**/*.test.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@ampcode/sdk": "0.1.0-20260729105907-g72d5ca3",
+    "octokit": "5.0.5",
+    "pg": "8.23.0",
+    "pino": "10.3.1",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "26.2.0",
+    "@types/pg": "8.23.1",
+    "tsx": "4.23.12",
+    "typescript": "7.0.2"
+  }
+}
