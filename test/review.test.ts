@@ -4,7 +4,7 @@ import { buildReviewPrompt, checkConclusion, parseReviewResult } from "../src/re
 import type { ReviewJob } from "../src/types.js"
 
 describe("buildReviewPrompt", () => {
-  it("loads the review skills while preserving the trusted diff and output contract", () => {
+  it("embeds the review skills while preserving the trusted diff and output contract", () => {
     const job: ReviewJob = {
       id: "job-1",
       sourceDeliveryId: "delivery-1",
@@ -24,7 +24,11 @@ describe("buildReviewPrompt", () => {
 
     const prompt = buildReviewPrompt(job)
 
-    assert.match(prompt, /load these global skills: general-code-reviewing, adversarial-code-reviewing, and simplicity-review/)
+    assert.match(prompt, /# General Code Reviewing/)
+    assert.match(prompt, /# Adversarial Code Reviewing/)
+    assert.match(prompt, /# Simplicity Review/)
+    assert.match(prompt, /Do not use the skill tool; everything needed is embedded here/)
+    assert.doesNotMatch(prompt, /load these global skills/)
     assert.match(prompt, /Review only changes in base-sha\.\.\.head-sha/)
     assert.match(prompt, /Do not modify any files/)
     assert.match(prompt, /Return only JSON matching this exact shape/)
