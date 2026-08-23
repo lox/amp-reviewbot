@@ -67,6 +67,10 @@ Return only JSON matching this exact shape, with at most 20 findings:
 }`
 }
 
+export function reviewThreadTitle(job: ReviewJob): string {
+  return `Review ${job.repositoryFullName}#${job.pullNumber}`
+}
+
 export function parseReviewResult(text: string): ReviewResult {
   const trimmed = text.trim()
   const fenced = /^```(?:json)?\s*([\s\S]*?)\s*```$/i.exec(trimmed)

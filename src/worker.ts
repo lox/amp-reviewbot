@@ -1,10 +1,15 @@
+import { execFile } from "node:child_process"
+import { resolve } from "node:path"
+import { promisify } from "node:util"
 import { execute } from "@ampcode/sdk"
 import type { Logger } from "pino"
 import type { Config } from "./config.js"
 import { Database } from "./database.js"
 import { GitHubClient } from "./github.js"
-import { buildReviewPrompt, parseReviewResult } from "./review.js"
+import { buildReviewPrompt, parseReviewResult, reviewThreadTitle } from "./review.js"
 import type { ReviewJob } from "./types.js"
+
+const execFileAsync = promisify(execFile)
 
 export class ReviewWorkers {
   private stopping = false
@@ -145,6 +150,17 @@ export class ReviewWorkers {
       }
       if (!cancelled) await this.database.finish(job.id, "failed", reason)
     } finally {
+      if (job.ampThreadId) {
+        try {
+          await execFileAsync(
+            resolve("node_modules", ".bin", "amp"),
+            ["threads", "rename", job.ampThreadId, reviewThreadTitle(job)],
+            { timeout: 30_000 },
+          )
+        } catch (error) {
+          log.warn({ err: error, threadId: job.ampThreadId }, "failed to rename Amp review thread")
+        }
+      }
       clearTimeout(timeout)
       clearInterval(cancellationPoll)
       this.active.delete(controller)
