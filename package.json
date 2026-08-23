@@ -15,7 +15,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@ampcode/sdk": "0.1.0-20260729105907-g72d5ca3",
+    "@ampcode/sdk": "0.1.0-20260823161614-g3631dc6",
     "octokit": "5.0.5",
     "pg": "8.23.0",
     "pino": "10.3.1",
