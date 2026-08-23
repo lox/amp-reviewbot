@@ -33,7 +33,7 @@ export class GitHubClient {
     const response = await octokit.rest.checks.create({
       owner,
       repo,
-      name: "Code review",
+      name: "Amp Review",
       head_sha: job.headSha,
       status: "queued",
       external_id: job.id,
