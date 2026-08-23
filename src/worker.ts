@@ -19,6 +19,7 @@ type ExecuteAmp = typeof execute
 
 type ExecuteReviewOptions = {
   prompt: string
+  title: string
   project: string
   visibility: Config["ampThreadVisibility"]
   signal: AbortSignal
@@ -31,6 +32,7 @@ type ExecuteReviewOptions = {
 
 export async function executeReviewWithRetries({
   prompt,
+  title,
   project,
   visibility,
   signal,
@@ -51,7 +53,9 @@ export async function executeReviewWithRetries({
         signal,
         options: {
           executor: "orb",
-          ...(continuing ? { continue: threadId } : { project, visibility, labels: ["reviewbot"] }),
+          ...(continuing
+            ? { continue: threadId }
+            : { project, title, visibility, labels: ["reviewbot"] }),
           mode: "medium",
           noArchiveAfterExecute: true,
         },
@@ -215,6 +219,7 @@ export class ReviewWorkers {
 
       const finalText = await executeReviewWithRetries({
         prompt: buildReviewPrompt(job),
+        title: reviewThreadTitle(job),
         signal: controller.signal,
         project: job.ampProject,
         visibility: this.config.ampThreadVisibility,
@@ -284,15 +289,6 @@ export class ReviewWorkers {
       if (!cancelled) await this.database.finish(job.id, "failed", reason)
     } finally {
       if (job.ampThreadId) {
-        try {
-          await execFileAsync(
-            resolve("node_modules", ".bin", "amp"),
-            ["threads", "rename", job.ampThreadId, reviewThreadTitle(job)],
-            { timeout: 30_000 },
-          )
-        } catch (error) {
-          log.warn({ err: error, threadId: job.ampThreadId }, "failed to rename Amp review thread")
-        }
         try {
           await execFileAsync(
             resolve("node_modules", ".bin", "amp"),

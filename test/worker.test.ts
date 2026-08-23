@@ -8,6 +8,14 @@ const validResult = JSON.stringify({ summary: "Review complete", findings: [] })
 const threadId = "T-00000000-0000-0000-0000-000000000001"
 
 describe("executeReviewWithRetries", () => {
+  it("sets the title when creating the review thread", async () => {
+    const fake = fakeExecute([[systemMessage(), successMessage(validResult)]])
+
+    await run(fake.execute)
+
+    assert.equal(fake.calls[0]?.options?.title, "Review lox/example#42")
+  })
+
   it("uses a valid final assistant response when the result stream fails", async () => {
     const fake = fakeExecute([
       [systemMessage(), assistantMessage(validResult), errorMessage("OpenAI WebSocket closed: 1006")],
@@ -34,6 +42,7 @@ describe("executeReviewWithRetries", () => {
     assert.equal(retries, 1)
     assert.equal(fake.calls.length, 2)
     assert.equal(fake.calls[1]?.options?.continue, threadId)
+    assert.equal(fake.calls[1]?.options?.title, undefined)
     assert.match(String(fake.calls[1]?.prompt), /return only the final review JSON/i)
   })
 
@@ -62,6 +71,7 @@ describe("executeReviewWithRetries", () => {
       () =>
         executeReviewWithRetries({
           prompt: "Review this pull request",
+          title: "Review lox/example#42",
           project: "lox/example",
           visibility: "private",
           signal: new AbortController().signal,
@@ -96,6 +106,7 @@ async function run(
 ): Promise<string> {
   return executeReviewWithRetries({
     prompt: "Review this pull request",
+    title: "Review lox/example#42",
     project: "lox/example",
     visibility: "private",
     signal: new AbortController().signal,
