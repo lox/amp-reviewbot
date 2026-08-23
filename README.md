@@ -109,6 +109,8 @@ Deploy:
 fly deploy
 ```
 
+Pushes to `main` deploy automatically after typechecking, tests, and the build pass. Configure an app-scoped Fly deploy token as the repository Actions secret `FLY_API_TOKEN` to enable the workflow.
+
 Deployment changes external state; review the Fly application, region, database, and secret configuration before running these commands.
 
 ## Repository preparation and security
