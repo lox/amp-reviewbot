@@ -93,7 +93,11 @@ export function checkConclusion(
   failOn: Severity,
 ): "success" | "neutral" | "failure" {
   if (result.findings.length === 0) return "success"
-  return result.findings.some((finding) => severityRank[finding.severity] >= severityRank[failOn])
+  return result.findings.some((finding) => isBlockingSeverity(finding.severity, failOn))
     ? "failure"
     : "neutral"
+}
+
+export function isBlockingSeverity(severity: Severity, failOn: Severity): boolean {
+  return severityRank[severity] >= severityRank[failOn]
 }

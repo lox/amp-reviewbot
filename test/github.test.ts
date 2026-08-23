@@ -41,10 +41,88 @@ describe("check details link", () => {
 })
 
 describe("checkTitle", () => {
-  it("describes clean, advisory, and blocking results", () => {
-    assert.equal(checkTitle(0, "success"), "No issues found")
-    assert.equal(checkTitle(1, "neutral"), "1 advisory issue")
-    assert.equal(checkTitle(2, "failure"), "2 blocking issues")
+  it("describes clean, advisory, blocking, and mixed results", () => {
+    assert.equal(checkTitle(0, 0), "No issues found")
+    assert.equal(checkTitle(0, 1), "1 advisory issue")
+    assert.equal(checkTitle(2, 0), "2 blocking issues")
+    assert.equal(checkTitle(1, 2), "1 blocking issue, 2 advisory issues")
+  })
+})
+
+describe("completed check output", () => {
+  it("separates blocking and advisory findings and uses Markdown only in check text", async () => {
+    const { client, updates } = githubClient()
+
+    await client.completeCheck(
+      job,
+      job.checkRunId!,
+      {
+        summary: "The review found migration and documentation risks.",
+        findings: [
+          {
+            severity: "high",
+            title: "Unsafe rollback",
+            message: "The old application cannot read the migrated schema.",
+            suggestion: "Keep the legacy column during the compatibility window.",
+            path: "src/database.ts",
+            startLine: 101,
+          },
+          {
+            severity: "medium",
+            title: "Missing permission",
+            message: "Push events cannot be enabled with these permissions.",
+            suggestion: "Add Contents read permission.",
+            path: "README.md",
+            startLine: 23,
+          },
+        ],
+      },
+      new Map([
+        ["src/database.ts", new Set([101])],
+        ["README.md", new Set([23])],
+      ]),
+    )
+
+    const update = updates[0]!
+    const output = update.output as {
+      title: string
+      summary: string
+      text: string
+      annotations: { message: string }[]
+    }
+    assert.equal(output.title, "1 blocking issue, 1 advisory issue")
+    assert.equal(output.summary, "The review found migration and documentation risks.")
+    assert.match(output.text, /\*\*Suggested fix:\*\*/)
+    assert.match(output.text, /`src\/database\.ts:101`/)
+    assert.doesNotMatch(output.annotations[0]!.message, /\*\*/)
+    assert.match(output.annotations[0]!.message, /Suggested fix: Keep the legacy column/)
+  })
+
+  it("does not summarize findings omitted from GitHub annotations", async () => {
+    const { client, updates } = githubClient()
+
+    await client.completeCheck(
+      job,
+      job.checkRunId!,
+      {
+        summary: "A legacy file contains a blocking issue.",
+        findings: [
+          {
+            severity: "high",
+            title: "Legacy issue",
+            message: "This line was not changed by the pull request.",
+            suggestion: "Fix the legacy implementation separately.",
+            path: "src/legacy.ts",
+            startLine: 10,
+          },
+        ],
+      },
+      new Map([["src/legacy.ts", new Set([11])]]),
+    )
+
+    const output = updates[0]!.output as { title: string; summary: string }
+    assert.equal(output.title, "No issues found")
+    assert.equal(output.summary, "_1 finding(s) omitted because they did not reference a changed line._")
   })
 })
 

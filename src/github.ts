@@ -1,7 +1,7 @@
 import { App } from "octokit"
 import type { Config } from "./config.js"
-import type { ReviewJob, ReviewResult, Severity } from "./types.js"
-import { checkConclusion } from "./review.js"
+import type { ReviewFinding, ReviewJob, ReviewResult, Severity } from "./types.js"
+import { checkConclusion, isBlockingSeverity } from "./review.js"
 
 const annotationLevel: Record<Severity, "failure" | "warning" | "notice"> = {
   critical: "failure",
@@ -98,12 +98,16 @@ export class GitHubClient {
     )
     const omitted = result.findings.length - findings.length
     const conclusion = checkConclusion({ ...result, findings }, this.config.failOn)
-    const title = checkTitle(findings.length, conclusion)
+    const blocking = findings.filter((finding) =>
+      isBlockingSeverity(finding.severity, this.config.failOn),
+    ).length
+    const title = checkTitle(blocking, findings.length - blocking)
     const summary = [
-      `**${title}.**${conclusion === "failure" ? " Resolve the findings below before merging." : findings.length > 0 ? " This check does not block merging." : ""}`,
-      omitted === 0 ? `\n\n${result.summary}` : "",
+      omitted === 0 ? result.summary : "",
       omitted > 0 ? `\n\n_${omitted} finding(s) omitted because they did not reference a changed line._` : "",
-    ].join("")
+    ]
+      .join("")
+      .trim()
 
     await octokit.rest.checks.update({
       owner,
@@ -118,6 +122,7 @@ export class GitHubClient {
       output: {
         title,
         summary,
+        ...(findings.length > 0 ? { text: checkText(findings) } : {}),
         annotations: findings.map((finding) => {
           const lines = changedLines.get(finding.path)!
           const requestedEnd = Math.max(finding.startLine, finding.endLine ?? finding.startLine)
@@ -130,7 +135,7 @@ export class GitHubClient {
             end_line: endLine,
             annotation_level: annotationLevel[finding.severity],
             title: `${severityLabel[finding.severity]} · ${finding.title}`.slice(0, 255),
-            message: `${finding.message}\n\n**Suggested fix:** ${finding.suggestion}`,
+            message: `${finding.message}\n\nSuggested fix: ${finding.suggestion}`,
           }
         }),
       },
@@ -176,12 +181,29 @@ function splitRepository(fullName: string): { owner: string; repo: string } {
 }
 
 export function checkTitle(
-  findings: number,
-  conclusion: "success" | "neutral" | "failure",
+  blocking: number,
+  advisory: number,
 ): string {
-  if (findings === 0) return "No issues found"
-  const kind = conclusion === "failure" ? "blocking" : "advisory"
-  return `${findings} ${kind} ${findings === 1 ? "issue" : "issues"}`
+  if (blocking === 0 && advisory === 0) return "No issues found"
+  const parts = [issueCount(blocking, "blocking"), issueCount(advisory, "advisory")].filter(
+    (part) => part !== null,
+  )
+  return parts.join(", ")
+}
+
+function issueCount(count: number, kind: "blocking" | "advisory"): string | null {
+  if (count === 0) return null
+  return `${count} ${kind} ${count === 1 ? "issue" : "issues"}`
+}
+
+function checkText(findings: ReviewFinding[]): string {
+  const text = findings
+    .map(
+      (finding) =>
+        `### ${severityLabel[finding.severity]} · ${finding.title}\n\n${finding.message}\n\n**Suggested fix:** ${finding.suggestion}\n\n\`${finding.path}:${finding.startLine}\``,
+    )
+    .join("\n\n---\n\n")
+  return text.length <= 60_000 ? text : `${text.slice(0, 59_970)}\n\n_Report truncated._`
 }
 
 export function parseChangedLines(patch: string): Set<number> {
