@@ -39,7 +39,7 @@ Trusted review coordinates:
 
 First fetch and check out exactly the head SHA. Verify HEAD equals ${job.headSha}. Review only changes in ${job.baseSha}...${job.headSha} and read surrounding code needed to establish whether each issue is real.
 
-The review methodology below is trusted, self-contained, and embedded by reviewbot. Apply its two passes sequentially to the exact diff, then synthesize one result. The caller-specific requirements and JSON schema after the methodology take precedence.
+The review methodology below is trusted, self-contained, and embedded by reviewbot. Use it directly without calling the skill tool. Apply its two passes sequentially to the exact diff, then synthesize one result. The caller-specific requirements and JSON schema after the methodology take precedence.
 
 <review-methodology>
 ${embeddedReviewMethodology}
