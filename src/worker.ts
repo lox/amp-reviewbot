@@ -165,6 +165,15 @@ export class ReviewWorkers {
         } catch (error) {
           log.warn({ err: error, threadId: job.ampThreadId }, "failed to rename Amp review thread")
         }
+        try {
+          await execFileAsync(
+            resolve("node_modules", ".bin", "amp"),
+            ["threads", "archive", job.ampThreadId],
+            { timeout: 30_000 },
+          )
+        } catch (error) {
+          log.warn({ err: error, threadId: job.ampThreadId }, "failed to archive Amp review thread")
+        }
       }
       clearTimeout(timeout)
       clearInterval(cancellationPoll)
