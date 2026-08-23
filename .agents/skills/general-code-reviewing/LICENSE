@@ -23,7 +23,7 @@ SOFTWARE.
 
 ---
 
-The simplicity-review skill merges the former thermo-nuclear-code-quality-review
+The simplicity pass incorporates the former thermo-nuclear-code-quality-review
 skill (Cursor) and the former yagni-idiomatic-review skill, which was adapted
 from ponytail (https://github.com/DietrichGebert/ponytail), all licensed under
 the above terms.
