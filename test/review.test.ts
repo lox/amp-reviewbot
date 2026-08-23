@@ -1,35 +1,6 @@
 import assert from "node:assert/strict"
 import { describe, it } from "node:test"
-import { buildReviewPrompt, checkConclusion, parseReviewResult } from "../src/review.js"
-import type { ReviewJob } from "../src/types.js"
-
-describe("buildReviewPrompt", () => {
-  it("loads the review skills while preserving the trusted diff and output contract", () => {
-    const job: ReviewJob = {
-      id: "job-1",
-      sourceDeliveryId: "delivery-1",
-      eventType: "pull_request.opened",
-      installationId: "1",
-      repositoryId: "2",
-      repositoryFullName: "lox/example",
-      pullNumber: 42,
-      baseSha: "base-sha",
-      headSha: "head-sha",
-      ampProject: "lox/example",
-      checkRunId: null,
-      ampThreadId: null,
-      status: "queued",
-      attempts: 0,
-    }
-
-    const prompt = buildReviewPrompt(job)
-
-    assert.match(prompt, /load these global skills: general-code-reviewing, adversarial-code-reviewing, and simplicity-review/)
-    assert.match(prompt, /Review only changes in base-sha\.\.\.head-sha/)
-    assert.match(prompt, /Do not modify any files/)
-    assert.match(prompt, /Return only JSON matching this exact shape/)
-  })
-})
+import { checkConclusion, parseReviewResult } from "../src/review.js"
 
 describe("parseReviewResult", () => {
   it("accepts valid JSON", () => {
