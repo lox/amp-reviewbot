@@ -161,6 +161,9 @@ export class GitHubClient {
       status: "completed",
       completed_at: new Date().toISOString(),
       conclusion,
+      ...(job.ampThreadId
+        ? { details_url: `https://ampcode.com/threads/${job.ampThreadId}` }
+        : {}),
       output: { title, summary: message.slice(0, 60_000) },
     })
   }
