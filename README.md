@@ -17,6 +17,8 @@ GitHub pull_request webhook
 
 The service keeps the GitHub App private key. Review orbs receive repository access from their Amp project, but never receive the GitHub App credential.
 
+Reviewbot vendors [`general-code-reviewing`](https://github.com/lox/agent-skills/tree/9a0bf70c90f38e5f776981ec26105c2b5b1e28a6/general-code-reviewing) with its linked `adversarial-code-reviewing` and `simplicity-review` lenses under `.agents/skills`. The service embeds their full contents into every review prompt, so target-repository orbs do not depend on globally installed skills.
+
 ## Requirements
 
 - Node.js 22+
