@@ -2,7 +2,11 @@ import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 import type { ExecuteOptions, StreamMessage } from "@ampcode/sdk"
 import pino from "pino"
-import { executeReviewWithRetries, isTransientAmpError } from "../src/worker.js"
+import {
+  executeReviewWithRetries,
+  isAmpCancellationError,
+  isTransientAmpError,
+} from "../src/worker.js"
 
 const validResult = JSON.stringify({ summary: "Review complete", findings: [] })
 const threadId = "T-00000000-0000-0000-0000-000000000001"
@@ -55,6 +59,36 @@ describe("executeReviewWithRetries", () => {
     assert.equal(fake.calls.length, 1)
   })
 
+  it("does not retry a review cancelled from the Amp thread", async () => {
+    const fake = fakeExecute([[systemMessage(), errorMessage("User canceled")]])
+
+    await assert.rejects(() => run(fake.execute), /User canceled/)
+    assert.equal(fake.calls.length, 1)
+  })
+
+  it("rejects a successful result delivered after cancellation", async () => {
+    const controller = new AbortController()
+    const fake = fakeExecute([[systemMessage(), successMessage(validResult)]], () => {
+      controller.abort(new Error("Review timed out"))
+    })
+
+    await assert.rejects(
+      () =>
+        executeReviewWithRetries({
+          prompt: "Review this pull request",
+          project: "lox/example",
+          visibility: "private",
+          signal: controller.signal,
+          logger: pino({ level: "silent" }),
+          onThread: async () => {},
+          beforeRetry: async () => {},
+          executeAmp: fake.execute,
+          retryDelaysMs: [0, 0],
+        }),
+      /Review timed out/,
+    )
+  })
+
   it("does not treat thread persistence failures as Amp transport failures", async () => {
     const fake = fakeExecute([[systemMessage()]])
 
@@ -90,6 +124,14 @@ describe("isTransientAmpError", () => {
   })
 })
 
+describe("isAmpCancellationError", () => {
+  it("recognizes user cancellation without matching unrelated failures", () => {
+    assert.equal(isAmpCancellationError(new Error("User canceled")), true)
+    assert.equal(isAmpCancellationError(new Error("Cancelled by the user")), true)
+    assert.equal(isAmpCancellationError(new Error("Review timed out")), false)
+  })
+})
+
 async function run(
   executeAmp: ReturnType<typeof fakeExecute>["execute"],
   beforeRetry: () => void = () => {},
@@ -107,7 +149,7 @@ async function run(
   })
 }
 
-function fakeExecute(attempts: StreamMessage[][]): {
+function fakeExecute(attempts: StreamMessage[][], beforeResult?: () => void): {
   execute: (options: ExecuteOptions) => AsyncIterable<StreamMessage>
   calls: ExecuteOptions[]
 } {
@@ -119,7 +161,10 @@ function fakeExecute(attempts: StreamMessage[][]): {
       calls.push(options)
       if (!messages) throw new Error("Unexpected Amp execution")
       return (async function* () {
-        yield* messages
+        for (const message of messages) {
+          if (message.type === "result") beforeResult?.()
+          yield message
+        }
       })()
     },
   }
