@@ -242,17 +242,22 @@ export class ReviewWorkers {
     let job = initialJob
     let checkRunId = job.checkRunId
     const controller = new AbortController()
+    const log = logger.child({ jobId: job.id, repository: job.repositoryFullName, pr: job.pullNumber })
     this.active.add(controller)
     const timeout = setTimeout(
       () => controller.abort(new Error("Review timed out")),
       this.config.reviewTimeoutMs,
     )
     const cancellationPoll = setInterval(() => {
-      void this.database.status(job.id).then((status) => {
-        if (status === "cancelled") controller.abort(new Error("Review superseded"))
-      })
+      void this.database
+        .status(job.id)
+        .then((status) => {
+          if (status === "cancelled") controller.abort(new Error("Review superseded"))
+        })
+        .catch((error: unknown) => {
+          log.warn({ err: error }, "failed to poll review cancellation")
+        })
     }, 2_000)
-    const log = logger.child({ jobId: job.id, repository: job.repositoryFullName, pr: job.pullNumber })
 
     try {
       if (!checkRunId) {

@@ -6,7 +6,7 @@ primary_region = "syd"
 
 [env]
   PORT = "8080"
-  WORKER_CONCURRENCY = "2"
+  WORKER_CONCURRENCY = "1"
   REVIEW_TIMEOUT_MINUTES = "30"
   FAIL_ON = "high"
   AMP_THREAD_VISIBILITY = "private"

@@ -85,6 +85,7 @@ describe("executeReviewWithRetries", () => {
       () =>
         executeReviewWithRetries({
           prompt: "Review this pull request",
+          title: "Review lox/example#42",
           project: "lox/example",
           visibility: "private",
           signal: controller.signal,
