@@ -2,6 +2,12 @@ import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 import { loadConfig, resolveAmpProject } from "../src/config.js"
 
+describe("worker concurrency", () => {
+  it("defaults to one review at a time", () => {
+    assert.equal(testConfig().workerConcurrency, 1)
+  })
+})
+
 describe("Amp project resolution", () => {
   it("defaults to the GitHub owner/repository", () => {
     const config = testConfig()

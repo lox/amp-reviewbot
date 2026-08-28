@@ -64,7 +64,7 @@ Copy `.env.example` and provide:
 | `AMP_API_KEY` | Amp access token used by the SDK |
 | `AMP_PROJECTS` | Optional repository-to-project JSON map |
 | `AMP_THREAD_VISIBILITY` | `private` (default) or `workspace` |
-| `WORKER_CONCURRENCY` | Concurrent reviews, default `2` |
+| `WORKER_CONCURRENCY` | Concurrent reviews, default `1` |
 | `REVIEW_TIMEOUT_MINUTES` | Per-review timeout, default `30` |
 | `FAIL_ON` | Lowest failing severity, default `high` |
 
