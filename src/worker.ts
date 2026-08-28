@@ -14,6 +14,7 @@ const execFileAsync = promisify(execFile)
 const ampRetryDelaysMs = [5_000, 20_000]
 const staleRecoveryIntervalMs = 60_000
 const maxJobAttempts = 3
+export const reviewMode = "medium" as const
 const continuationPrompt =
   "Complete the review if necessary, then return only the final review JSON in the required schema."
 
@@ -28,6 +29,7 @@ type ExecuteReviewOptions = {
   logger: Logger
   onThread: (threadId: string) => Promise<void>
   beforeRetry: () => Promise<void>
+  onMessage?: (message: StreamMessage) => void
   executeAmp?: ExecuteAmp
   retryDelaysMs?: number[]
 }
@@ -41,6 +43,7 @@ export async function executeReviewWithRetries({
   logger,
   onThread,
   beforeRetry,
+  onMessage,
   executeAmp = execute,
   retryDelaysMs = ampRetryDelaysMs,
 }: ExecuteReviewOptions): Promise<string> {
@@ -58,10 +61,11 @@ export async function executeReviewWithRetries({
           ...(continuing
             ? { continue: threadId }
             : { project, title, visibility, labels: ["reviewbot"] }),
-          mode: "medium",
+          mode: reviewMode,
           noArchiveAfterExecute: true,
         },
       })) {
+        onMessage?.(message)
         if (message.type === "system") {
           if (threadId && message.session_id !== threadId) {
             throw new Error(`Amp continued as unexpected thread ${message.session_id}`)

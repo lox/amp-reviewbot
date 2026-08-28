@@ -1,6 +1,9 @@
 node_modules/
 dist/
 .amp/portals/*
+.eval-cache/
+.eval-runs/
+eval-output/
 .env
 .env.*
 !.env.example

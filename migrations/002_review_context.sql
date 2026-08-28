@@ -1,0 +1,5 @@
+ALTER TABLE review_jobs
+  ADD COLUMN IF NOT EXISTS pull_request_title TEXT,
+  ADD COLUMN IF NOT EXISTS pull_request_body TEXT,
+  ADD COLUMN IF NOT EXISTS base_ref TEXT,
+  ADD COLUMN IF NOT EXISTS head_ref TEXT;

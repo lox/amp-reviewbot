@@ -15,6 +15,13 @@ export type ReviewResult = {
   findings: ReviewFinding[]
 }
 
+export type PullRequestContext = {
+  title: string
+  body: string | null
+  baseRef: string
+  headRef: string
+}
+
 export type JobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled"
 
 export type ReviewJob = {
@@ -28,6 +35,7 @@ export type ReviewJob = {
   baseSha: string
   headSha: string
   ampProject: string
+  pullRequestContext: PullRequestContext | null
   checkRunId: string | null
   ampThreadId: string | null
   status: JobStatus
