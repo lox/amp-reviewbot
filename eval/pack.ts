@@ -89,6 +89,13 @@ const packIssueSchema = z
         message: "duplication and non-idiomatic Go are maintainability subtypes",
       })
     }
+    if (issue.subtype === "non-idiomatic-go" && issue.severity !== "low") {
+      context.addIssue({
+        code: "custom",
+        path: ["severity"],
+        message: "a non-idiomatic Go advisory must use low severity",
+      })
+    }
   })
 
 export const exampleSchema = z

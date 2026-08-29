@@ -107,6 +107,38 @@ describe("eval example packs", () => {
     assert.throws(() => exampleSchema.parse(input), /must declare duplication or non-idiomatic Go/)
   })
 
+  it("keeps non-idiomatic Go advisories low severity", async () => {
+    const input = JSON.parse(await readFile("eval/example.json", "utf8")) as {
+      versions: Array<{
+        knownIssues: Array<{
+          severity: string
+          nature?: string
+          category?: string
+          subtype?: string
+        }>
+      }>
+    }
+    const issue = input.versions[1]!.knownIssues[0]!
+    issue.severity = "medium"
+    issue.nature = "maintainability-advisory"
+    issue.category = "maintainability"
+    issue.subtype = "non-idiomatic-go"
+    assert.throws(() => exampleSchema.parse(input), /must use low severity/)
+
+    const invalid = evalCase("non-idiomatic", {
+      issues: [
+        {
+          ...blocking.issues[0]!,
+          severity: "medium",
+          nature: "maintainability-advisory",
+          category: "maintainability",
+          subtype: "non-idiomatic-go",
+        },
+      ],
+    })
+    assert.throws(() => evalCaseSchema.parse(invalid), /must use low severity/)
+  })
+
   it("rejects duplicate version commits", async () => {
     const input = JSON.parse(await readFile("eval/example.json", "utf8")) as {
       versions: Array<{ commit: string }>
