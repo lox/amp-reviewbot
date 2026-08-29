@@ -4,31 +4,34 @@ import { mkdir, open, readFile, unlink } from "node:fs/promises"
 import { dirname, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
-import pino from "pino"
 import { z } from "zod"
 import { buildReviewPrompt, finalizeReview, parseReviewResult, reviewThreadTitle } from "../src/review.js"
 import type { ReviewJob } from "../src/types.js"
-import { executeReviewWithRetries, reviewMode } from "../src/worker.js"
-import { judgeFindings } from "./judge.js"
+import { reviewMode } from "../src/worker.js"
+import { judgeIssue } from "./judge.js"
+import { checkPack, describePack, loadPack } from "./pack.js"
+import { formatReport } from "./report.js"
+import { runBlindReview } from "./reviewer.js"
 import {
   corpusContentHash,
-  corpusSchema,
   evalRunSchema,
+  expectedKind,
   type EvalCase,
   type EvalRun,
   type EvalSample,
 } from "./schema.js"
-import { formatReport } from "./report.js"
 import { scoreRun, type EvalScore } from "./score.js"
 
 const execFileAsync = promisify(execFile)
-const logger = pino({ level: process.env.LOG_LEVEL ?? "silent" })
 const failOn = "high" as const
 
 type RunOptions = {
-  corpusPath: string
+  packPath: string
+  project: string
+  reviewerApiKey: string
   outputPath: string
-  cacheDirectory: string
+  judgeCache: string
+  sourceCache: string
   samplesPerCase: number
   concurrency: number
   timeoutMs: number
@@ -37,13 +40,9 @@ type RunOptions = {
 async function main(): Promise<void> {
   const command = process.argv[2]
   if (command === "check" || command === "validate") {
-    const corpusPath = requiredInput(process.argv.slice(3), "--corpus")
-    const input: unknown = JSON.parse(await readFile(corpusPath, "utf8"))
-    const corpus = corpusSchema.parse(input)
-    const examples = new Set(corpus.cases.map((evalCase) => evalCase.seedId)).size
-    console.log(
-      `Example file looks good: ${corpus.cases.length} code versions across ${examples} ${examples === 1 ? "example" : "examples"}.`,
-    )
+    const packPath = requiredInput(process.argv.slice(3), "--corpus")
+    const { summary } = await checkPack(packPath)
+    console.log(`Example pack format looks good: ${describePack(summary)}.`)
     return
   }
   if (command === "run") {
@@ -75,13 +74,14 @@ async function main(): Promise<void> {
 }
 
 async function runEvaluation(options: RunOptions): Promise<{ run: EvalRun; score: EvalScore }> {
-  const input: unknown = JSON.parse(await readFile(options.corpusPath, "utf8"))
-  const corpus = corpusSchema.parse(input)
+  console.log("Checking source commits and changed lines...")
+  const { corpus, sourcePreparation } = await loadPack(options.packPath, options.sourceCache)
   const startedAt = new Date().toISOString()
-  const reviewer = await reviewerProvenance()
+  const reviewer = await reviewerProvenance(options.project)
   const tasks = corpus.cases.flatMap((evalCase) =>
     Array.from({ length: options.samplesPerCase }, (_, index) => ({
       evalCase,
+      sourcePreparation: sourcePreparation.get(evalCase.id),
       sample: index + 1,
     })),
   )
@@ -94,18 +94,22 @@ async function runEvaluation(options: RunOptions): Promise<{ run: EvalRun; score
   let finished = 0
   console.log(`Running ${tasks.length} reviews, up to ${options.concurrency} at a time...`)
 
-  const samples = await mapConcurrent(tasks, options.concurrency, async ({ evalCase, sample }) => {
-    const result = await runSample(evalCase, sample, options, reviewer.sdkVersion)
-    finished += 1
-    const outcome = result.status === "completed" ? "completed" : "did not complete"
-    console.log(
-      `[${finished}/${tasks.length}] Example ${exampleNumbers.get(evalCase.seedId)}, ${kindLabel(evalCase)}, run ${sample} of ${options.samplesPerCase}: ${outcome} (${formatDuration(result.durationMs)})`,
-    )
-    return result
-  })
+  const samples = await mapConcurrent(
+    tasks,
+    options.concurrency,
+    async ({ evalCase, sourcePreparation: preparation, sample }) => {
+      const result = await runSample(evalCase, preparation, sample, options, reviewer.sdkVersion)
+      finished += 1
+      const outcome = result.status === "completed" ? "completed" : "did not complete"
+      console.log(
+        `[${finished}/${tasks.length}] Example ${exampleNumbers.get(evalCase.seedId)}, ${kindLabel(evalCase)}, run ${sample} of ${options.samplesPerCase}: ${outcome} (${formatDuration(result.durationMs)})`,
+      )
+      return result
+    },
+  )
 
   const run = evalRunSchema.parse({
-    schemaVersion: 1,
+    schemaVersion: 2,
     corpusVersion: corpus.version,
     corpusHash: corpusContentHash(corpus),
     startedAt,
@@ -122,6 +126,7 @@ async function runEvaluation(options: RunOptions): Promise<{ run: EvalRun; score
 
 async function runSample(
   evalCase: EvalCase,
+  sourcePreparation: string | undefined,
   sample: number,
   options: RunOptions,
   sdkVersion: string,
@@ -132,49 +137,45 @@ async function runSample(
     () => controller.abort(new Error("Eval review timed out")),
     options.timeoutMs,
   )
-  const models = new Set<string>()
   let threadId: string | null = null
-  const job = evalJob(evalCase, sample)
-  const prompt = buildReviewPrompt(job)
+  let models: string[] = []
+  const job = evalJob(evalCase, sample, options.project)
+  const prompt = buildReviewPrompt(job, sourcePreparation)
   const promptHash = hash(prompt)
 
   try {
-    const rawResult = await executeReviewWithRetries({
+    const review = await runBlindReview({
       prompt,
       title: reviewThreadTitle(job),
-      project: job.ampProject,
-      visibility: "private",
+      project: options.project,
+      timeoutMs: options.timeoutMs,
+      apiKey: options.reviewerApiKey,
       signal: controller.signal,
-      logger: logger.child({ caseId: evalCase.id, sample }),
-      onThread: async (id) => {
-        threadId = id
-      },
-      beforeRetry: async () => {},
-      onMessage: (message) => {
-        if (message.type === "assistant" && typeof message.message.model === "string") {
-          models.add(message.message.model)
-        }
-      },
     })
-    const parsedResult = parseReviewResult(rawResult)
+    threadId = review.threadId
+    models = review.models
+    const parsedResult = parseReviewResult(review.rawResult)
     const finalized = finalizeReview(parsedResult, changedLineMap(evalCase), failOn)
-    let judgement = null
-    let judgementError: string | null = null
+    const judgements = []
+    const judgementErrors = []
 
-    if (evalCase.expected.issue) {
-      try {
-        if (finalized.result.findings.length > 0) {
-          judgement = await judgeFindings(
-            evalCase,
-            finalized.result.findings,
-            options.cacheDirectory,
-            sdkVersion,
-            controller.signal,
+    if (finalized.result.findings.length > 0) {
+      for (const issue of evalCase.expected.issues) {
+        try {
+          judgements.push(
+            await judgeIssue(
+              evalCase.id,
+              issue,
+              finalized.result.findings,
+              options.judgeCache,
+              sdkVersion,
+              controller.signal,
+            ),
           )
+        } catch (error) {
+          controller.signal.throwIfAborted()
+          judgementErrors.push({ issueId: issue.id, error: errorMessage(error) })
         }
-      } catch (error) {
-        controller.signal.throwIfAborted()
-        judgementError = errorMessage(error)
       }
     }
 
@@ -184,16 +185,16 @@ async function runSample(
       expected: evalCase.expected,
       promptHash,
       threadId,
-      models: [...models],
+      models,
       durationMs: Date.now() - startedAt,
       status: "completed",
-      rawResult,
+      rawResult: review.rawResult,
       parsedResult,
       retainedResult: finalized.result,
       omitted: finalized.omitted,
       conclusion: finalized.conclusion,
-      judgement,
-      judgementError,
+      judgements,
+      judgementErrors,
     }
   } catch (error) {
     return {
@@ -202,18 +203,17 @@ async function runSample(
       expected: evalCase.expected,
       promptHash,
       threadId,
-      models: [...models],
+      models,
       durationMs: Date.now() - startedAt,
       status: "error",
       error: errorMessage(error),
     }
   } finally {
     clearTimeout(timeout)
-    if (threadId) await archiveThread(threadId)
   }
 }
 
-function evalJob(evalCase: EvalCase, sample: number): ReviewJob {
+function evalJob(evalCase: EvalCase, sample: number, project: string): ReviewJob {
   return {
     id: `eval-${evalCase.id}-${sample}`,
     sourceDeliveryId: `eval-${evalCase.id}-${sample}`,
@@ -224,7 +224,7 @@ function evalJob(evalCase: EvalCase, sample: number): ReviewJob {
     pullNumber: evalCase.pullNumber,
     baseSha: evalCase.baseSha,
     headSha: evalCase.headSha,
-    ampProject: evalCase.ampProject,
+    ampProject: project,
     pullRequestContext: evalCase.context,
     checkRunId: null,
     ampThreadId: null,
@@ -239,16 +239,26 @@ function changedLineMap(evalCase: EvalCase): Map<string, Set<number>> {
   )
 }
 
-async function reviewerProvenance(): Promise<EvalRun["reviewer"]> {
-  const [{ stdout: gitCommit }, { stdout: status }, sdkPackage, reviewSource, workerSource, methodology] =
-    await Promise.all([
-      execFileAsync("git", ["rev-parse", "HEAD"]),
-      execFileAsync("git", ["status", "--porcelain"]),
-      readFile(resolve("node_modules", "@ampcode", "sdk", "package.json"), "utf8"),
-      readFile(resolve("src", "review.ts"), "utf8"),
-      readFile(resolve("src", "worker.ts"), "utf8"),
-      readFile(resolve(".agents", "skills", "general-code-reviewing", "SKILL.md"), "utf8"),
-    ])
+async function reviewerProvenance(project: string): Promise<EvalRun["reviewer"]> {
+  const [
+    { stdout: gitCommit },
+    { stdout: status },
+    sdkPackage,
+    reviewSource,
+    workerSource,
+    reviewerSource,
+    reviewerChildSource,
+    methodology,
+  ] = await Promise.all([
+    execFileAsync("git", ["rev-parse", "HEAD"]),
+    execFileAsync("git", ["status", "--porcelain"]),
+    readFile(resolve("node_modules", "@ampcode", "sdk", "package.json"), "utf8"),
+    readFile(resolve("src", "review.ts"), "utf8"),
+    readFile(resolve("src", "worker.ts"), "utf8"),
+    readFile(resolve("eval", "reviewer.ts"), "utf8"),
+    readFile(resolve("eval", "reviewer-child.ts"), "utf8"),
+    readFile(resolve(".agents", "skills", "general-code-reviewing", "SKILL.md"), "utf8"),
+  ])
   const sdk: unknown = JSON.parse(sdkPackage)
   const sdkVersion = z.object({ version: z.string() }).parse(sdk).version
   return {
@@ -257,21 +267,12 @@ async function reviewerProvenance(): Promise<EvalRun["reviewer"]> {
     sdkVersion,
     mode: reviewMode,
     failOn,
-    reviewSourceHash: hash(`${reviewSource}\n${workerSource}`),
+    reviewSourceHash: hash(
+      `${reviewSource}\n${workerSource}\n${reviewerSource}\n${reviewerChildSource}`,
+    ),
     methodologyHash: hash(methodology),
-  }
-}
-
-async function archiveThread(threadId: string): Promise<void> {
-  try {
-    await execFileAsync(
-      resolve("node_modules", ".bin", "amp"),
-      ["threads", "archive", threadId],
-      { timeout: 30_000 },
-    )
-  } catch (error) {
-    logger.warn({ err: error, threadId }, "failed to archive eval review thread")
-    console.warn("Warning: an Amp review thread could not be archived.")
+    project,
+    account: "separate-key",
   }
 }
 
@@ -295,15 +296,36 @@ async function mapConcurrent<Input, Output>(
 }
 
 function runOptions(args: string[]): RunOptions {
-  const corpusPath = requiredInput(args, "--corpus")
+  const packPath = requiredInput(args, "--corpus")
+  const project = flag(args, "--project")
+  if (!project) throw new Error("Missing --project (for example, --project agent)")
+  const reviewerApiKey = process.env.AMP_EVAL_REVIEWER_API_KEY
+  if (!process.env.AMP_API_KEY) {
+    throw new Error("AMP_API_KEY must identify the trusted account running the evaluation")
+  }
+  if (!reviewerApiKey) {
+    throw new Error("AMP_EVAL_REVIEWER_API_KEY must identify the separate blind-review account")
+  }
+  if (reviewerApiKey === process.env.AMP_API_KEY) {
+    throw new Error("The trusted account and blind-review account must use different keys")
+  }
+
   const samplesPerCase = positiveInteger(flag(args, "--samples") ?? "3", "--samples", 20)
   const concurrency = positiveInteger(flag(args, "--concurrency") ?? "2", "--concurrency", 10)
-  const timeoutMinutes = positiveInteger(flag(args, "--timeout-minutes") ?? "30", "--timeout-minutes", 120)
+  const timeoutMinutes = positiveInteger(
+    flag(args, "--timeout-minutes") ?? "30",
+    "--timeout-minutes",
+    120,
+  )
   const stamp = new Date().toISOString().replaceAll(/[:.]/g, "-")
+  const cacheRoot = flag(args, "--cache") ?? resolve(".eval-cache")
   return {
-    corpusPath,
+    packPath,
+    project,
+    reviewerApiKey,
     outputPath: flag(args, "--output") ?? resolve(".eval-runs", `${stamp}.json`),
-    cacheDirectory: flag(args, "--cache") ?? resolve(".eval-cache", "judge"),
+    judgeCache: resolve(cacheRoot, "judge"),
+    sourceCache: resolve(cacheRoot, "source"),
     samplesPerCase,
     concurrency,
     timeoutMs: timeoutMinutes * 60_000,
@@ -312,7 +334,7 @@ function runOptions(args: string[]): RunOptions {
 
 function requiredInput(args: string[], oldFlag: string): string {
   const value = args[0] && !args[0].startsWith("--") ? args[0] : flag(args, oldFlag)
-  if (!value) throw new Error("Missing input file")
+  if (!value) throw new Error("Missing example pack path")
   return value
 }
 
@@ -352,8 +374,9 @@ async function createRunArtifact(path: string) {
 }
 
 function kindLabel(evalCase: EvalCase): string {
-  if (evalCase.expected.kind === "control") return "clean change"
-  return evalCase.expected.kind === "advisory" ? "smaller bug" : "serious bug"
+  const kind = expectedKind(evalCase.expected)
+  if (kind === "control") return "clean change"
+  return kind === "advisory" ? "smaller bug" : "serious bug"
 }
 
 function formatDuration(milliseconds: number): string {
@@ -364,11 +387,11 @@ function formatDuration(milliseconds: number): string {
 
 function printHelp(): void {
   console.log(`Usage:
-  npm run eval -- check PATH
-  npm run eval -- run PATH [--samples 3] [--concurrency 2] [--output PATH]
-  npm run eval -- report PATH
+  npm run eval -- check PACK
+  npm run eval -- run PACK --project PROJECT [--samples 3] [--concurrency 2]
+  npm run eval -- report RUN.json
 
-Check an example file, run the reviews, or read a saved report. Full technical evidence stays in the saved run file.`)
+Check an example pack, run blind reviews, or read a saved report. Running reviews requires AMP_API_KEY for the trusted account and AMP_EVAL_REVIEWER_API_KEY for a separate account that can access PROJECT.`)
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {

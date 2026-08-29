@@ -1,20 +1,25 @@
 import assert from "node:assert/strict"
-import { mkdtemp, readFile, rm } from "node:fs/promises"
+import { execFile } from "node:child_process"
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, it } from "node:test"
-import { judgeFindings, resolveMatchingVotes } from "../eval/judge.js"
+import { promisify } from "node:util"
+import { judgeIssue, resolveMatchingVotes } from "../eval/judge.js"
+import { checkPack, exampleSchema, loadPack } from "../eval/pack.js"
 import { formatReport } from "../eval/report.js"
+import { reviewerEnvironment } from "../eval/reviewer.js"
 import {
   corpusContentHash,
-  corpusSchema,
   evalCaseSchema,
   evalRunSchema,
   evalSampleSchema,
   expectedConclusion,
+  type ExpectedResult,
 } from "../eval/schema.js"
 import { scoreRun } from "../eval/score.js"
 
+const execFileAsync = promisify(execFile)
 const lowFinding = {
   severity: "low",
   title: "Minor issue",
@@ -23,125 +28,116 @@ const lowFinding = {
   path: "src/example.ts",
   startLine: 10,
 } as const
-
 const mediumFinding = { ...lowFinding, severity: "medium" as const }
 const highFinding = { ...lowFinding, severity: "high" as const }
-
 const artifactHash = `sha256:${"a".repeat(64)}` as const
-const control = {
-  kind: "control",
-  issue: null,
-  certification: {
-    method: "llm-adjudicated",
-    evidenceArtifactHash: artifactHash,
-  },
-} as const
-const blocking = {
-  kind: "blocking",
-  issue: {
-    id: "known-failure",
-    severity: "high",
-    rootCause: "The retry repeats completed work.",
-    failureBehavior: "A lost response creates a duplicate object.",
-    path: "src/example.ts",
-    changedLine: 10,
-    evidence: ["A focused witness reproduces the duplicate."],
-    verification: "executable",
-    witnessArtifactHash: artifactHash,
-  },
-} as const
+const control: ExpectedResult = { issues: [] }
+const blocking: ExpectedResult = {
+  issues: [
+    {
+      id: "known-failure",
+      severity: "high",
+      rootCause: "The retry repeats completed work.",
+      failureBehavior: "A lost response creates a duplicate object.",
+      path: "src/example.ts",
+      changedLine: 10,
+      verification: "A focused test reproduces the duplicate.",
+    },
+  ],
+}
 
-describe("eval corpus", () => {
-  it("accepts the documented corpus format", async () => {
-    const input: unknown = JSON.parse(await readFile("eval/corpus.example.json", "utf8"))
-    const corpus = corpusSchema.parse(input)
+describe("eval example packs", () => {
+  it("accepts the documented minimal format without requiring a triplet", async () => {
+    const input: unknown = JSON.parse(await readFile("eval/example.json", "utf8"))
+    const example = exampleSchema.parse(input)
+    assert.equal(example.versions.length, 3)
+    assert.equal((await checkPack("eval")).summary.knownIssues, 2)
 
-    assert.equal(corpus.cases.length, 3)
-    assert.equal(
-      expectedConclusion(corpus.cases.find((evalCase) => evalCase.expected.kind === "blocking")!.expected),
-      "failure",
-    )
+    const oneVersion = structuredClone(example)
+    oneVersion.versions.splice(1)
+    assert.equal(exampleSchema.parse(oneVersion).versions.length, 1)
   })
 
-  it("rejects an expected issue outside the archived changed lines", async () => {
-    const input = JSON.parse(await readFile("eval/corpus.example.json", "utf8")) as {
-      cases: Array<{ expected: { issue: { changedLine: number } | null } }>
+  it("rejects duplicate version commits", async () => {
+    const input = JSON.parse(await readFile("eval/example.json", "utf8")) as {
+      versions: Array<{ commit: string }>
     }
-    const mutation = input.cases.find((evalCase) => evalCase.expected.issue)!
-    mutation.expected.issue!.changedLine = 999
-
-    assert.throws(() => corpusSchema.parse(input), /archived changed line/)
+    input.versions[1]!.commit = input.versions[0]!.commit
+    assert.throws(() => exampleSchema.parse(input), /different commit/)
   })
 
-  it("rejects an incomplete seed triplet", async () => {
-    const input = JSON.parse(await readFile("eval/corpus.example.json", "utf8")) as {
-      cases: unknown[]
-    }
-    input.cases.pop()
-
-    assert.throws(() => corpusSchema.parse(input), /one control, one advisory, and one blocking/)
+  it("rejects a known issue outside the exact changed lines", () => {
+    const invalid = evalCase("blocking", blocking)
+    invalid.expected.issues[0]!.changedLine = 999
+    assert.throws(() => evalCaseSchema.parse(invalid), /line changed by the exact review diff/)
   })
 
-  it("requires a witness hash for executable labels", async () => {
-    const input = JSON.parse(await readFile("eval/corpus.example.json", "utf8")) as {
-      cases: Array<{
-        expected: { issue: { verification: string; witnessArtifactHash?: string } | null }
-      }>
+  it("derives changed lines and a target-only source setup from a bundle", async () => {
+    const fixture = await createPackFixture()
+    try {
+      const loaded = await loadPack(fixture.pack, fixture.cache, () => fixture.origin)
+      assert.equal(loaded.corpus.cases.length, 2)
+      assert.deepEqual(
+        loaded.corpus.cases.map((item) => item.changedLines),
+        [{ "code.txt": [2] }, { "code.txt": [2] }],
+      )
+      assert.equal(expectedConclusion(loaded.corpus.cases[1]!.expected), "failure")
+      assert.equal(loaded.sourcePreparation.has("local-example/clean-change"), false)
+      const preparation = loaded.sourcePreparation.get("local-example/serious-bug")!
+      assert.match(preparation, /source history/)
+      assert.match(preparation, /base64 --decode/)
+      assert.doesNotMatch(preparation, /known-bug|Loses the useful result|witnesses\//)
+      const encodedBundle = /printf '%s' '([^']+)' \| base64 --decode/.exec(preparation)?.[1]
+      assert.ok(encodedBundle)
+      const generatedBundle = join(fixture.root, "generated.bundle")
+      await writeFile(generatedBundle, Buffer.from(encodedBundle, "base64"))
+      const heads = (await git(fixture.origin, ["bundle", "list-heads", generatedBundle]))
+        .trim()
+        .split("\n")
+      assert.equal(heads.length, 1)
+      assert.match(heads[0]!, new RegExp(`^${loaded.corpus.cases[1]!.headSha} `))
+
+      const reloaded = await loadPack(fixture.pack, fixture.cache, () => fixture.origin)
+      assert.equal(
+        reloaded.sourcePreparation.get("local-example/serious-bug"),
+        preparation,
+      )
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true })
     }
-    const mutation = input.cases.find((evalCase) => evalCase.expected.issue)!
-    delete mutation.expected.issue!.witnessArtifactHash
-
-    assert.throws(() => corpusSchema.parse(input), /requires a witness artifact hash/)
-  })
-
-  it("rejects a mutation that reuses the control revision", async () => {
-    const input = JSON.parse(await readFile("eval/corpus.example.json", "utf8")) as {
-      cases: Array<{ headSha: string }>
-    }
-    input.cases[1]!.headSha = input.cases[0]!.headSha
-
-    assert.throws(() => corpusSchema.parse(input), /distinct head SHAs/)
   })
 
   it("accepts samples when the runtime omits model provenance", () => {
-    const sample = completed("control", 1, control, "success", [], null)
+    const sample = completed("control", 1, control, "success", [], [])
     sample.models = []
-
     assert.deepEqual(evalSampleSchema.parse(sample).models, [])
+  })
+
+  it("passes only a dedicated key and basic connection settings to the blind reviewer", () => {
+    process.env.EVAL_TEST_SECRET = "must-not-pass"
+    try {
+      const environment = reviewerEnvironment("work-key", "/tmp/empty-home")
+      assert.equal(environment.AMP_API_KEY, "work-key")
+      assert.equal(environment.HOME, "/tmp/empty-home")
+      assert.equal(environment.AMP_EVAL_REVIEWER_API_KEY, undefined)
+      assert.equal(environment.EVAL_TEST_SECRET, undefined)
+    } finally {
+      delete process.env.EVAL_TEST_SECRET
+    }
   })
 })
 
 describe("eval scoring", () => {
-  it("averages repeated samples within each case", () => {
+  it("averages repeated samples within each code version", () => {
     const cases = [evalCase("control", control), evalCase("blocking", blocking)]
-    const run = evalRunSchema.parse({
-      schemaVersion: 1,
-      corpusVersion: "test-v1",
-      corpusHash: corpusContentHash({ version: "test-v1", cases }),
-      startedAt: "2026-08-25T00:00:00.000Z",
-      completedAt: "2026-08-25T00:10:00.000Z",
-      requestedSamplesPerCase: 3,
-      concurrency: 2,
-      timeoutMs: 1_800_000,
-      reviewer: {
-        gitCommit: "a".repeat(40),
-        dirty: false,
-        sdkVersion: "test",
-        mode: "medium",
-        failOn: "high",
-        reviewSourceHash: "source",
-        methodologyHash: "methodology",
-      },
-      cases,
-      samples: [
-        completed("control", 1, control, "success", [], null),
-        completed("control", 2, control, "neutral", [lowFinding], null),
-        failed("control", 3, control),
-        completed("blocking", 1, blocking, "failure", [highFinding], judgement([0], false)),
-        completed("blocking", 2, blocking, "neutral", [mediumFinding], judgement([0], true)),
-        completed("blocking", 3, blocking, "failure", [highFinding], judgement([], false)),
-      ],
-    })
+    const run = makeRun(cases, 3, [
+      completed("control", 1, control, "success", [], []),
+      completed("control", 2, control, "neutral", [lowFinding], []),
+      failed("control", 3, control),
+      completed("blocking", 1, blocking, "failure", [highFinding], [judgement([0], false)]),
+      completed("blocking", 2, blocking, "neutral", [mediumFinding], [judgement([0], true)]),
+      completed("blocking", 3, blocking, "failure", [highFinding], [judgement([], false)]),
+    ])
 
     const score = scoreRun(run)
     const controlScore = score.cases.find((item) => item.caseId === "control")!
@@ -152,7 +148,7 @@ describe("eval scoring", () => {
     assert.equal(score.groundedConclusionAgreement, 1 / 3)
     assert.equal(controlScore.cleanAlertRate, 1 / 2)
     assert.equal(blockingScore.issueDetectionRate, 2 / 3)
-    assert.equal(blockingScore.injectionPrecision, 2 / 3)
+    assert.equal(blockingScore.findingPrecision, 2 / 3)
     assert.equal(blockingScore.severityAgreement, 1 / 2)
     assert.equal(blockingScore.severityThresholdAgreement, 1 / 2)
     assert.equal(blockingScore.judgeCoverage, 1)
@@ -164,74 +160,65 @@ describe("eval scoring", () => {
     assert.match(report, /Serious bug: found in 2 of 3; right response in 1 of 3/)
     assert.match(report, /This result covers only these examples/)
 
-    const completeRun = evalRunSchema.parse({
-      ...run,
-      samples: [
-        completed("control", 1, control, "success", [], null),
-        completed("control", 2, control, "success", [], null),
-        completed("control", 3, control, "success", [], null),
-        completed("blocking", 1, blocking, "neutral", [mediumFinding], judgement([0], false)),
-        completed("blocking", 2, blocking, "neutral", [mediumFinding], judgement([0], false)),
-        completed("blocking", 3, blocking, "neutral", [mediumFinding], judgement([0], false)),
-      ],
-    })
+    const completeRun = makeRun(cases, 3, [
+      completed("control", 1, control, "success", [], []),
+      completed("control", 2, control, "success", [], []),
+      completed("control", 3, control, "success", [], []),
+      completed("blocking", 1, blocking, "neutral", [mediumFinding], [judgement([0], false)]),
+      completed("blocking", 2, blocking, "neutral", [mediumFinding], [judgement([0], false)]),
+      completed("blocking", 3, blocking, "neutral", [mediumFinding], [judgement([0], false)]),
+    ])
     const completeReport = formatReport(completeRun, scoreRun(completeRun))
     assert.match(completeReport, /Review evaluation: NEEDS WORK/)
     assert.match(completeReport, /Serious bug: found in 3 of 3; right response in 0 of 3/)
   })
 
-  it("does not report failed controls as clean", () => {
-    const cases = [evalCase("control", control)]
-    const run = evalRunSchema.parse({
-      schemaVersion: 1,
-      corpusVersion: "test-v1",
-      corpusHash: corpusContentHash({ version: "test-v1", cases }),
-      startedAt: "2026-08-25T00:00:00.000Z",
-      completedAt: "2026-08-25T00:10:00.000Z",
-      requestedSamplesPerCase: 1,
-      concurrency: 1,
-      timeoutMs: 1_800_000,
-      reviewer: {
-        gitCommit: "a".repeat(40),
-        dirty: false,
-        sdkVersion: "test",
-        mode: "medium",
-        failOn: "high",
-        reviewSourceHash: "source",
-        methodologyHash: "methodology",
-      },
-      cases,
-      samples: [failed("control", 1, control)],
-    })
-
-    assert.equal(scoreRun(run).cleanAlertRate, null)
+  it("does not let one finding count as two known bugs", () => {
+    const twoIssues: ExpectedResult = {
+      issues: [
+        blocking.issues[0]!,
+        { ...blocking.issues[0]!, id: "second-failure" },
+      ],
+    }
+    const cases = [evalCase("two-issues", twoIssues)]
+    const run = makeRun(cases, 1, [
+      completed("two-issues", 1, twoIssues, "failure", [highFinding], [
+        judgement([0], false, "known-failure"),
+        judgement([0], false, "second-failure"),
+      ]),
+    ])
+    const score = scoreRun(run).cases[0]!
+    assert.equal(score.issueDetectionRate, 1 / 2)
+    assert.equal(score.findingPrecision, 1)
+    assert.equal(score.groundedConclusionAgreement, 0)
   })
 
-  it("rejects a run whose embedded corpus no longer matches its hash", () => {
-    const cases = [evalCase("control", control)]
+  it("keeps duplicate findings visible in the plain report", () => {
+    const cases = [evalCase("blocking", blocking)]
+    const run = makeRun(cases, 1, [
+      completed("blocking", 1, blocking, "failure", [highFinding, highFinding], [
+        judgement([0, 1], false),
+      ]),
+    ])
 
+    const score = scoreRun(run)
+    assert.equal(score.cases[0]!.findingPrecision, 1 / 2)
+    assert.match(formatReport(run, score), /1 other finding needs checking/)
+  })
+
+  it("does not report failed clean reviews as clean", () => {
+    const cases = [evalCase("control", control)]
+    assert.equal(scoreRun(makeRun(cases, 1, [failed("control", 1, control)])).cleanAlertRate, null)
+  })
+
+  it("rejects changed run evidence", () => {
+    const cases = [evalCase("control", control)]
     assert.throws(
       () =>
         evalRunSchema.parse({
-          schemaVersion: 1,
-          corpusVersion: "test-v1",
+          ...runFields(cases, 1),
           corpusHash: artifactHash,
-          startedAt: "2026-08-25T00:00:00.000Z",
-          completedAt: "2026-08-25T00:10:00.000Z",
-          requestedSamplesPerCase: 1,
-          concurrency: 1,
-          timeoutMs: 1_800_000,
-          reviewer: {
-            gitCommit: "a".repeat(40),
-            dirty: false,
-            sdkVersion: "test",
-            mode: "medium",
-            failOn: "high",
-            reviewSourceHash: "source",
-            methodologyHash: "methodology",
-          },
-          cases,
-          samples: [completed("control", 1, control, "success", [], null)],
+          samples: [completed("control", 1, control, "success", [], [])],
         }),
       /corpus hash does not match/,
     )
@@ -239,67 +226,25 @@ describe("eval scoring", () => {
 
   it("rejects a judgement that references a missing finding", () => {
     const cases = [evalCase("blocking", blocking)]
-    const sample = completed(
-      "blocking",
-      1,
-      blocking,
-      "failure",
-      [highFinding],
-      judgement([1], false),
-    )
-
     assert.throws(
       () =>
         evalRunSchema.parse({
-          schemaVersion: 1,
-          corpusVersion: "test-v1",
-          corpusHash: corpusContentHash({ version: "test-v1", cases }),
-          startedAt: "2026-08-25T00:00:00.000Z",
-          completedAt: "2026-08-25T00:10:00.000Z",
-          requestedSamplesPerCase: 1,
-          concurrency: 1,
-          timeoutMs: 1_800_000,
-          reviewer: {
-            gitCommit: "a".repeat(40),
-            dirty: false,
-            sdkVersion: "test",
-            mode: "medium",
-            failOn: "high",
-            reviewSourceHash: "source",
-            methodologyHash: "methodology",
-          },
-          cases,
-          samples: [sample],
+          ...runFields(cases, 1),
+          samples: [
+            completed("blocking", 1, blocking, "failure", [highFinding], [judgement([1], false)]),
+          ],
         }),
       /finding that was not retained/,
     )
   })
 
-  it("rejects a sample conclusion that does not follow from its raw review", () => {
+  it("rejects a conclusion that does not follow from the raw review", () => {
     const cases = [evalCase("blocking", blocking)]
-
     assert.throws(
       () =>
         evalRunSchema.parse({
-          schemaVersion: 1,
-          corpusVersion: "test-v1",
-          corpusHash: corpusContentHash({ version: "test-v1", cases }),
-          startedAt: "2026-08-25T00:00:00.000Z",
-          completedAt: "2026-08-25T00:10:00.000Z",
-          requestedSamplesPerCase: 1,
-          concurrency: 1,
-          timeoutMs: 1_800_000,
-          reviewer: {
-            gitCommit: "a".repeat(40),
-            dirty: false,
-            sdkVersion: "test",
-            mode: "medium",
-            failOn: "high",
-            reviewSourceHash: "source",
-            methodologyHash: "methodology",
-          },
-          cases,
-          samples: [completed("blocking", 1, blocking, "failure", [], null)],
+          ...runFields(cases, 1),
+          samples: [completed("blocking", 1, blocking, "failure", [], [])],
         }),
       /sample result does not match its raw production review/,
     )
@@ -324,9 +269,10 @@ describe("eval judging", () => {
     }
 
     try {
-      const testCase = evalCaseSchema.parse(evalCase("blocking", blocking))
-      const first = judgeFindings(
-        testCase,
+      const issue = blocking.issues[0]!
+      const first = judgeIssue(
+        "blocking",
+        issue,
         [highFinding],
         cacheDirectory,
         "test-sdk",
@@ -334,8 +280,9 @@ describe("eval judging", () => {
         executeJudge as never,
       )
       await started.promise
-      const second = judgeFindings(
-        testCase,
+      const second = judgeIssue(
+        "blocking",
+        issue,
         [highFinding],
         cacheDirectory,
         "test-sdk",
@@ -347,7 +294,6 @@ describe("eval judging", () => {
       assert.equal(calls, 1)
       release.resolve()
       const results = await Promise.all([first, second])
-
       assert.equal(calls, 2)
       assert.deepEqual(results.map((result) => result.matchingFindingIndices), [[0], [0]])
     } finally {
@@ -371,9 +317,10 @@ describe("eval judging", () => {
     const firstController = new AbortController()
 
     try {
-      const testCase = evalCaseSchema.parse(evalCase("blocking", blocking))
-      const first = judgeFindings(
-        testCase,
+      const issue = blocking.issues[0]!
+      const first = judgeIssue(
+        "blocking",
+        issue,
         [highFinding],
         cacheDirectory,
         "test-sdk",
@@ -381,8 +328,9 @@ describe("eval judging", () => {
         executeJudge as never,
       )
       await firstStarted.promise
-      const second = judgeFindings(
-        testCase,
+      const second = judgeIssue(
+        "blocking",
+        issue,
         [highFinding],
         cacheDirectory,
         "test-sdk",
@@ -415,8 +363,9 @@ describe("eval judging", () => {
     }
 
     try {
-      const result = judgeFindings(
-        evalCaseSchema.parse(evalCase("blocking", blocking)),
+      const result = judgeIssue(
+        "blocking",
+        blocking.issues[0]!,
         [highFinding],
         cacheDirectory,
         "test-sdk",
@@ -426,13 +375,212 @@ describe("eval judging", () => {
       await started.promise
       controller.abort(new Error("judge timed out"))
       release.resolve()
-
       await assert.rejects(result, /judge timed out/)
     } finally {
       await rm(cacheDirectory, { recursive: true, force: true })
     }
   })
 })
+
+async function createPackFixture(): Promise<{
+  root: string
+  pack: string
+  cache: string
+  origin: string
+}> {
+  const root = await mkdtemp(join(tmpdir(), "amp-reviewbot-pack-"))
+  const source = join(root, "source")
+  const origin = join(root, "origin.git")
+  const pack = join(root, "pack")
+  const exampleDirectory = join(pack, "examples", "local-example")
+  await mkdir(source)
+  await git(source, ["init", "--initial-branch=main"])
+  await git(source, ["config", "user.name", "Eval Test"])
+  await git(source, ["config", "user.email", "eval@example.invalid"])
+  await writeFile(join(source, "code.txt"), "line one\n")
+  await git(source, ["add", "code.txt"])
+  await git(source, ["commit", "-m", "base"])
+  const base = (await git(source, ["rev-parse", "HEAD"])).trim()
+  await writeFile(join(source, "code.txt"), "line one\nline two\n")
+  await git(source, ["commit", "-am", "clean change"])
+  const clean = (await git(source, ["rev-parse", "HEAD"])).trim()
+  await execFileAsync("git", ["clone", "--bare", source, origin])
+
+  await writeFile(join(source, "code.txt"), "line one\nbug\n")
+  await git(source, ["commit", "-am", "source-only bug"])
+  const bug = (await git(source, ["rev-parse", "HEAD"])).trim()
+  await git(source, ["branch", "eval/local-bug", bug])
+  await mkdir(join(exampleDirectory, "witnesses"), { recursive: true })
+  await git(source, [
+    "bundle",
+    "create",
+    join(exampleDirectory, "commits.bundle"),
+    "refs/heads/eval/local-bug",
+    `^${clean}`,
+  ])
+  await writeFile(join(exampleDirectory, "witnesses", "bug.patch"), "test patch\n")
+  await writeFile(
+    join(exampleDirectory, "example.json"),
+    `${JSON.stringify(
+      {
+        formatVersion: 1,
+        id: "local-example",
+        source: {
+          repository: "example/repository",
+          pullRequest: 42,
+          baseCommit: base,
+          context: {
+            title: "Keep the useful result",
+            body: "A local test example.",
+            baseRef: "main",
+            headRef: "change",
+          },
+        },
+        versions: [
+          { name: "clean-change", commit: clean, knownIssues: [] },
+          {
+            name: "serious-bug",
+            commit: bug,
+            knownIssues: [
+              {
+                id: "known-bug",
+                severity: "high",
+                rootCause: "The changed line discards the result.",
+                failureBehavior: "Loses the useful result.",
+                path: "code.txt",
+                line: 2,
+                verification: "The focused test fails only here.",
+                witness: "witnesses/bug.patch",
+              },
+            ],
+          },
+        ],
+      },
+      null,
+      2,
+    )}\n`,
+  )
+  return { root, pack, cache: join(root, "cache"), origin }
+}
+
+async function git(cwd: string, args: string[]): Promise<string> {
+  return (await execFileAsync("git", args, { cwd, encoding: "utf8" })).stdout
+}
+
+function makeRun(cases: ReturnType<typeof evalCase>[], samplesPerCase: number, samples: unknown[]) {
+  return evalRunSchema.parse({ ...runFields(cases, samplesPerCase), samples })
+}
+
+function runFields(cases: ReturnType<typeof evalCase>[], samplesPerCase: number) {
+  return {
+    schemaVersion: 2,
+    corpusVersion: "test-v1",
+    corpusHash: corpusContentHash({ version: "test-v1", cases }),
+    startedAt: "2026-08-25T00:00:00.000Z",
+    completedAt: "2026-08-25T00:10:00.000Z",
+    requestedSamplesPerCase: samplesPerCase,
+    concurrency: 2,
+    timeoutMs: 1_800_000,
+    reviewer: {
+      gitCommit: "a".repeat(40),
+      dirty: false,
+      sdkVersion: "test",
+      mode: "medium",
+      failOn: "high",
+      reviewSourceHash: "source",
+      methodologyHash: "methodology",
+      project: "agent",
+      account: "separate-key",
+    },
+    cases,
+  }
+}
+
+function evalCase(id: string, expected: ExpectedResult) {
+  return {
+    id,
+    seedId: id,
+    versionName: id,
+    repositoryFullName: "lox/example",
+    pullNumber: 42,
+    baseSha: "a".repeat(40),
+    headSha: "b".repeat(40),
+    context: {
+      title: "Example change",
+      body: "Exercises the eval scorer.",
+      baseRef: "main",
+      headRef: "example-change",
+    },
+    changedLines: { "src/example.ts": [10] },
+    expected: structuredClone(expected),
+  }
+}
+
+function completed(
+  caseId: string,
+  sample: number,
+  expected: ExpectedResult,
+  conclusion: "success" | "neutral" | "failure",
+  findings: Array<typeof lowFinding | typeof mediumFinding | typeof highFinding>,
+  judgements: Array<ReturnType<typeof judgement>>,
+) {
+  const result = { summary: "Review complete", findings }
+  return {
+    caseId,
+    sample,
+    expected,
+    promptHash: "prompt",
+    threadId: null,
+    models: ["test-reviewer"],
+    durationMs: 1,
+    status: "completed",
+    rawResult: JSON.stringify(result),
+    parsedResult: result,
+    retainedResult: result,
+    omitted: 0,
+    conclusion,
+    judgements,
+    judgementErrors: [],
+  }
+}
+
+function failed(caseId: string, sample: number, expected: ExpectedResult) {
+  return {
+    caseId,
+    sample,
+    expected,
+    promptHash: "prompt",
+    threadId: null,
+    models: [],
+    durationMs: 1,
+    status: "error",
+    error: "review failed",
+  }
+}
+
+function judgement(
+  matchingFindingIndices: number[],
+  disagreement: boolean,
+  issueId = "known-failure",
+) {
+  return {
+    issueId,
+    matchingFindingIndices,
+    votes: disagreement
+      ? [matchingFindingIndices, []]
+      : [matchingFindingIndices, matchingFindingIndices],
+    disagreement,
+    models: ["test-judge"],
+    provenance: {
+      version: "3",
+      mode: "high",
+      sdkVersion: "test-sdk",
+      project: "no-project",
+      promptHash: "prompt",
+      schemaHash: "schema",
+    },
+  }
+}
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void
@@ -466,83 +614,4 @@ function waitForTestRelease(release: Promise<void>, signal: AbortSignal): Promis
       resolveWait()
     })
   })
-}
-
-function evalCase(id: string, expected: typeof control | typeof blocking) {
-  return {
-    id,
-    seedId: id,
-    repositoryFullName: "lox/example",
-    pullNumber: 42,
-    baseSha: "a".repeat(40),
-    headSha: "b".repeat(40),
-    ampProject: "lox/example",
-    context: {
-      title: "Example change",
-      body: "Exercises the eval scorer.",
-      baseRef: "main",
-      headRef: "example-change",
-    },
-    changedLines: { "src/example.ts": [10] },
-    expected,
-  }
-}
-
-function completed(
-  caseId: string,
-  sample: number,
-  expected: typeof control | typeof blocking,
-  conclusion: "success" | "neutral" | "failure",
-  findings: Array<typeof lowFinding | typeof mediumFinding | typeof highFinding>,
-  judgementResult: ReturnType<typeof judgement> | null,
-) {
-  const result = { summary: "Review complete", findings }
-  return {
-    caseId,
-    sample,
-    expected,
-    promptHash: "prompt",
-    threadId: null,
-    models: ["test-reviewer"],
-    durationMs: 1,
-    status: "completed",
-    rawResult: JSON.stringify(result),
-    parsedResult: result,
-    retainedResult: result,
-    omitted: 0,
-    conclusion,
-    judgement: judgementResult,
-    judgementError: null,
-  }
-}
-
-function failed(caseId: string, sample: number, expected: typeof control | typeof blocking) {
-  return {
-    caseId,
-    sample,
-    expected,
-    promptHash: "prompt",
-    threadId: null,
-    models: [],
-    durationMs: 1,
-    status: "error",
-    error: "review failed",
-  }
-}
-
-function judgement(matchingFindingIndices: number[], disagreement: boolean) {
-  return {
-    matchingFindingIndices,
-    votes: disagreement ? [matchingFindingIndices, []] : [matchingFindingIndices, matchingFindingIndices],
-    disagreement,
-    models: ["test-judge"],
-    provenance: {
-      version: "1",
-      mode: "high",
-      sdkVersion: "test-sdk",
-      project: "lox/example",
-      promptHash: "prompt",
-      schemaHash: "schema",
-    },
-  }
 }

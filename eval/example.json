@@ -1,0 +1,52 @@
+{
+  "formatVersion": 1,
+  "id": "review-example",
+  "source": {
+    "repository": "example/repository",
+    "pullRequest": 1234,
+    "baseCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "context": {
+      "title": "Retry interrupted uploads",
+      "body": "Retries interrupted uploads while preserving completed work.",
+      "baseRef": "main",
+      "headRef": "retry-uploads"
+    }
+  },
+  "versions": [
+    {
+      "name": "clean-change",
+      "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "knownIssues": []
+    },
+    {
+      "name": "smaller-bug",
+      "commit": "cccccccccccccccccccccccccccccccccccccccc",
+      "knownIssues": [
+        {
+          "id": "upload-error-context",
+          "severity": "medium",
+          "rootCause": "The retry path replaces the first upload error instead of retaining both causes.",
+          "failureBehavior": "Operators lose the error that explains why the first upload attempt failed.",
+          "path": "src/upload.ts",
+          "line": 85,
+          "verification": "A focused test keeps both error identities on the clean version."
+        }
+      ]
+    },
+    {
+      "name": "serious-bug",
+      "commit": "dddddddddddddddddddddddddddddddddddddddd",
+      "knownIssues": [
+        {
+          "id": "upload-idempotency",
+          "severity": "high",
+          "rootCause": "The retry path creates a new upload before checking whether the previous attempt completed.",
+          "failureBehavior": "A lost response after a successful upload causes the retry to create duplicate remote objects.",
+          "path": "src/upload.ts",
+          "line": 85,
+          "verification": "A focused test reproduces the duplicate upload only on this version."
+        }
+      ]
+    }
+  ]
+}

@@ -1,4 +1,5 @@
 import type { EvalCase, EvalRun, EvalSample } from "./schema.js"
+import { expectedKind } from "./schema.js"
 import type { EvalScore } from "./score.js"
 
 export function formatReport(run: EvalRun, score: EvalScore): string {
@@ -28,12 +29,10 @@ export function formatReport(run: EvalRun, score: EvalScore): string {
   for (const cases of examples.values()) {
     exampleNumber += 1
     lines.push("", `Example ${exampleNumber} (pull request #${cases[0]!.pullNumber})`)
-    for (const kind of ["control", "advisory", "blocking"] as const) {
-      const evalCase = cases.find((item) => item.expected.kind === kind)
-      if (!evalCase) continue
+    for (const evalCase of cases) {
       const caseScore = scores.get(evalCase.id)
       if (!caseScore) continue
-      lines.push(`  ${caseResult(kind, caseScore, samples.get(evalCase.id) ?? [])}`)
+      lines.push(`  ${caseResult(evalCase, caseScore, samples.get(evalCase.id) ?? [])}`)
     }
   }
 
@@ -47,7 +46,7 @@ export function formatReport(run: EvalRun, score: EvalScore): string {
 
 function countKinds(cases: EvalCase[]): Record<"control" | "advisory" | "blocking", number> {
   const counts = { control: 0, advisory: 0, blocking: 0 }
-  for (const evalCase of cases) counts[evalCase.expected.kind] += 1
+  for (const evalCase of cases) counts[expectedKind(evalCase.expected)] += 1
   return counts
 }
 
@@ -63,29 +62,36 @@ function completionSentence(run: EvalRun, score: EvalScore): string {
 }
 
 function caseResult(
-  kind: "control" | "advisory" | "blocking",
+  evalCase: EvalCase,
   score: EvalScore["cases"][number],
   samples: EvalSample[],
 ): string {
+  const kind = expectedKind(evalCase.expected)
   const completed = rateCount(score.operationalCompletion, score.samples)
   if (kind === "control") {
     if (completed === 0) return "Clean change: no reviews completed"
     const falseAlarms = rateCount(score.cleanAlertRate, completed)
     return `Clean change: ${completed - falseAlarms} of ${completed} completed reviews had no false alarms`
   }
-  const found = rateCount(score.issueDetectionRate, score.samples)
+  const opportunities = score.samples * score.knownIssues
+  const found = rateCount(score.issueDetectionRate, opportunities)
   const rightResponse = rateCount(score.groundedConclusionAgreement, score.samples)
   const label = kind === "advisory" ? "Smaller bug" : "Serious bug"
-  const otherFindings = samples.reduce((total, sample) => {
-    if (sample.status === "error") return total
-    const knownBug = sample.judgement?.matchingFindingIndices.length ? 1 : 0
-    return total + Math.max(0, sample.retainedResult.findings.length - knownBug)
-  }, 0)
+  const retainedFindings = samples.reduce(
+    (total, sample) =>
+      total + (sample.status === "completed" ? sample.retainedResult.findings.length : 0),
+    0,
+  )
+  const otherFindings = Math.max(0, retainedFindings - found)
   const otherFindingsText =
     otherFindings === 0
       ? ""
       : `; ${otherFindings} other ${otherFindings === 1 ? "finding needs" : "findings need"} checking`
-  return `${label}: found in ${found} of ${score.samples}; right response in ${rightResponse} of ${score.samples}${otherFindingsText}`
+  const foundText =
+    score.knownIssues === 1
+      ? `found in ${found} of ${score.samples}`
+      : `${found} of ${opportunities} known bugs found`
+  return `${label}: ${foundText}; right response in ${rightResponse} of ${score.samples}${otherFindingsText}`
 }
 
 function reportVerdict(score: EvalScore): string {
@@ -122,18 +128,23 @@ function bottomLine(run: EvalRun, score: EvalScore): string {
   }
   const cases = new Map(run.cases.map((evalCase) => [evalCase.id, evalCase]))
   const cleanScores = score.cases.filter(
-    (caseScore) => cases.get(caseScore.caseId)?.expected.kind === "control",
+    (caseScore) => expectedKind(cases.get(caseScore.caseId)!.expected) === "control",
   )
   const bugScores = score.cases.filter(
-    (caseScore) => cases.get(caseScore.caseId)?.expected.kind !== "control",
+    (caseScore) => expectedKind(cases.get(caseScore.caseId)!.expected) !== "control",
   )
   const falseAlarms = cleanScores.reduce((total, caseScore) => {
     const completed = rateCount(caseScore.operationalCompletion, caseScore.samples)
     return total + rateCount(caseScore.cleanAlertRate, completed)
   }, 0)
-  const bugReviews = bugScores.reduce((total, caseScore) => total + caseScore.samples, 0)
+  const bugReviews = bugScores.reduce(
+    (total, caseScore) => total + caseScore.samples * caseScore.knownIssues,
+    0,
+  )
+  const bugVersionReviews = bugScores.reduce((total, caseScore) => total + caseScore.samples, 0)
   const bugsFound = bugScores.reduce(
-    (total, caseScore) => total + rateCount(caseScore.issueDetectionRate, caseScore.samples),
+    (total, caseScore) =>
+      total + rateCount(caseScore.issueDetectionRate, caseScore.samples * caseScore.knownIssues),
     0,
   )
   const rightResponses = bugScores.reduce(
@@ -151,7 +162,7 @@ function bottomLine(run: EvalRun, score: EvalScore): string {
     observations.push(
       `The reviewer missed the known bug in ${bugReviews - bugsFound} of ${bugReviews} bug reviews.`,
     )
-  } else if (rightResponses < bugReviews) {
+  } else if (rightResponses < bugVersionReviews) {
     observations.push(
       "The reviewer found every known bug, but did not always respond with the right urgency.",
     )

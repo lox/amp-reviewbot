@@ -1,62 +1,102 @@
 # Review evaluation
 
-This evaluation answers three practical questions:
+This evaluation answers four questions:
 
-1. Does the reviewer leave clean code alone?
-2. Does it find a known bug?
-3. Does it block only when the bug is serious?
+1. Does the reviewer leave a clean change alone?
+2. Does it find each known bug?
+3. Does it use the right urgency?
+4. Does it give the same answer across repeated reviews?
 
-Each example has three code versions: one expected to be clean, one with a smaller bug, and one with a serious bug. The bugs are checked independently and normally have a focused test that proves the failure. The reviewer never sees those tests or the expected answers.
+The answers are counts, not prose comparisons. A saved run keeps the exact evidence behind those counts.
 
-Real example files and saved runs contain private source information. Keep them outside this public repository. `corpus.example.json` only shows the file format.
+## Example pack
 
-## Check the example file
+Keep real examples in a separate repository. The smallest useful layout is:
 
-This checks the file locally without starting any Amp reviews:
-
-```sh
-npm run eval -- check /private/path/examples.json
+```text
+examples/
+  example-id/
+    example.json
+    commits.bundle          # only when a code version is not in public history
+    witnesses/              # focused tests; optional
 ```
 
-## Run the reviews
+[`example.json`](example.json) shows the format. It records the exact public pull-request context and one or more code versions. Each version has a commit and `knownIssues`. A clean version has an empty list. A bug records its cause, visible failure, severity, changed line, and how it was checked.
 
-Run every code version three times:
+The runner calculates changed lines from the exact Git diff. It does not store a second hand-written copy. It also calculates the expected `success`, `neutral`, or `failure` result from issue severity at `FAIL_ON=high`.
+
+## Keep reviews blind
+
+Use two Amp accounts:
+
+- The trusted account can read the private example pack and checks whether findings match known bugs.
+- A separate review account can access the source project, but cannot access the example pack.
+
+Supply the keys through the environment, never as command arguments:
 
 ```sh
-npm run eval -- run /private/path/examples.json --samples 3
+export AMP_API_KEY="trusted-account-key"
+export AMP_EVAL_REVIEWER_API_KEY="separate-review-account-key"
 ```
 
-Every review runs in a fresh private Amp orb using the same prompt, JSON checks, changed-line rules, and `FAIL_ON=high` decision as production. Two independent Amp checks decide whether a finding describes the known bug; a third is used only when they disagree.
+`AMP_API_KEY` is used by the main process. `AMP_EVAL_REVIEWER_API_KEY` is passed only to a child process with an empty home directory. The child starts fresh private review orbs in the project named by `--project`. The two keys must belong to different Amp accounts, not merely be two keys from one account.
 
-The command shows progress, prints a plain-language report, and saves the complete results under `.eval-runs/`. By default it runs two reviews at a time. Use `--concurrency`, `--output`, or `--timeout-minutes` to change those defaults.
+The project is selected by `--project`; there is no need to log the Amp CLI in and out between reviews. Amp's SDK uses the standard `AMP_API_KEY` value in each process.
 
-## Read a saved report
+The reviewer receives only:
+
+- the exact base and head commits;
+- the public pull-request title, description, and branch names;
+- the production review instructions; and
+- source-only Git bytes for a deliberately changed commit when needed.
+
+It never receives `knownIssues`, focused tests, or the path to the pack. The trusted process checks the bundle and commit IDs before any reviews start.
+
+## Commands
+
+Check the pack's files without starting reviews:
+
+```sh
+npm run eval -- check /path/to/review-eval-pack
+```
+
+Run every code version three times, with at most two reviews running at once:
+
+```sh
+npm run eval -- run /path/to/review-eval-pack \
+  --project REVIEW_PROJECT \
+  --samples 3 \
+  --concurrency 2
+```
+
+Before the first review, this command fetches the public source, verifies any source bundle, checks every commit, calculates changed lines, and rejects a known bug that does not point to a changed line.
+
+Every review then uses a fresh private Amp orb and the same prompt builder, two-pass review method, JSON parser, changed-line filter, and conclusion calculation as production. The trusted account uses two independent high-mode checks to decide whether a finding describes a known bug; it uses a third only when they disagree.
+
+The command prints progress and saves complete results under `.eval-runs/`. Read a saved result without making network or model calls:
 
 ```sh
 npm run eval -- report .eval-runs/RUN.json
 ```
 
-This makes no model or network calls. It checks the saved data again and prints counts such as:
+## Reading the result
+
+A normal report stays plain:
 
 ```text
 Review evaluation: NEEDS WORK
 
 1 clean change, 1 smaller bug, and 1 serious bug.
 Each was reviewed 3 times. All 9 reviews completed.
-A right response reports a smaller bug without blocking, and blocks a serious bug.
 
 Example 1 (pull request #1234)
   Clean change: 3 of 3 completed reviews had no false alarms
   Smaller bug: found in 3 of 3; right response in 2 of 3
   Serious bug: found in 3 of 3; right response in 0 of 3
-
-Bottom line
-  The reviewer found every known bug, but did not always respond with the right urgency.
-
-Evidence: 3 code versions and 9 review runs.
-This result covers only these examples; it is not a general quality claim.
 ```
 
-The complete saved file retains the exact code revisions, pull-request context, reviewer output, matching decisions, tool versions, and detailed measurements for later inspection.
+The saved file retains exact commits and context, prompt and code hashes, model IDs when available, raw and filtered findings, conclusions, matching votes, timing, and errors.
 
-Interpret repeated runs before looking at the result: three correct results out of three passes this small set; two out of three means run both the current and proposed reviewer five times; zero or one means the reviewer needs work on that example. With five runs, only four or five correct results pass. These are practical comparison rules, not proof of general review quality.
+Three repeated reviews are enough for an iteration check, not a broad accuracy claim. Decide the rule before running: 3 of 3 is a provisional pass; 2 of 3 means run both the old and new reviewer five times; 0 or 1 means the reviewer needs work on that example. With five runs, require at least 4 of 5. Never add only favorable reruns.
+
+An open example pack is a regression set. It is not a hidden benchmark, a population false-alarm rate, or proof of general review quality.

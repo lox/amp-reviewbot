@@ -1,16 +1,17 @@
 import { isBlockingSeverity } from "../src/review.js"
-import type { EvalRun, EvalSample } from "./schema.js"
-import { expectedConclusion } from "./schema.js"
+import type { EvalRun, EvalSample, ExpectedIssue } from "./schema.js"
+import { expectedConclusion, expectedKind } from "./schema.js"
 
 export type CaseScore = {
   caseId: string
   samples: number
+  knownIssues: number
   operationalCompletion: number
   conclusionAgreement: number
   groundedConclusionAgreement: number
   cleanAlertRate: number | null
   issueDetectionRate: number | null
-  injectionPrecision: number | null
+  findingPrecision: number | null
   severityAgreement: number | null
   severityThresholdAgreement: number | null
   judgeCoverage: number | null
@@ -25,12 +26,14 @@ export type EvalScore = {
   groundedConclusionAgreement: number
   cleanAlertRate: number | null
   issueDetectionRate: number | null
-  injectionPrecision: number | null
+  findingPrecision: number | null
   severityAgreement: number | null
   severityThresholdAgreement: number | null
   judgeCoverage: number | null
   judgeDisagreementRate: number | null
 }
+
+type CompletedSample = Extract<EvalSample, { status: "completed" }>
 
 export function scoreRun(run: EvalRun): EvalScore {
   const byCase = new Map<string, EvalSample[]>()
@@ -51,7 +54,7 @@ export function scoreRun(run: EvalRun): EvalScore {
     groundedConclusionAgreement: mean(cases.map((item) => item.groundedConclusionAgreement))!,
     cleanAlertRate: mean(cases.map((item) => item.cleanAlertRate)),
     issueDetectionRate: mean(cases.map((item) => item.issueDetectionRate)),
-    injectionPrecision: mean(cases.map((item) => item.injectionPrecision)),
+    findingPrecision: mean(cases.map((item) => item.findingPrecision)),
     severityAgreement: mean(cases.map((item) => item.severityAgreement)),
     severityThresholdAgreement: mean(cases.map((item) => item.severityThresholdAgreement)),
     judgeCoverage: mean(cases.map((item) => item.judgeCoverage)),
@@ -61,12 +64,20 @@ export function scoreRun(run: EvalRun): EvalScore {
 
 function scoreCase(caseId: string, samples: EvalSample[]): CaseScore {
   const expected = samples[0]!.expected
-  const completed = samples.filter((sample) => sample.status === "completed")
-  const judgeEligible = completed.filter((sample) => sample.retainedResult.findings.length > 0)
-  const judged = completed.filter((sample) => sample.judgement !== null)
-  const detections = judged.filter(
-    (sample) => sample.judgement!.matchingFindingIndices.length > 0,
+  const kind = expectedKind(expected)
+  const completed = samples.filter((sample): sample is CompletedSample => sample.status === "completed")
+  const assignments = new Map(completed.map((sample) => [sample.sample, assignFindings(sample)]))
+  const detected = [...assignments.values()].reduce((total, assignment) => total + assignment.size, 0)
+  const reportedFindings = completed.reduce(
+    (total, sample) => total + sample.retainedResult.findings.length,
+    0,
   )
+  const eligibleJudgements = completed.reduce(
+    (total, sample) =>
+      total + (sample.retainedResult.findings.length > 0 ? expected.issues.length : 0),
+    0,
+  )
+  const judgements = completed.flatMap((sample) => sample.judgements)
   const conclusions = { success: 0, neutral: 0, failure: 0, error: 0 }
 
   for (const sample of samples) {
@@ -74,90 +85,119 @@ function scoreCase(caseId: string, samples: EvalSample[]): CaseScore {
     else conclusions[sample.conclusion] += 1
   }
 
-  const conclusionAgreement =
-    samples.filter(
-      (sample) =>
-        sample.status === "completed" && sample.conclusion === expectedConclusion(sample.expected),
-    ).length / samples.length
-  const groundedConclusionAgreement =
-    samples.filter((sample) => isGroundedConclusion(sample)).length / samples.length
+  const detectedPairs = completed.flatMap((sample) => {
+    const assignment = assignments.get(sample.sample) ?? new Map<string, number>()
+    return expected.issues.flatMap((issue) => {
+      const findingIndex = assignment.get(issue.id)
+      return findingIndex === undefined ? [] : [{ issue, sample, findingIndex }]
+    })
+  })
 
   return {
     caseId,
     samples: samples.length,
+    knownIssues: expected.issues.length,
     operationalCompletion: completed.length / samples.length,
-    conclusionAgreement,
-    groundedConclusionAgreement,
+    conclusionAgreement:
+      samples.filter(
+        (sample) =>
+          sample.status === "completed" && sample.conclusion === expectedConclusion(sample.expected),
+      ).length / samples.length,
+    groundedConclusionAgreement:
+      samples.filter((sample) => isGroundedConclusion(sample)).length / samples.length,
     cleanAlertRate:
-      expected.kind === "control"
+      kind === "control"
         ? completed.length === 0
           ? null
           : completed.filter((sample) => sample.retainedResult.findings.length > 0).length /
             completed.length
         : null,
     issueDetectionRate:
-      expected.kind === "control" ? null : detections.length / samples.length,
-    injectionPrecision:
-      expected.kind === "control"
-        ? null
-        : mean(
-            judged.map((sample) =>
-              sample.judgement!.matchingFindingIndices.length > 0
-                ? 1 / sample.retainedResult.findings.length
-                : 0,
-            ),
-          ),
+      kind === "control" ? null : detected / (expected.issues.length * samples.length),
+    findingPrecision:
+      kind === "control" || reportedFindings === 0 ? null : detected / reportedFindings,
     severityAgreement:
-      expected.kind === "control" || detections.length === 0
+      kind === "control" || detectedPairs.length === 0
         ? null
-        : detections.filter((sample) => matchedSeverity(sample)).length / detections.length,
+        : detectedPairs.filter(({ issue, sample, findingIndex }) =>
+            matchedSeverity(issue, sample, findingIndex),
+          ).length / detectedPairs.length,
     severityThresholdAgreement:
-      expected.kind === "control" || detections.length === 0
+      kind === "control" || detectedPairs.length === 0
         ? null
-        : detections.filter((sample) => matchedThreshold(sample)).length / detections.length,
+        : detectedPairs.filter(({ issue, sample, findingIndex }) =>
+            matchedThreshold(issue, sample, findingIndex),
+          ).length / detectedPairs.length,
     judgeCoverage:
-      expected.kind === "control" || judgeEligible.length === 0
+      kind === "control" || eligibleJudgements === 0
         ? null
-        : judged.length / judgeEligible.length,
+        : judgements.length / eligibleJudgements,
     judgeDisagreementRate:
-      expected.kind === "control" || judged.length === 0
+      kind === "control" || judgements.length === 0
         ? null
-        : judged.filter((sample) => sample.judgement!.disagreement).length / judged.length,
+        : judgements.filter((judgement) => judgement.disagreement).length / judgements.length,
     conclusions,
   }
 }
 
 function isGroundedConclusion(sample: EvalSample): boolean {
   if (sample.status === "error") return false
-  const expected = sample.expected
-  if (expected.kind === "control") {
+  const kind = expectedKind(sample.expected)
+  if (kind === "control") {
     return sample.conclusion === "success" && sample.retainedResult.findings.length === 0
   }
+  const assignment = assignFindings(sample)
   return (
-    sample.conclusion === expectedConclusion(expected) &&
-    sample.judgement !== null &&
-    sample.judgement.matchingFindingIndices.length > 0 &&
-    matchedThreshold(sample)
+    sample.conclusion === expectedConclusion(sample.expected) &&
+    sample.expected.issues.every((issue) => {
+      const findingIndex = assignment.get(issue.id)
+      return findingIndex !== undefined && matchedThreshold(issue, sample, findingIndex)
+    })
   )
 }
 
-function matchedSeverity(sample: Extract<EvalSample, { status: "completed" }>): boolean {
-  const expectedSeverity = sample.expected.issue?.severity
-  return (
-    expectedSeverity !== undefined &&
-    (sample.judgement?.matchingFindingIndices.some(
-      (index) => sample.retainedResult.findings[index]?.severity === expectedSeverity,
-    ) ?? false)
+function assignFindings(sample: CompletedSample): Map<string, number> {
+  const choices = new Map(
+    sample.judgements.map((judgement) => [judgement.issueId, judgement.matchingFindingIndices]),
   )
+  const findingToIssue = new Map<number, string>()
+
+  for (const issue of sample.expected.issues) {
+    assign(issue.id, new Set())
+  }
+  return new Map([...findingToIssue].map(([finding, issue]) => [issue, finding]))
+
+  function assign(issueId: string, visited: Set<number>): boolean {
+    for (const finding of choices.get(issueId) ?? []) {
+      if (visited.has(finding)) continue
+      visited.add(finding)
+      const currentIssue = findingToIssue.get(finding)
+      if (!currentIssue || assign(currentIssue, visited)) {
+        findingToIssue.set(finding, issueId)
+        return true
+      }
+    }
+    return false
+  }
 }
 
-function matchedThreshold(sample: Extract<EvalSample, { status: "completed" }>): boolean {
-  const expectedBlocking = sample.expected.kind === "blocking"
+function matchedSeverity(
+  issue: ExpectedIssue,
+  sample: CompletedSample,
+  findingIndex: number,
+): boolean {
+  return sample.retainedResult.findings[findingIndex]?.severity === issue.severity
+}
+
+function matchedThreshold(
+  issue: ExpectedIssue,
+  sample: CompletedSample,
+  findingIndex: number,
+): boolean {
+  const finding = sample.retainedResult.findings[findingIndex]
   return (
-    sample.judgement?.matchingFindingIndices.some((index) => {
-      const finding = sample.retainedResult.findings[index]
-      return finding && isBlockingSeverity(finding.severity, "high") === expectedBlocking
-    }) ?? false
+    finding !== undefined &&
+    isBlockingSeverity(finding.severity, "high") === isBlockingSeverity(issue.severity, "high")
   )
 }
 
