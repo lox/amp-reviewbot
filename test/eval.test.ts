@@ -209,6 +209,28 @@ describe("eval example packs", () => {
     }
   })
 
+  it("canonicalizes uppercase commit SHAs before Git comparisons", async () => {
+    const fixture = await createPackFixture()
+    const examplePath = join(fixture.pack, "examples", "local-example", "example.json")
+    try {
+      const input = JSON.parse(await readFile(examplePath, "utf8")) as {
+        source: { baseCommit: string }
+        versions: Array<{ commit: string }>
+      }
+      input.source.baseCommit = input.source.baseCommit.toUpperCase()
+      for (const version of input.versions) version.commit = version.commit.toUpperCase()
+      await writeFile(examplePath, `${JSON.stringify(input, null, 2)}\n`)
+
+      const loaded = await loadPack(fixture.pack, fixture.cache, () => fixture.origin)
+      for (const evalCase of loaded.corpus.cases) {
+        assert.equal(evalCase.baseSha, evalCase.baseSha.toLowerCase())
+        assert.equal(evalCase.headSha, evalCase.headSha.toLowerCase())
+      }
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true })
+    }
+  })
+
   it("reuses public bundle prerequisites when preparing a historical revision", async () => {
     const fixture = await createPackFixture()
     const examplePath = join(fixture.pack, "examples", "local-example", "example.json")

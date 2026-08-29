@@ -26,7 +26,10 @@ import {
 } from "./schema.js"
 
 const execFileAsync = promisify(execFile)
-const shaSchema = z.string().regex(/^[0-9a-f]{40}$/i, "must be a full 40-character commit SHA")
+const shaSchema = z
+  .string()
+  .regex(/^[0-9a-f]{40}$/i, "must be a full 40-character commit SHA")
+  .transform((value) => value.toLowerCase())
 const nameSchema = z
   .string()
   .max(100)
