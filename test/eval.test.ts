@@ -209,6 +209,31 @@ describe("eval example packs", () => {
     }
   })
 
+  it("reuses public bundle prerequisites when preparing a historical revision", async () => {
+    const fixture = await createPackFixture()
+    const examplePath = join(fixture.pack, "examples", "local-example", "example.json")
+    try {
+      const input = JSON.parse(await readFile(examplePath, "utf8")) as {
+        origin: string
+        source: { baseCommit: string }
+        versions: Array<unknown>
+      }
+      input.origin = "human-review"
+      input.source.baseCommit = fixture.alternate
+      input.versions.splice(0, 1)
+      await writeFile(examplePath, `${JSON.stringify(input, null, 2)}\n`)
+
+      const loaded = await loadPack(fixture.pack, fixture.cache, () => fixture.origin)
+      const preparation = loaded.sourcePreparation.get("local-example/serious-bug")!
+      const encodedBundle = /printf '%s' '([^']+)' \| base64 --decode/.exec(preparation)?.[1]
+      assert.ok(encodedBundle)
+      const header = Buffer.from(encodedBundle, "base64").subarray(0, 1_024).toString("utf8")
+      assert.match(header, new RegExp(`-${fixture.clean} `))
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true })
+    }
+  })
+
   it("rejects source transfers that would make reviews too large", async () => {
     const fixture = await createPackFixture(true)
     try {
@@ -698,6 +723,7 @@ async function createPackFixture(largeSourceTransfer = false): Promise<{
   origin: string
   base: string
   clean: string
+  alternate: string
 }> {
   const root = await mkdtemp(join(tmpdir(), "amp-reviewbot-pack-"))
   const source = join(root, "source")
@@ -716,6 +742,14 @@ async function createPackFixture(largeSourceTransfer = false): Promise<{
   await git(source, ["commit", "-am", "clean change"])
   const clean = (await git(source, ["rev-parse", "HEAD"])).trim()
   await execFileAsync("git", ["clone", "--bare", source, origin])
+
+  await git(source, ["switch", "--create", "alternate", base])
+  await writeFile(join(source, "alternate.txt"), "alternate base\n")
+  await git(source, ["add", "alternate.txt"])
+  await git(source, ["commit", "-m", "alternate public base"])
+  const alternate = (await git(source, ["rev-parse", "HEAD"])).trim()
+  await git(source, ["push", origin, `${alternate}:refs/heads/alternate`])
+  await git(source, ["switch", "main"])
 
   await writeFile(join(source, "code.txt"), "line one\nbug\nline three\n")
   if (largeSourceTransfer) {
@@ -779,7 +813,7 @@ async function createPackFixture(largeSourceTransfer = false): Promise<{
       2,
     )}\n`,
   )
-  return { root, pack, cache: join(root, "cache"), origin, base, clean }
+  return { root, pack, cache: join(root, "cache"), origin, base, clean, alternate }
 }
 
 async function git(cwd: string, args: string[]): Promise<string> {

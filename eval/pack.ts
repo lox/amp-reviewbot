@@ -356,6 +356,7 @@ async function resolveExample(
     const bundle = await readBundleHeader(checked.bundlePath)
     for (const prerequisite of bundle.prerequisites) {
       await requirePublicCommit(repository, prerequisite)
+      publicCommits.add(prerequisite)
     }
     for (const head of bundle.heads) bundleHeads.add(head)
     await git(repository, ["bundle", "verify", checked.bundlePath])
