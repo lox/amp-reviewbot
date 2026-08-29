@@ -82,6 +82,14 @@ The command prints progress and saves complete results under `.eval-runs/`. Read
 npm run eval -- report .eval-runs/RUN.json
 ```
 
+If reviews finish but checking their findings is interrupted, finish only those checks without rerunning the reviews:
+
+```sh
+npm run eval -- finish .eval-runs/RUN.json
+```
+
+This uses the local CLI login and does not use `AMP_EVAL_REVIEWER_API_KEY`. It writes a new result, keeps the original unchanged, and records the original file's hash so the two can be compared exactly.
+
 ## Reading the result
 
 A normal report stays plain:

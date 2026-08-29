@@ -1,14 +1,15 @@
 import { createHash, randomUUID } from "node:crypto"
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
 import { resolve } from "node:path"
 import { execute } from "@ampcode/sdk"
 import { z } from "zod"
 import type { ReviewFinding } from "../src/types.js"
 import type { EvalJudgement, ExpectedIssue } from "./schema.js"
 
-const judgeVersion = "3"
+const judgeVersion = "4"
 const judgeMode = "high"
-const judgeProject = "no-project"
+const judgeProject = null
 const judgeSchemaHash = hash('{"matchingFindingIndices":"nonnegative integer[]"}')
 const inFlightVotes = new Map<string, Promise<void>>()
 
@@ -183,7 +184,7 @@ async function readOrCreateJudgeVote(
     signal,
     options: {
       executor: "orb",
-      project: judgeProject,
+      cwd: tmpdir(),
       mode: judgeMode,
       visibility: "private",
       title: `Check known bug match ${caseId}`,

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { execFile, type ChildProcessWithoutNullStreams } from "node:child_process"
-import { randomBytes } from "node:crypto"
+import { createHash, randomBytes } from "node:crypto"
 import { EventEmitter } from "node:events"
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -16,6 +16,7 @@ import {
   reviewerEnvironment,
   runBlindReview,
 } from "../eval/reviewer.js"
+import { finishJudgements, recordFinishedRun } from "../eval/run.js"
 import {
   corpusContentHash,
   evalCaseSchema,
@@ -414,6 +415,83 @@ describe("eval scoring", () => {
 describe("eval judging", () => {
   it("uses a majority only for disputed finding matches", () => {
     assert.deepEqual(resolveMatchingVotes([[0, 2], [1, 2], [0, 2]]), [0, 2])
+  })
+
+  it("checks finding matches without requiring a source project", async () => {
+    const cacheDirectory = await mkdtemp(join(tmpdir(), "amp-reviewbot-eval-"))
+    const options: Array<Record<string, unknown>> = []
+    const executeJudge = async function* (input: { options: Record<string, unknown> }) {
+      options.push(input.options)
+      yield judgeResult()
+    }
+
+    try {
+      const result = await judgeIssue(
+        "blocking",
+        blocking.issues[0]!,
+        [highFinding],
+        cacheDirectory,
+        "test-sdk",
+        new AbortController().signal,
+        executeJudge as never,
+      )
+      assert.equal(options.length, 2)
+      assert.ok(options.every((item) => !("project" in item)))
+      assert.ok(options.every((item) => item.cwd === tmpdir()))
+      assert.equal(result.provenance.project, null)
+    } finally {
+      await rm(cacheDirectory, { recursive: true, force: true })
+    }
+  })
+
+  it("finishes missing comparisons without changing saved reviews", async () => {
+    const sample = completed("blocking", 1, blocking, "failure", [highFinding], [])
+    const sourceRun = makeRun([evalCase("blocking", blocking)], 1, [
+      {
+        ...sample,
+        judgementErrors: [{ issueId: "known-failure", error: "comparison failed" }],
+      },
+    ])
+    const sourceBytes = Buffer.from(`${JSON.stringify(sourceRun, null, 2)}\n`)
+    let calls = 0
+    const judge = (async () => {
+      calls += 1
+      return judgement([0], false)
+    }) as typeof judgeIssue
+
+    const { run, attempted } = await finishJudgements(
+      sourceRun,
+      { judgeCache: "/unused", concurrency: 1, timeoutMs: 1_000 },
+      "test-sdk",
+      judge,
+    )
+    assert.equal(attempted, 1)
+    assert.equal(calls, 1)
+    assert.equal(run.samples[0]!.status, "completed")
+    if (run.samples[0]!.status !== "completed") assert.fail("expected completed sample")
+    if (sourceRun.samples[0]!.status !== "completed") assert.fail("expected completed source")
+    assert.equal(run.samples[0]!.rawResult, sourceRun.samples[0]!.rawResult)
+    assert.equal(run.samples[0]!.durationMs, sourceRun.samples[0]!.durationMs)
+    assert.deepEqual(run.samples[0]!.judgementErrors, [])
+    assert.equal(run.samples[0]!.judgements.length, 1)
+
+    const noOp = await finishJudgements(
+      run,
+      { judgeCache: "/unused", concurrency: 1, timeoutMs: 1_000 },
+      "test-sdk",
+      judge,
+    )
+    assert.equal(noOp.attempted, 0)
+    assert.equal(calls, 1)
+
+    const finishedAt = "2026-08-29T10:00:00.000Z"
+    const recorded = recordFinishedRun(run, sourceBytes, finishedAt)
+    assert.equal(recorded.completedAt, sourceRun.completedAt)
+    assert.deepEqual(recorded.finishedFrom, {
+      sourceArtifactHash: `sha256:${createHash("sha256").update(sourceBytes).digest("hex")}`,
+      finishedAt,
+    })
+    assert.equal(sourceRun.finishedFrom, undefined)
   })
 
   it("runs one judge per vote for concurrent identical findings", async () => {

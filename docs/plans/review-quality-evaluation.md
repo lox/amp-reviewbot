@@ -100,6 +100,8 @@ The main report answers:
 
 The saved JSON keeps exact commits, context, changed lines, raw output, filtered findings, conclusions, matching votes, code and prompt hashes, timing, and errors. Re-reading a saved report makes no model or network calls.
 
+If matching fails after reviews finish, `npm run eval -- finish RUN.json` retries only the missing matches through the local CLI login. It writes a new file, preserves the original review evidence and timing, and records the exact hash of the source file. It does not rerun reviews or use the separate review-account key.
+
 One finding can match at most one known bug, and one known bug can be counted at most once per review. Extra findings stay visible and reduce finding precision. A correct failure conclusion receives “right response” credit only when all known bugs for that version were found at the correct side of the blocking threshold.
 
 ## Scientific limits
@@ -129,5 +131,6 @@ Because LLMs create and check most labels, report agreement with the labeled exa
 - The runner uses local CLI authentication by default; when a review key is supplied, the review child receives only that key and basic connection settings.
 - Production prompts are unchanged when no eval source preparation is supplied.
 - Saved runs reject altered corpus evidence, invalid finding indexes, and conclusions that do not follow from raw production output.
+- Interrupted matching can finish into a new traceable result without changing or rerunning saved reviews.
 - One finding cannot earn recall for two known bugs.
 - A live one-sample smoke run succeeds in the review account's source project before the full repeated run.
