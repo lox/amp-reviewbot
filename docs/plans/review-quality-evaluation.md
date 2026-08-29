@@ -125,6 +125,8 @@ Because LLMs create and check most labels, report agreement with the labeled exa
 7. Run the full first example three times.
 8. Freeze the benchmark selection and holdout before tuning the reviewer against it.
 
+Normal `run` commands select development examples and exclude holdouts. After choosing a candidate reviewer, use `--split holdout` to run only the frozen holdout.
+
 ## Verification
 
 - Normal typecheck, tests, and build pass without live Amp calls.

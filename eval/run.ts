@@ -17,6 +17,7 @@ import {
   type ReviewAuthentication,
 } from "./reviewer.js"
 import {
+  corpusSchema,
   corpusContentHash,
   evalRunSchema,
   expectedKind,
@@ -39,6 +40,7 @@ type RunOptions = {
   samplesPerCase: number
   concurrency: number
   timeoutMs: number
+  split: NonNullable<EvalCase["split"]>
 }
 
 type FinishOptions = {
@@ -127,7 +129,14 @@ async function runEvaluation(options: RunOptions): Promise<{ run: EvalRun; score
   )
   const account = await reviewAuthentication(options.reviewerApiKey)
   console.log("Checking source commits and changed lines...")
-  const { corpus, sourcePreparation } = await loadPack(options.packPath, options.sourceCache)
+  const loaded = await loadPack(options.packPath, options.sourceCache)
+  const cases = selectCases(loaded.corpus.cases, options.split)
+  if (cases.length === 0) throw new Error(`The example pack has no ${options.split} cases`)
+  const corpus = corpusSchema.parse({
+    version: `${loaded.corpus.version}-${options.split}`,
+    cases,
+  })
+  const sourcePreparation = loaded.sourcePreparation
   const startedAt = new Date().toISOString()
   const reviewer = await reviewerProvenance(options.project, account)
   const tasks = corpus.cases.flatMap((evalCase) =>
@@ -174,6 +183,15 @@ async function runEvaluation(options: RunOptions): Promise<{ run: EvalRun; score
     samples,
   })
   return { run, score: scoreRun(run) }
+}
+
+export function selectCases(
+  cases: EvalCase[],
+  split: NonNullable<EvalCase["split"]>,
+): EvalCase[] {
+  return cases.filter((evalCase) =>
+    split === "development" ? evalCase.split !== "holdout" : evalCase.split === "holdout",
+  )
 }
 
 export async function finishJudgements(
@@ -445,6 +463,10 @@ function runOptions(args: string[]): RunOptions {
   )
   const stamp = new Date().toISOString().replaceAll(/[:.]/g, "-")
   const cacheRoot = flag(args, "--cache") ?? resolve(".eval-cache")
+  const split = flag(args, "--split") ?? "development"
+  if (split !== "development" && split !== "holdout") {
+    throw new Error("--split must be development or holdout")
+  }
   return {
     packPath,
     project,
@@ -455,6 +477,7 @@ function runOptions(args: string[]): RunOptions {
     samplesPerCase,
     concurrency,
     timeoutMs: timeoutMinutes * 60_000,
+    split,
   }
 }
 
@@ -548,11 +571,11 @@ function formatDuration(milliseconds: number): string {
 function printHelp(): void {
   console.log(`Usage:
   npm run eval -- check PACK
-  npm run eval -- run PACK --project PROJECT [--samples 3] [--concurrency 2]
+  npm run eval -- run PACK --project PROJECT [--split development|holdout] [--samples 3] [--concurrency 2]
   npm run eval -- finish RUN.json [--concurrency 2]
   npm run eval -- report RUN.json
 
-Check an example pack, run reviews, finish interrupted finding comparisons, or read a saved report. Reviews and matching use the authenticated local Amp CLI. Set AMP_EVAL_REVIEWER_API_KEY only when review orbs should use another account.`)
+Check an example pack, run development reviews by default, finish interrupted finding comparisons, or read a saved report. Reviews and matching use the authenticated local Amp CLI. Set AMP_EVAL_REVIEWER_API_KEY only when review orbs should use another account.`)
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {

@@ -65,11 +65,21 @@ Check the pack's files without starting reviews:
 npm run eval -- check /path/to/review-eval-pack
 ```
 
-Run every code version three times, with at most two reviews running at once:
+Run development code versions three times, with at most two reviews running at once. Holdout examples are excluded by default:
 
 ```sh
 npm run eval -- run /path/to/review-eval-pack \
   --project REVIEW_PROJECT \
+  --samples 3 \
+  --concurrency 2
+```
+
+After choosing a candidate reviewer, run only the held-back examples explicitly:
+
+```sh
+npm run eval -- run /path/to/review-eval-pack \
+  --project REVIEW_PROJECT \
+  --split holdout \
   --samples 3 \
   --concurrency 2
 ```

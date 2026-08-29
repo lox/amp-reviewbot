@@ -16,7 +16,7 @@ import {
   reviewerEnvironment,
   runBlindReview,
 } from "../eval/reviewer.js"
-import { finishJudgements, recordFinishedRun } from "../eval/run.js"
+import { finishJudgements, recordFinishedRun, selectCases } from "../eval/run.js"
 import {
   corpusContentHash,
   evalCaseSchema,
@@ -390,6 +390,21 @@ describe("eval example packs", () => {
     )
     assert.equal(separate.authentication, "reviewer-api-key")
     assert.match(separate.reviewerIdHash, /^sha256:[0-9a-f]{64}$/)
+  })
+
+  it("keeps holdouts out of development runs", () => {
+    const legacy = evalCase("legacy", control)
+    const development = { ...evalCase("development", control), split: "development" as const }
+    const holdout = { ...evalCase("holdout", control), split: "holdout" as const }
+
+    assert.deepEqual(
+      selectCases([legacy, development, holdout], "development").map((item) => item.id),
+      ["legacy", "development"],
+    )
+    assert.deepEqual(
+      selectCases([legacy, development, holdout], "holdout").map((item) => item.id),
+      ["holdout"],
+    )
   })
 })
 
