@@ -3,7 +3,7 @@
 This evaluation answers four questions:
 
 1. Does the reviewer leave a clean change alone?
-2. Does it find each known bug?
+2. Does it find each known issue?
 3. Does it use the right urgency?
 4. Does it give the same answer across repeated reviews?
 
@@ -21,7 +21,9 @@ examples/
     witnesses/              # focused tests; optional
 ```
 
-[`example.json`](example.json) shows the format. It records the exact public pull-request context and one or more code versions. Each version has a commit and `knownIssues`. A clean version has an empty list. A bug records its cause, visible failure, severity, changed line, and how it was checked.
+[`example.json`](example.json) shows the format. It records the exact public pull-request context, whether the example is a pilot, human review, or synthetic change, and whether it is used during development or held back. Each version has a commit and `knownIssues`. A clean version has an empty list. An issue records its cause, visible effect, severity, changed line, category, and how it was checked.
+
+A human-review example has one exact pre-fix version. A synthetic example has one clean version and one direct child commit with a single introduced issue. The labeled line must be changed by that child commit, not merely by the original pull request. Behavioral defects and maintainability advisories are recorded separately; duplication and non-idiomatic Go are advisories rather than behavioral bugs.
 
 The runner calculates changed lines from the exact Git diff. It does not store a second hand-written copy. It also calculates the expected `success`, `neutral`, or `failure` result from issue severity at `FAIL_ON=high`.
 
@@ -63,7 +65,7 @@ Check the pack's files without starting reviews:
 npm run eval -- check /path/to/review-eval-pack
 ```
 
-Run every code version three times, with at most two reviews running at once:
+Run development code versions three times, with at most two reviews running at once. Holdout examples are excluded by default:
 
 ```sh
 npm run eval -- run /path/to/review-eval-pack \
@@ -72,9 +74,19 @@ npm run eval -- run /path/to/review-eval-pack \
   --concurrency 2
 ```
 
-Before the first review, this command validates any review key, fetches the public source, verifies any source bundle, checks every commit, calculates changed lines, and rejects a known bug that does not point to a changed line.
+After choosing a candidate reviewer, run only the held-back examples explicitly:
 
-Every review then uses a fresh private Amp orb and the same prompt builder, two-pass review method, JSON parser, changed-line filter, and conclusion calculation as production. The trusted account uses two independent high-mode checks to decide whether a finding describes a known bug; it uses a third only when they disagree.
+```sh
+npm run eval -- run /path/to/review-eval-pack \
+  --project REVIEW_PROJECT \
+  --split holdout \
+  --samples 3 \
+  --concurrency 2
+```
+
+Before the first review, this command validates any review key, fetches the public source, verifies any source bundle, checks every commit, calculates changed lines, and rejects a known issue that does not point to a changed line. For a synthetic example, it also checks that the issue version is one commit on top of the clean version and that the labeled line changed in that commit.
+
+Every review then uses a fresh private Amp orb and the same prompt builder, two-pass review method, JSON parser, changed-line filter, and conclusion calculation as production. The trusted account uses two independent high-mode checks to decide whether a finding describes a known issue; it uses a third only when they disagree.
 
 The command prints progress and saves complete results under `.eval-runs/`. Read a saved result without making network or model calls:
 
@@ -97,13 +109,13 @@ A normal report stays plain:
 ```text
 Review evaluation: NEEDS WORK
 
-1 clean change, 1 smaller bug, and 1 serious bug.
+1 clean change, 1 smaller issue, and 1 serious issue.
 Each was reviewed 3 times. All 9 reviews completed.
 
 Example 1 (pull request #1234)
   Clean change: 3 of 3 completed reviews had no false alarms
-  Smaller bug: found in 3 of 3; right response in 2 of 3
-  Serious bug: found in 3 of 3; right response in 0 of 3
+  Smaller issue: found in 3 of 3; right response in 2 of 3
+  Serious issue: found in 3 of 3; right response in 0 of 3
 ```
 
 The saved file retains exact commits and context, prompt and code hashes, model IDs when available, raw and filtered findings, conclusions, matching votes, timing, and errors.

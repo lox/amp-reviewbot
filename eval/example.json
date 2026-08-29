@@ -1,6 +1,8 @@
 {
   "formatVersion": 1,
   "id": "review-example",
+  "origin": "synthetic",
+  "split": "development",
   "source": {
     "repository": "example/repository",
     "pullRequest": 1234,
@@ -19,21 +21,6 @@
       "knownIssues": []
     },
     {
-      "name": "smaller-bug",
-      "commit": "cccccccccccccccccccccccccccccccccccccccc",
-      "knownIssues": [
-        {
-          "id": "upload-error-context",
-          "severity": "medium",
-          "rootCause": "The retry path replaces the first upload error instead of retaining both causes.",
-          "failureBehavior": "Operators lose the error that explains why the first upload attempt failed.",
-          "path": "src/upload.ts",
-          "line": 85,
-          "verification": "A focused test keeps both error identities on the clean version."
-        }
-      ]
-    },
-    {
       "name": "serious-bug",
       "commit": "dddddddddddddddddddddddddddddddddddddddd",
       "knownIssues": [
@@ -44,7 +31,9 @@
           "failureBehavior": "A lost response after a successful upload causes the retry to create duplicate remote objects.",
           "path": "src/upload.ts",
           "line": 85,
-          "verification": "A focused test reproduces the duplicate upload only on this version."
+          "verification": "A focused test reproduces the duplicate upload only on this version.",
+          "nature": "behavioral-defect",
+          "category": "functional-correctness"
         }
       ]
     }

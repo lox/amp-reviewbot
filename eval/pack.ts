@@ -14,10 +14,22 @@ import { basename, dirname, join, resolve, sep } from "node:path"
 import { promisify } from "node:util"
 import { z } from "zod"
 import { parseChangedLines } from "../src/github.js"
-import { corpusSchema, pullRequestContextSchema, type EvalCorpus } from "./schema.js"
+import {
+  corpusSchema,
+  exampleOriginSchema,
+  exampleSplitSchema,
+  issueCategorySchema,
+  issueNatureSchema,
+  issueSubtypeSchema,
+  pullRequestContextSchema,
+  type EvalCorpus,
+} from "./schema.js"
 
 const execFileAsync = promisify(execFile)
-const shaSchema = z.string().regex(/^[0-9a-f]{40}$/i, "must be a full 40-character commit SHA")
+const shaSchema = z
+  .string()
+  .regex(/^[0-9a-f]{40}$/i, "must be a full 40-character commit SHA")
+  .transform((value) => value.toLowerCase())
 const nameSchema = z
   .string()
   .max(100)
@@ -41,13 +53,57 @@ const packIssueSchema = z
     line: z.number().int().positive(),
     verification: z.string().min(1).max(8_000),
     witness: relativePathSchema.optional(),
+    nature: issueNatureSchema.optional(),
+    category: issueCategorySchema.optional(),
+    subtype: issueSubtypeSchema.optional(),
   })
   .strict()
+  .superRefine((issue, context) => {
+    if (issue.nature === "maintainability-advisory") {
+      if (issue.category !== "maintainability") {
+        context.addIssue({
+          code: "custom",
+          path: ["category"],
+          message: "a maintainability advisory must use the maintainability category",
+        })
+      }
+      if (issue.severity === "critical" || issue.severity === "high") {
+        context.addIssue({
+          code: "custom",
+          path: ["severity"],
+          message: "a maintainability advisory cannot be blocking",
+        })
+      }
+    }
+    if (issue.category === "maintainability" && issue.nature === "behavioral-defect") {
+      context.addIssue({
+        code: "custom",
+        path: ["nature"],
+        message: "the maintainability category must be recorded as an advisory",
+      })
+    }
+    if (issue.subtype && issue.category !== "maintainability") {
+      context.addIssue({
+        code: "custom",
+        path: ["subtype"],
+        message: "duplication and non-idiomatic Go are maintainability subtypes",
+      })
+    }
+    if (issue.subtype === "non-idiomatic-go" && issue.severity !== "low") {
+      context.addIssue({
+        code: "custom",
+        path: ["severity"],
+        message: "a non-idiomatic Go advisory must use low severity",
+      })
+    }
+  })
 
 export const exampleSchema = z
   .object({
     formatVersion: z.literal(1),
     id: nameSchema,
+    origin: exampleOriginSchema.optional(),
+    split: exampleSplitSchema.optional(),
     source: z
       .object({
         repository: z.string().regex(/^[^/]+\/[^/]+$/),
@@ -70,6 +126,40 @@ export const exampleSchema = z
   })
   .strict()
   .superRefine((example, context) => {
+    if (
+      (example.origin === "human-review" || example.origin === "synthetic") &&
+      !example.split
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["split"],
+        message: "benchmark examples must declare development or holdout",
+      })
+    }
+    if (example.origin === "human-review") {
+      if (example.versions.length !== 1 || example.versions[0]?.knownIssues.length === 0) {
+        context.addIssue({
+          code: "custom",
+          path: ["versions"],
+          message: "a human-review example must have one reviewed version with a known issue",
+        })
+      }
+    }
+    if (example.origin === "synthetic") {
+      const cleanVersions = example.versions.filter((version) => version.knownIssues.length === 0)
+      const changedVersions = example.versions.filter((version) => version.knownIssues.length === 1)
+      if (
+        example.versions.length !== 2 ||
+        cleanVersions.length !== 1 ||
+        changedVersions.length !== 1
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["versions"],
+          message: "a synthetic example must have one clean version and one single-issue version",
+        })
+      }
+    }
     const names = new Set<string>()
     const commits = new Set<string>()
     example.versions.forEach((version, versionIndex) => {
@@ -92,6 +182,27 @@ export const exampleSchema = z
 
       const issueIds = new Set<string>()
       version.knownIssues.forEach((issue, issueIndex) => {
+        if (
+          (example.origin === "human-review" || example.origin === "synthetic") &&
+          (!issue.nature || !issue.category)
+        ) {
+          context.addIssue({
+            code: "custom",
+            path: ["versions", versionIndex, "knownIssues", issueIndex],
+            message: "benchmark issues must declare their nature and category",
+          })
+        }
+        if (
+          example.origin === "synthetic" &&
+          issue.category === "maintainability" &&
+          !issue.subtype
+        ) {
+          context.addIssue({
+            code: "custom",
+            path: ["versions", versionIndex, "knownIssues", issueIndex, "subtype"],
+            message: "synthetic maintainability issues must declare duplication or non-idiomatic Go",
+          })
+        }
         if (issueIds.has(issue.id)) {
           context.addIssue({
             code: "custom",
@@ -255,6 +366,7 @@ async function resolveExample(
     const bundle = await readBundleHeader(checked.bundlePath)
     for (const prerequisite of bundle.prerequisites) {
       await requirePublicCommit(repository, prerequisite)
+      publicCommits.add(prerequisite)
     }
     for (const head of bundle.heads) bundleHeads.add(head)
     await git(repository, ["bundle", "verify", checked.bundlePath])
@@ -263,6 +375,29 @@ async function resolveExample(
       checked.bundlePath,
       `+refs/heads/*:refs/reviewbot-eval/${example.id}/*`,
     ])
+  }
+
+  if (example.origin === "synthetic") {
+    const cleanVersion = example.versions.find((version) => version.knownIssues.length === 0)!
+    const issueVersion = example.versions.find((version) => version.knownIssues.length === 1)!
+    const { stdout } = await git(repository, ["rev-list", "--parents", "-n", "1", issueVersion.commit])
+    const parents = stdout.trim().split(/\s+/).slice(1)
+    if (parents.length !== 1 || parents[0] !== cleanVersion.commit) {
+      throw new Error(
+        `Synthetic version ${example.id}/${issueVersion.name} must be one direct commit on top of ${cleanVersion.name}`,
+      )
+    }
+    const mutationLines = await deriveChangedLines(
+      repository,
+      cleanVersion.commit,
+      issueVersion.commit,
+    )
+    const issue = issueVersion.knownIssues[0]!
+    if (!mutationLines[issue.path]?.includes(issue.line)) {
+      throw new Error(
+        `Known issue ${issue.id} must point to a line changed by the synthetic commit`,
+      )
+    }
   }
 
   const cases: EvalCorpus["cases"] = []
@@ -290,6 +425,8 @@ async function resolveExample(
       pullNumber: example.source.pullRequest,
       baseSha: example.source.baseCommit,
       headSha: version.commit,
+      ...(example.origin ? { origin: example.origin } : {}),
+      ...(example.split ? { split: example.split } : {}),
       context: example.source.context,
       changedLines,
       expected: {
@@ -537,5 +674,5 @@ function publicSourceUrl(repository: string): string {
 }
 
 export function describePack(summary: PackSummary): string {
-  return `${summary.versions} code ${summary.versions === 1 ? "version" : "versions"} across ${summary.examples} ${summary.examples === 1 ? "example" : "examples"}, with ${summary.knownIssues} known ${summary.knownIssues === 1 ? "bug" : "bugs"}`
+  return `${summary.versions} code ${summary.versions === 1 ? "version" : "versions"} across ${summary.examples} ${summary.examples === 1 ? "example" : "examples"}, with ${summary.knownIssues} known ${summary.knownIssues === 1 ? "issue" : "issues"}`
 }
