@@ -58,12 +58,53 @@ describe("eval example packs", () => {
   it("accepts the documented minimal format without requiring a triplet", async () => {
     const input: unknown = JSON.parse(await readFile("eval/example.json", "utf8"))
     const example = exampleSchema.parse(input)
-    assert.equal(example.versions.length, 3)
-    assert.equal((await checkPack("eval")).summary.knownIssues, 2)
+    assert.equal(example.origin, "synthetic")
+    assert.equal(example.split, "development")
+    assert.equal(example.versions.length, 2)
+    assert.equal((await checkPack("eval")).summary.knownIssues, 1)
 
     const oneVersion = structuredClone(example)
+    delete oneVersion.origin
+    delete oneVersion.split
     oneVersion.versions.splice(1)
     assert.equal(exampleSchema.parse(oneVersion).versions.length, 1)
+  })
+
+  it("keeps maintainability advisories non-blocking", async () => {
+    const input = JSON.parse(await readFile("eval/example.json", "utf8")) as {
+      versions: Array<{
+        knownIssues: Array<{
+          severity: string
+          nature?: string
+          category?: string
+          subtype?: string
+        }>
+      }>
+    }
+    const issue = input.versions[1]!.knownIssues[0]!
+    issue.nature = "maintainability-advisory"
+    issue.category = "maintainability"
+    issue.subtype = "duplication"
+    assert.throws(() => exampleSchema.parse(input), /maintainability advisory cannot be blocking/)
+  })
+
+  it("requires synthetic maintainability issues to identify their subtype", async () => {
+    const input = JSON.parse(await readFile("eval/example.json", "utf8")) as {
+      versions: Array<{
+        knownIssues: Array<{
+          severity: string
+          nature?: string
+          category?: string
+          subtype?: string
+        }>
+      }>
+    }
+    const issue = input.versions[1]!.knownIssues[0]!
+    issue.severity = "medium"
+    issue.nature = "maintainability-advisory"
+    issue.category = "maintainability"
+    delete issue.subtype
+    assert.throws(() => exampleSchema.parse(input), /must declare duplication or non-idiomatic Go/)
   })
 
   it("rejects duplicate version commits", async () => {
@@ -95,7 +136,7 @@ describe("eval example packs", () => {
       assert.equal(loaded.corpus.cases.length, 2)
       assert.deepEqual(
         loaded.corpus.cases.map((item) => item.changedLines),
-        [{ "code.txt": [2] }, { "code.txt": [2] }],
+        [{ "code.txt": [2, 3] }, { "code.txt": [2, 3] }],
       )
       assert.equal(expectedConclusion(loaded.corpus.cases[1]!.expected), "failure")
       assert.equal(loaded.sourcePreparation.has("local-example/clean-change"), false)
@@ -132,6 +173,36 @@ describe("eval example packs", () => {
       await assert.rejects(
         loadPack(fixture.pack, fixture.cache, () => fixture.origin),
         /not public or advertised by this example's commits\.bundle/,
+      )
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  it("requires a synthetic issue to be introduced directly on the labeled line", async () => {
+    const fixture = await createPackFixture()
+    const examplePath = join(fixture.pack, "examples", "local-example", "example.json")
+    try {
+      const input = JSON.parse(await readFile(examplePath, "utf8")) as {
+        versions: Array<{
+          commit: string
+          knownIssues: Array<{ line: number }>
+        }>
+      }
+
+      input.versions[0]!.commit = fixture.base
+      await writeFile(examplePath, `${JSON.stringify(input, null, 2)}\n`)
+      await assert.rejects(
+        loadPack(fixture.pack, fixture.cache, () => fixture.origin),
+        /must be one direct commit on top of clean-change/,
+      )
+
+      input.versions[0]!.commit = fixture.clean
+      input.versions[1]!.knownIssues[0]!.line = 3
+      await writeFile(examplePath, `${JSON.stringify(input, null, 2)}\n`)
+      await assert.rejects(
+        loadPack(fixture.pack, fixture.cache, () => fixture.origin),
+        /must point to a line changed by the synthetic commit/,
       )
     } finally {
       await rm(fixture.root, { recursive: true, force: true })
@@ -273,7 +344,7 @@ describe("eval scoring", () => {
     const report = formatReport(run, score)
     assert.match(report, /Review evaluation: INCOMPLETE/)
     assert.match(report, /Clean change: 1 of 2 completed reviews had no false alarms/)
-    assert.match(report, /Serious bug: found in 2 of 3; right response in 1 of 3/)
+    assert.match(report, /Serious issue: found in 2 of 3; right response in 1 of 3/)
     assert.match(report, /This result covers only these examples/)
 
     const completeRun = makeRun(cases, 3, [
@@ -286,10 +357,10 @@ describe("eval scoring", () => {
     ])
     const completeReport = formatReport(completeRun, scoreRun(completeRun))
     assert.match(completeReport, /Review evaluation: NEEDS WORK/)
-    assert.match(completeReport, /Serious bug: found in 3 of 3; right response in 0 of 3/)
+    assert.match(completeReport, /Serious issue: found in 3 of 3; right response in 0 of 3/)
   })
 
-  it("does not let one finding count as two known bugs", () => {
+  it("does not let one finding count as two known issues", () => {
     const twoIssues: ExpectedResult = {
       issues: [
         blocking.issues[0]!,
@@ -641,12 +712,12 @@ async function createPackFixture(largeSourceTransfer = false): Promise<{
   await git(source, ["add", "code.txt"])
   await git(source, ["commit", "-m", "base"])
   const base = (await git(source, ["rev-parse", "HEAD"])).trim()
-  await writeFile(join(source, "code.txt"), "line one\nline two\n")
+  await writeFile(join(source, "code.txt"), "line one\nline two\nline three\n")
   await git(source, ["commit", "-am", "clean change"])
   const clean = (await git(source, ["rev-parse", "HEAD"])).trim()
   await execFileAsync("git", ["clone", "--bare", source, origin])
 
-  await writeFile(join(source, "code.txt"), "line one\nbug\n")
+  await writeFile(join(source, "code.txt"), "line one\nbug\nline three\n")
   if (largeSourceTransfer) {
     await writeFile(join(source, "large-source.bin"), randomBytes(128 * 1024))
   }
@@ -669,6 +740,8 @@ async function createPackFixture(largeSourceTransfer = false): Promise<{
       {
         formatVersion: 1,
         id: "local-example",
+        origin: "synthetic",
+        split: "development",
         source: {
           repository: "example/repository",
           pullRequest: 42,
@@ -695,6 +768,8 @@ async function createPackFixture(largeSourceTransfer = false): Promise<{
                 line: 2,
                 verification: "The focused test fails only here.",
                 witness: "witnesses/bug.patch",
+                nature: "behavioral-defect",
+                category: "functional-correctness",
               },
             ],
           },

@@ -8,6 +8,18 @@ const artifactHashSchema = z
   .string()
   .regex(/^sha256:[0-9a-f]{64}$/i, "must be a sha256 artifact hash")
 const conclusionSchema = z.enum(["success", "neutral", "failure"])
+export const exampleOriginSchema = z.enum(["pilot", "human-review", "synthetic"])
+export const exampleSplitSchema = z.enum(["development", "holdout"])
+export const issueNatureSchema = z.enum(["behavioral-defect", "maintainability-advisory"])
+export const issueCategorySchema = z.enum([
+  "functional-correctness",
+  "concurrency",
+  "resource-lifecycle",
+  "error-handling",
+  "api-contract",
+  "maintainability",
+])
+export const issueSubtypeSchema = z.enum(["duplication", "non-idiomatic-go"])
 
 export const pullRequestContextSchema = z
   .object({
@@ -28,8 +40,43 @@ export const expectedIssueSchema = z
     changedLine: z.number().int().positive(),
     verification: z.string().min(1).max(8_000),
     witness: z.string().min(1).max(1_000).optional(),
+    nature: issueNatureSchema.optional(),
+    category: issueCategorySchema.optional(),
+    subtype: issueSubtypeSchema.optional(),
   })
   .strict()
+  .superRefine((issue, context) => {
+    if (issue.nature === "maintainability-advisory") {
+      if (issue.category !== "maintainability") {
+        context.addIssue({
+          code: "custom",
+          path: ["category"],
+          message: "a maintainability advisory must use the maintainability category",
+        })
+      }
+      if (issue.severity === "critical" || issue.severity === "high") {
+        context.addIssue({
+          code: "custom",
+          path: ["severity"],
+          message: "a maintainability advisory cannot be blocking",
+        })
+      }
+    }
+    if (issue.category === "maintainability" && issue.nature === "behavioral-defect") {
+      context.addIssue({
+        code: "custom",
+        path: ["nature"],
+        message: "the maintainability category must be recorded as an advisory",
+      })
+    }
+    if (issue.subtype && issue.category !== "maintainability") {
+      context.addIssue({
+        code: "custom",
+        path: ["subtype"],
+        message: "duplication and non-idiomatic Go are maintainability subtypes",
+      })
+    }
+  })
 
 const expectedSchema = z
   .object({
@@ -59,6 +106,8 @@ export const evalCaseSchema = z
     pullNumber: z.number().int().positive(),
     baseSha: shaSchema,
     headSha: shaSchema,
+    origin: exampleOriginSchema.optional(),
+    split: exampleSplitSchema.optional(),
     context: pullRequestContextSchema,
     changedLines: z.record(
       z.string().min(1),
@@ -129,6 +178,8 @@ export const corpusSchema = z
           evalCase.repositoryFullName !== first.repositoryFullName ||
           evalCase.pullNumber !== first.pullNumber ||
           evalCase.baseSha !== first.baseSha ||
+          evalCase.origin !== first.origin ||
+          evalCase.split !== first.split ||
           !isDeepStrictEqual(evalCase.context, first.context)
         ) {
           context.addIssue({

@@ -6,9 +6,9 @@ export function formatReport(run: EvalRun, score: EvalScore): string {
   const lines = [`Review evaluation: ${reportVerdict(score)}`, ""]
   const counts = countKinds(run.cases)
   lines.push(
-    `${countLabel(counts.control, "clean change")}, ${countLabel(counts.advisory, "smaller bug")}, and ${countLabel(counts.blocking, "serious bug")}.`,
+    `${countLabel(counts.control, "clean change")}, ${countLabel(counts.advisory, "smaller issue")}, and ${countLabel(counts.blocking, "serious issue")}.`,
     `Each was reviewed ${run.requestedSamplesPerCase} ${run.requestedSamplesPerCase === 1 ? "time" : "times"}. ${completionSentence(run, score)}`,
-    "A right response reports a smaller bug without blocking, and blocks a serious bug.",
+    "A right response reports a smaller issue without blocking, and blocks a serious issue.",
   )
 
   const scores = new Map(score.cases.map((caseScore) => [caseScore.caseId, caseScore]))
@@ -76,7 +76,7 @@ function caseResult(
   const opportunities = score.samples * score.knownIssues
   const found = rateCount(score.issueDetectionRate, opportunities)
   const rightResponse = rateCount(score.groundedConclusionAgreement, score.samples)
-  const label = kind === "advisory" ? "Smaller bug" : "Serious bug"
+  const label = kind === "advisory" ? "Smaller issue" : "Serious issue"
   const retainedFindings = samples.reduce(
     (total, sample) =>
       total + (sample.status === "completed" ? sample.retainedResult.findings.length : 0),
@@ -90,7 +90,7 @@ function caseResult(
   const foundText =
     score.knownIssues === 1
       ? `found in ${found} of ${score.samples}`
-      : `${found} of ${opportunities} known bugs found`
+      : `${found} of ${opportunities} known issues found`
   return `${label}: ${foundText}; right response in ${rightResponse} of ${score.samples}${otherFindingsText}`
 }
 
@@ -124,7 +124,7 @@ function bottomLine(run: EvalRun, score: EvalScore): string {
     return "Some reviews did not finish, so this run cannot give a complete answer."
   }
   if (score.judgeCoverage !== null && score.judgeCoverage < 1) {
-    return "Some findings could not be checked against the known bugs, so this run cannot give a complete answer."
+    return "Some findings could not be checked against the known issues, so this run cannot give a complete answer."
   }
   const cases = new Map(run.cases.map((evalCase) => [evalCase.id, evalCase]))
   const cleanScores = score.cases.filter(
@@ -160,11 +160,11 @@ function bottomLine(run: EvalRun, score: EvalScore): string {
   }
   if (bugsFound < bugReviews) {
     observations.push(
-      `The reviewer missed the known bug in ${bugReviews - bugsFound} of ${bugReviews} bug reviews.`,
+      `The reviewer missed the known issue in ${bugReviews - bugsFound} of ${bugReviews} issue reviews.`,
     )
   } else if (rightResponses < bugVersionReviews) {
     observations.push(
-      "The reviewer found every known bug, but did not always respond with the right urgency.",
+      "The reviewer found every known issue, but did not always respond with the right urgency.",
     )
   }
   return observations.length > 0

@@ -536,7 +536,7 @@ async function installedSdkVersion(): Promise<string> {
 function kindLabel(evalCase: EvalCase): string {
   const kind = expectedKind(evalCase.expected)
   if (kind === "control") return "clean change"
-  return kind === "advisory" ? "smaller bug" : "serious bug"
+  return kind === "advisory" ? "smaller issue" : "serious issue"
 }
 
 function formatDuration(milliseconds: number): string {

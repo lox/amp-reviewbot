@@ -7,8 +7,8 @@ Give us a fast, credible way to improve amp-reviewbot without pretending an LLM 
 For each exact code version, measure:
 
 - whether the final result is `success`, `neutral`, or `failure` at `FAIL_ON=high`;
-- whether each known material bug was found;
-- how many findings did not match a known bug;
+- whether each known material issue was found;
+- how many findings did not match a known issue;
 - whether severity crossed the right blocking threshold; and
 - how often repeated fresh reviews agree.
 
@@ -26,12 +26,14 @@ examples/
     witnesses/           # optional focused tests
 ```
 
-`example.json` contains public pull-request context once, followed by one or more exact code versions. Each version has `knownIssues`. A clean version has none. A bug records only its cause, failure behavior, severity, changed location, and verification evidence.
+`example.json` contains public pull-request context once, followed by one or more exact code versions. It records whether the example is a pilot, human review, or synthetic change, and whether it is used during development or held back. Each version has `knownIssues`. A clean version has none. An issue records its cause, failure behavior, severity, category, changed location, and verification evidence.
 
-This handles both kinds of examples:
+This handles both benchmark groups:
 
-- deliberately introduced bugs, normally paired with a focused test; and
-- bugs found in a historical human review, after a stronger model checks the review claim against the exact code.
+- a historical pre-fix revision where a non-author human review requested a concrete change and independent evidence confirms the issue; and
+- a directly checked clean revision plus one direct child commit containing a single deliberately introduced issue, normally paired with focused evidence.
+
+Behavioral defects and maintainability advisories are distinct. Substantial duplicated logic can be a medium advisory when it has a concrete divergence cost. Non-idiomatic Go is low and requires official guidance or a dominant repository convention. Neither is described as a behavioral bug.
 
 Approval, merge, draft status, and silence are never labels. A clean example must be checked directly. LLM-checked labels are described as such rather than called human ground truth.
 
@@ -42,7 +44,7 @@ private example pack on the trusted machine
   -> verify exact source and calculate changed lines
   -> send only source and public PR context to a fresh review orb
   -> parse and filter with production code
-  -> use trusted matching calls to compare findings with known bugs
+  -> use trusted matching calls to compare findings with known issues
   -> calculate and save counts
 ```
 
@@ -86,7 +88,7 @@ Use a rule chosen before seeing results:
 
 Never replace a failed run or add runs only where the preferred version is behind. When comparing two reviewer versions, run both over the same examples and repeat count close together in time.
 
-Model matching is also non-deterministic. Two independent high-mode calls check each known bug against the retained findings. A third is used only when the first two disagree. Identical checks are cached. The saved run records the votes and their prompt, schema, SDK, mode, and model information when available.
+Model matching is also non-deterministic. Two independent high-mode calls check each known issue against the retained findings. A third is used only when the first two disagree. Identical checks are cached. The saved run records the votes and their prompt, schema, SDK, mode, and model information when available.
 
 ## What the report means
 
@@ -94,7 +96,7 @@ The main report answers:
 
 - did every review finish;
 - did clean code avoid false alarms;
-- was each known bug found;
+- was each known issue found;
 - was the final response appropriately urgent; and
 - were repeated runs stable?
 
@@ -102,13 +104,13 @@ The saved JSON keeps exact commits, context, changed lines, raw output, filtered
 
 If matching fails after reviews finish, `npm run eval -- finish RUN.json` retries only the missing matches through the local CLI login. It writes a new file, preserves the original review evidence and timing, and records the exact hash of the source file. It does not rerun reviews or use the separate review-account key.
 
-One finding can match at most one known bug, and one known bug can be counted at most once per review. Extra findings stay visible and reduce finding precision. A correct failure conclusion receives “right response” credit only when all known bugs for that version were found at the correct side of the blocking threshold.
+One finding can match at most one known issue, and one known issue can be counted at most once per review. Extra findings stay visible and reduce finding precision. A correct failure conclusion receives “right response” credit only when all known issues for that version were found at the correct side of the blocking threshold.
 
 ## Scientific limits
 
-The first open pack is a regression set for iteration. It is not a representative benchmark.
+The first open pack is a regression set for iteration. It is not a representative population sample.
 
-A useful first pack has 3–5 varied historical changes, each with a clean version, a smaller bug, and a serious bug. That is enough to catch regressions in the loop. A more credible internal benchmark needs roughly 20–30 source pull requests across different subsystems and failure types, frozen before tuning, with part held back until a candidate is chosen.
+The pilot remains separate because its outcomes have already been observed. The frozen benchmark adds 60 different source pull requests: 30 exact human-reviewed revisions and 30 clean/synthetic pairs. Ten from each group are held back before any review run. Source-PR membership, labels, issue cards, and rejection reasons freeze before tuning.
 
 Because LLMs create and check most labels, report agreement with the labeled examples, not “true accuracy.” Periodically spot-check a sample of labels and disputed matches. If a review finds a real bug missing from the pack, fix the label rather than count the finding as a false alarm.
 
@@ -121,16 +123,16 @@ Because LLMs create and check most labels, report agreement with the labeled exa
 5. Run one sample with `--project REVIEW_PROJECT --samples 1` to prove checkout, source preparation, and account access.
 6. Inspect the saved evidence for label leakage and production parity.
 7. Run the full first example three times.
-8. Add 2–4 different Agent examples before tuning the reviewer against the set.
+8. Freeze the benchmark selection and holdout before tuning the reviewer against it.
 
 ## Verification
 
 - Normal typecheck, tests, and build pass without live Amp calls.
-- A local Git fixture proves source commits, bundles, changed lines, and issue anchors are checked.
+- A local Git fixture proves source commits, bundles, changed lines, and issue anchors are checked. Synthetic issues must be introduced by one direct child commit and point to a line changed by that commit.
 - The generated review source bundle contains one target and no known-bug or witness data.
 - The runner uses local CLI authentication by default; when a review key is supplied, the review child receives only that key and basic connection settings.
 - Production prompts are unchanged when no eval source preparation is supplied.
 - Saved runs reject altered corpus evidence, invalid finding indexes, and conclusions that do not follow from raw production output.
 - Interrupted matching can finish into a new traceable result without changing or rerunning saved reviews.
-- One finding cannot earn recall for two known bugs.
+- One finding cannot earn recall for two known issues.
 - A live one-sample smoke run succeeds in the review account's source project before the full repeated run.
