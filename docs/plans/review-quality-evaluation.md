@@ -59,7 +59,7 @@ Production and evaluation share:
 
 Evaluation does not call GitHub, publish Checks, use production queueing, or give credentials to a review orb.
 
-If a deliberately changed commit is not public, the trusted runner verifies the pack's Git bundle and makes a second bundle containing only the source history needed for that target. Those source-only bytes go in the trusted source-preparation section of the review prompt. Known bugs and focused tests do not.
+If a deliberately changed commit is not public, the trusted runner verifies the pack's Git bundle and makes a second bundle containing only the source history needed for that target. Those source-only bytes go in the trusted source-preparation section of the review prompt. Known issues and focused tests do not.
 
 The runner rejects a generated source-only transfer over 64 KiB. This keeps repeated reviews bounded and makes an oversized synthetic example a clear pack error instead of an unexpectedly slow or expensive run.
 
@@ -77,7 +77,7 @@ When set, the runner validates the key and stores only a hash of its Amp user ID
 
 ## Repeated runs
 
-Run each version independently three times. Do not average review text. Score each run as facts such as “bug found” and “right final result,” then report counts such as 2 of 3.
+Run each version independently three times. Do not average review text. Score each run as facts such as “issue found” and “right final result,” then report counts such as 2 of 3.
 
 Use a rule chosen before seeing results:
 
