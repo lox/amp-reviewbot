@@ -14,5 +14,5 @@
     "rootDir": ".",
     "sourceMap": true
   },
-  "include": ["src/**/*.ts", "test/**/*.ts"]
+  "include": ["src/**/*.ts", "eval/**/*.ts", "test/**/*.ts"]
 }

@@ -10,12 +10,14 @@ Interrupted worker jobs are recovered periodically and reuse their existing GitH
 
 ```text
 GitHub pull_request webhook
-  -> Fly.io service verifies the signature and queues a job
+  -> Fly.io service verifies the signature and queues exact SHAs with PR context
   -> worker creates an "Amp Review" check run
   -> Amp SDK starts a fresh orb for the repository's Amp project
   -> Amp reviews base SHA...head SHA and returns structured JSON
   -> service validates changed paths and publishes annotations
 ```
+
+The queued job freezes the PR title, description, and base/head branch names with the reviewed SHAs. Re-runs reuse that snapshot instead of reading later PR edits. The prompt treats this context as untrusted data.
 
 The service keeps the GitHub App private key. Review orbs receive repository access from their Amp project, but never receive the GitHub App credential.
 
@@ -145,6 +147,8 @@ npm run typecheck
 npm test
 npm run build
 ```
+
+The initial repeated-sample review evaluation is documented in [`eval/README.md`](eval/README.md).
 
 ## License
 

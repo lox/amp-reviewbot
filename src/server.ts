@@ -16,8 +16,10 @@ const pullRequestPayloadSchema = z.object({
   }),
   pull_request: z.object({
     draft: z.boolean().optional().default(false),
-    base: z.object({ sha: z.string().min(7) }),
-    head: z.object({ sha: z.string().min(7) }),
+    title: z.string().min(1).max(256),
+    body: z.string().max(65_536).nullable(),
+    base: z.object({ sha: z.string().min(7), ref: z.string().min(1).max(1_000) }),
+    head: z.object({ sha: z.string().min(7), ref: z.string().min(1).max(1_000) }),
   }),
 })
 
@@ -108,6 +110,12 @@ async function handlePullRequest(
     baseSha: payload.pull_request.base.sha,
     headSha: payload.pull_request.head.sha,
     ampProject: resolveAmpProject(config, payload.repository.full_name),
+    pullRequestContext: {
+      title: payload.pull_request.title,
+      body: payload.pull_request.body,
+      baseRef: payload.pull_request.base.ref,
+      headRef: payload.pull_request.head.ref,
+    },
   })
   if (job) logger.info({ jobId: job.id, repository: job.repositoryFullName, pr: job.pullNumber }, "review queued")
 }

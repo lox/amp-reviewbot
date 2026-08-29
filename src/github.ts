@@ -1,7 +1,7 @@
 import { App } from "octokit"
 import type { Config } from "./config.js"
 import type { ReviewFinding, ReviewJob, ReviewResult, Severity } from "./types.js"
-import { checkConclusion, isBlockingSeverity } from "./review.js"
+import { finalizeReview, isBlockingSeverity } from "./review.js"
 
 const annotationLevel: Record<Severity, "failure" | "warning" | "notice"> = {
   critical: "failure",
@@ -93,18 +93,17 @@ export class GitHubClient {
   ): Promise<void> {
     const { owner, repo } = splitRepository(job.repositoryFullName)
     const octokit = await this.app.getInstallationOctokit(Number(job.installationId))
-    const findings = result.findings.filter((finding) =>
-      changedLines.get(finding.path)?.has(finding.startLine),
-    )
-    const omitted = result.findings.length - findings.length
-    const conclusion = checkConclusion({ ...result, findings }, this.config.failOn)
+    const finalized = finalizeReview(result, changedLines, this.config.failOn)
+    const findings = finalized.result.findings
     const blocking = findings.filter((finding) =>
       isBlockingSeverity(finding.severity, this.config.failOn),
     ).length
     const title = checkTitle(blocking, findings.length - blocking)
     const summary = [
-      omitted === 0 ? result.summary : "",
-      omitted > 0 ? `\n\n_${omitted} finding(s) omitted because they did not reference a changed line._` : "",
+      finalized.omitted === 0 ? result.summary : "",
+      finalized.omitted > 0
+        ? `\n\n_${finalized.omitted} finding(s) omitted because they did not reference a changed line._`
+        : "",
     ]
       .join("")
       .trim()
@@ -115,7 +114,7 @@ export class GitHubClient {
       check_run_id: Number(checkRunId),
       status: "completed",
       completed_at: new Date().toISOString(),
-      conclusion,
+      conclusion: finalized.conclusion,
       ...(job.ampThreadId
         ? { details_url: `https://ampcode.com/threads/${job.ampThreadId}` }
         : {}),

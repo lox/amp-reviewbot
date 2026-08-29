@@ -15,6 +15,7 @@ const job: ReviewJob = {
   baseSha: "base-sha",
   headSha: "head-sha",
   ampProject: "lox/example",
+  pullRequestContext: null,
   checkRunId: "123",
   ampThreadId: "T-12345678-1234-1234-1234-123456789abc",
   status: "running",

@@ -15,6 +15,10 @@ type JobRow = {
   base_sha: string
   head_sha: string
   amp_project: string
+  pull_request_title: string | null
+  pull_request_body: string | null
+  base_ref: string | null
+  head_ref: string | null
   check_run_id: string | null
   amp_thread_id: string | null
   status: JobStatus
@@ -45,6 +49,15 @@ function mapJob(row: JobRow): ReviewJob {
     baseSha: row.base_sha,
     headSha: row.head_sha,
     ampProject: row.amp_project,
+    pullRequestContext:
+      row.pull_request_title && row.base_ref && row.head_ref
+        ? {
+            title: row.pull_request_title,
+            body: row.pull_request_body,
+            baseRef: row.base_ref,
+            headRef: row.head_ref,
+          }
+        : null,
     checkRunId: row.check_run_id,
     ampThreadId: row.amp_thread_id,
     status: row.status,
@@ -64,8 +77,10 @@ export class Database {
   }
 
   async migrate(): Promise<void> {
-    const sql = await readFile(resolve("migrations/001_initial.sql"), "utf8")
-    await this.pool.query(sql)
+    for (const file of ["001_initial.sql", "002_review_context.sql"]) {
+      const sql = await readFile(resolve("migrations", file), "utf8")
+      await this.pool.query(sql)
+    }
   }
 
   async close(): Promise<void> {
@@ -80,8 +95,9 @@ export class Database {
     const result = await this.pool.query<JobRow>(
       `INSERT INTO review_jobs (
          source_delivery_id, event_type, installation_id, repository_id,
-         repository_full_name, pull_number, base_sha, head_sha, amp_project, check_run_id
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         repository_full_name, pull_number, base_sha, head_sha, amp_project,
+         pull_request_title, pull_request_body, base_ref, head_ref, check_run_id
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
        ON CONFLICT (source_delivery_id) DO NOTHING
        RETURNING *`,
       [
@@ -94,6 +110,10 @@ export class Database {
         input.baseSha,
         input.headSha,
         input.ampProject,
+        input.pullRequestContext?.title ?? null,
+        input.pullRequestContext?.body ?? null,
+        input.pullRequestContext?.baseRef ?? null,
+        input.pullRequestContext?.headRef ?? null,
         input.checkRunId ?? null,
       ],
     )
@@ -120,10 +140,12 @@ export class Database {
     const result = await this.pool.query<JobRow>(
       `INSERT INTO review_jobs (
          source_delivery_id, event_type, installation_id, repository_id,
-         repository_full_name, pull_number, base_sha, head_sha, amp_project, check_run_id
+         repository_full_name, pull_number, base_sha, head_sha, amp_project,
+         pull_request_title, pull_request_body, base_ref, head_ref, check_run_id
        )
        SELECT $2, 'check_run.rerequested', installation_id, repository_id,
-              repository_full_name, pull_number, base_sha, head_sha, amp_project, $3
+              repository_full_name, pull_number, base_sha, head_sha, amp_project,
+              pull_request_title, pull_request_body, base_ref, head_ref, $3
        FROM review_jobs WHERE id = $1
        ON CONFLICT (source_delivery_id) DO NOTHING
        RETURNING *`,

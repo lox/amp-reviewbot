@@ -18,6 +18,10 @@ describe("executeReviewWithRetries", () => {
     await run(fake.execute)
 
     assert.equal(fake.calls[0]?.options?.title, "Review lox/example#42")
+    assert.equal(fake.calls[0]?.options?.executor, "orb")
+    assert.equal(fake.calls[0]?.options?.project, "lox/example")
+    assert.equal(fake.calls[0]?.options?.mode, "medium")
+    assert.equal(fake.calls[0]?.options?.continue, undefined)
   })
 
   it("uses a valid final assistant response when the result stream fails", async () => {

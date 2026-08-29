@@ -34,8 +34,10 @@ describe("GitHub webhook endpoint", () => {
       repository: { id: 200, full_name: "lox/example" },
       pull_request: {
         draft: false,
-        base: { sha: "aaaaaaaa" },
-        head: { sha: "bbbbbbbb" },
+        title: "Add upload retries",
+        body: "Retries failed uploads without duplicating completed work.",
+        base: { sha: "aaaaaaaa", ref: "main" },
+        head: { sha: "bbbbbbbb", ref: "upload-retries" },
       },
     })
     const signature = `sha256=${createHmac("sha256", config.githubWebhookSecret).update(body).digest("hex")}`
@@ -48,6 +50,12 @@ describe("GitHub webhook endpoint", () => {
     assert.equal(response.status, 202)
     assert.equal(database.enqueued[0]?.repositoryFullName, "lox/example")
     assert.equal(database.enqueued[0]?.ampProject, "lox/example")
+    assert.deepEqual(database.enqueued[0]?.pullRequestContext, {
+      title: "Add upload retries",
+      body: "Retries failed uploads without duplicating completed work.",
+      baseRef: "main",
+      headRef: "upload-retries",
+    })
   })
 })
 
