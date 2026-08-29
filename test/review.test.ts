@@ -75,6 +75,34 @@ describe("buildReviewPrompt", () => {
 
     assert.doesNotMatch(buildReviewPrompt(job), /pull-request-context/)
   })
+
+  it("adds trusted source preparation without changing the production prompt by default", () => {
+    const job: ReviewJob = {
+      id: "job-1",
+      sourceDeliveryId: "delivery-1",
+      eventType: "eval.replay",
+      installationId: "1",
+      repositoryId: "2",
+      repositoryFullName: "lox/example",
+      pullNumber: 42,
+      baseSha: "base-sha",
+      headSha: "head-sha",
+      ampProject: "agent",
+      pullRequestContext: null,
+      checkRunId: null,
+      ampThreadId: null,
+      status: "running",
+      attempts: 1,
+    }
+
+    const productionPrompt = buildReviewPrompt(job)
+    const evalPrompt = buildReviewPrompt(job, "git fetch /tmp/source.bundle refs/heads/target")
+
+    assert.doesNotMatch(productionPrompt, /source-preparation/)
+    assert.match(evalPrompt, /Trusted source preparation/)
+    assert.match(evalPrompt, /git fetch \/tmp\/source\.bundle/)
+    assert.match(evalPrompt, /Review only changes in base-sha\.\.\.head-sha/)
+  })
 })
 
 describe("reviewThreadTitle", () => {
