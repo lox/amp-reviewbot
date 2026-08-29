@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process"
+import { createHash } from "node:crypto"
 import { mkdtemp, rm, stat } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
@@ -18,6 +19,32 @@ export type BlindReviewInput = {
   timeoutMs: number
   apiKey: string
   signal: AbortSignal
+}
+
+export type AccountSeparation = {
+  separation: "verified-user-id"
+  trustedIdHash: string
+  reviewerIdHash: string
+}
+
+export async function verifySeparateAmpAccounts(
+  trustedApiKey: string,
+  reviewerApiKey: string,
+  fetchAmp: typeof fetch = fetch,
+  ampUrl = process.env.AMP_URL ?? "https://ampcode.com",
+): Promise<AccountSeparation> {
+  const [trustedUserId, reviewerUserId] = await Promise.all([
+    ampUserId(trustedApiKey, fetchAmp, ampUrl),
+    ampUserId(reviewerApiKey, fetchAmp, ampUrl),
+  ])
+  if (trustedUserId === reviewerUserId) {
+    throw new Error("The trusted and blind-review keys belong to the same Amp account")
+  }
+  return {
+    separation: "verified-user-id",
+    trustedIdHash: hashId(trustedUserId),
+    reviewerIdHash: hashId(reviewerUserId),
+  }
 }
 
 export async function runBlindReview(input: BlindReviewInput): Promise<z.infer<typeof outputSchema>> {
@@ -107,4 +134,29 @@ async function childCommand(): Promise<{ args: string[]; entry: string }> {
     return { args: ["--import", "tsx"], entry: source }
   }
   return { args: [], entry: join(directory, "reviewer-child.js") }
+}
+
+async function ampUserId(
+  apiKey: string,
+  fetchAmp: typeof fetch,
+  ampUrl: string,
+): Promise<string> {
+  const response = await fetchAmp(new URL("/api/user-actor-credentials", ampUrl), {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${apiKey}`,
+      "content-type": "application/json",
+    },
+    body: "{}",
+    signal: AbortSignal.timeout(30_000),
+  })
+  if (!response.ok) {
+    throw new Error(`Could not verify Amp account identity (HTTP ${response.status})`)
+  }
+  const result: unknown = await response.json()
+  return z.object({ userId: z.string().min(1) }).passthrough().parse(result).userId
+}
+
+function hashId(userId: string): string {
+  return `sha256:${createHash("sha256").update(userId).digest("hex")}`
 }

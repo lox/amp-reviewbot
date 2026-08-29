@@ -39,7 +39,7 @@ export AMP_API_KEY="trusted-account-key"
 export AMP_EVAL_REVIEWER_API_KEY="separate-review-account-key"
 ```
 
-`AMP_API_KEY` is used by the main process. `AMP_EVAL_REVIEWER_API_KEY` is passed only to a child process with an empty home directory. The child starts fresh private review orbs in the project named by `--project`. The two keys must belong to different Amp accounts, not merely be two keys from one account.
+`AMP_API_KEY` is used by the main process. `AMP_EVAL_REVIEWER_API_KEY` is passed only to a child process with an empty home directory. Before reading the pack, the runner resolves both keys to Amp user IDs and rejects keys from the same account. The child then starts fresh private review orbs in the project named by `--project`.
 
 The project is selected by `--project`; there is no need to log the Amp CLI in and out between reviews. Amp's SDK uses the standard `AMP_API_KEY` value in each process.
 
@@ -69,7 +69,7 @@ npm run eval -- run /path/to/review-eval-pack \
   --concurrency 2
 ```
 
-Before the first review, this command fetches the public source, verifies any source bundle, checks every commit, calculates changed lines, and rejects a known bug that does not point to a changed line.
+Before the first review, this command verifies the account boundary, fetches the public source, verifies any source bundle, checks every commit, calculates changed lines, and rejects a known bug that does not point to a changed line.
 
 Every review then uses a fresh private Amp orb and the same prompt builder, two-pass review method, JSON parser, changed-line filter, and conclusion calculation as production. The trusted account uses two independent high-mode checks to decide whether a finding describes a known bug; it uses a third only when they disagree.
 

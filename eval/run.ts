@@ -11,7 +11,11 @@ import { reviewMode } from "../src/worker.js"
 import { judgeIssue } from "./judge.js"
 import { checkPack, describePack, loadPack } from "./pack.js"
 import { formatReport } from "./report.js"
-import { runBlindReview } from "./reviewer.js"
+import {
+  runBlindReview,
+  verifySeparateAmpAccounts,
+  type AccountSeparation,
+} from "./reviewer.js"
 import {
   corpusContentHash,
   evalRunSchema,
@@ -28,6 +32,7 @@ const failOn = "high" as const
 type RunOptions = {
   packPath: string
   project: string
+  trustedApiKey: string
   reviewerApiKey: string
   outputPath: string
   judgeCache: string
@@ -52,7 +57,7 @@ async function main(): Promise<void> {
     let complete = false
     try {
       const { run, score } = await runEvaluation(options)
-      await output.writeFile(`${JSON.stringify({ ...run, score }, null, 2)}\n`)
+      await output.writeFile(`${JSON.stringify(run, null, 2)}\n`)
       complete = true
       console.log(`\n${formatReport(run, score)}`)
       console.log(`\nFull results: ${options.outputPath}`)
@@ -74,10 +79,12 @@ async function main(): Promise<void> {
 }
 
 async function runEvaluation(options: RunOptions): Promise<{ run: EvalRun; score: EvalScore }> {
+  console.log("Checking that the review account is separate...")
+  const account = await verifySeparateAmpAccounts(options.trustedApiKey, options.reviewerApiKey)
   console.log("Checking source commits and changed lines...")
   const { corpus, sourcePreparation } = await loadPack(options.packPath, options.sourceCache)
   const startedAt = new Date().toISOString()
-  const reviewer = await reviewerProvenance(options.project)
+  const reviewer = await reviewerProvenance(options.project, account)
   const tasks = corpus.cases.flatMap((evalCase) =>
     Array.from({ length: options.samplesPerCase }, (_, index) => ({
       evalCase,
@@ -239,7 +246,10 @@ function changedLineMap(evalCase: EvalCase): Map<string, Set<number>> {
   )
 }
 
-async function reviewerProvenance(project: string): Promise<EvalRun["reviewer"]> {
+async function reviewerProvenance(
+  project: string,
+  account: AccountSeparation,
+): Promise<EvalRun["reviewer"]> {
   const [
     { stdout: gitCommit },
     { stdout: status },
@@ -272,7 +282,7 @@ async function reviewerProvenance(project: string): Promise<EvalRun["reviewer"]>
     ),
     methodologyHash: hash(methodology),
     project,
-    account: "separate-key",
+    account,
   }
 }
 
@@ -298,15 +308,16 @@ async function mapConcurrent<Input, Output>(
 function runOptions(args: string[]): RunOptions {
   const packPath = requiredInput(args, "--corpus")
   const project = flag(args, "--project")
-  if (!project) throw new Error("Missing --project (for example, --project agent)")
+  if (!project) throw new Error("Missing --project")
+  const trustedApiKey = process.env.AMP_API_KEY
   const reviewerApiKey = process.env.AMP_EVAL_REVIEWER_API_KEY
-  if (!process.env.AMP_API_KEY) {
+  if (!trustedApiKey) {
     throw new Error("AMP_API_KEY must identify the trusted account running the evaluation")
   }
   if (!reviewerApiKey) {
     throw new Error("AMP_EVAL_REVIEWER_API_KEY must identify the separate blind-review account")
   }
-  if (reviewerApiKey === process.env.AMP_API_KEY) {
+  if (reviewerApiKey === trustedApiKey) {
     throw new Error("The trusted account and blind-review account must use different keys")
   }
 
@@ -322,6 +333,7 @@ function runOptions(args: string[]): RunOptions {
   return {
     packPath,
     project,
+    trustedApiKey,
     reviewerApiKey,
     outputPath: flag(args, "--output") ?? resolve(".eval-runs", `${stamp}.json`),
     judgeCache: resolve(cacheRoot, "judge"),

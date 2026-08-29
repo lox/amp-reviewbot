@@ -68,7 +68,7 @@ The local command uses two environment variables:
 - `AMP_API_KEY`: trusted account, used for matching;
 - `AMP_EVAL_REVIEWER_API_KEY`: work account, used only by the blind-review child process.
 
-The review child gets a new empty home directory and an allowlisted environment. `--project` selects the review account's source project. We do not switch the global Amp CLI login and we never put a key in a command argument.
+Before reading the pack, the runner resolves both keys to stable Amp user IDs and rejects a match. It stores only hashes of those IDs in the run evidence. The review child then gets a new empty home directory and an allowlisted environment. `--project` selects the review account's source project. We do not switch the global Amp CLI login and we never put a key in a command argument.
 
 This is safe only when the keys belong to genuinely different accounts and the work account cannot read the private example project. Two projects owned by the same account are not an isolation boundary.
 
@@ -125,8 +125,8 @@ Because LLMs create and check most labels, report agreement with the labeled exa
 - Normal typecheck, tests, and build pass without live Amp calls.
 - A local Git fixture proves source commits, bundles, changed lines, and issue anchors are checked.
 - The generated review source bundle contains one target and no known-bug or witness data.
-- The review child receives only its dedicated API key and basic connection settings.
+- The runner rejects two keys belonging to the same Amp user, and the review child receives only its dedicated API key and basic connection settings.
 - Production prompts are unchanged when no eval source preparation is supplied.
 - Saved runs reject altered corpus evidence, invalid finding indexes, and conclusions that do not follow from raw production output.
 - One finding cannot earn recall for two known bugs.
-- A live one-sample smoke run succeeds in the work account's `agent` project before the full repeated run.
+- A live one-sample smoke run succeeds in the review account's source project before the full repeated run.

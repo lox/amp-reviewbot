@@ -243,7 +243,14 @@ async function resolveExample(
     if (await isPublicCommit(repository, version.commit)) publicCommits.add(version.commit)
   }
 
+  await clearExampleRefs(repository, example.id)
+  const bundleHeads = new Set<string>()
   if (checked.bundlePath) {
+    const bundle = await readBundleHeader(checked.bundlePath)
+    for (const prerequisite of bundle.prerequisites) {
+      await requirePublicCommit(repository, prerequisite)
+    }
+    for (const head of bundle.heads) bundleHeads.add(head)
     await git(repository, ["bundle", "verify", checked.bundlePath])
     await git(repository, [
       "fetch",
@@ -255,7 +262,14 @@ async function resolveExample(
   const cases: EvalCorpus["cases"] = []
   const sourcePreparation = new Map<string, string>()
   for (const version of example.versions) {
-    await requireCommit(repository, version.commit, example.id, version.name)
+    await requireCommit(
+      repository,
+      version.commit,
+      publicCommits.has(version.commit),
+      bundleHeads,
+      example.id,
+      version.name,
+    )
     const changedLines = await deriveChangedLines(
       repository,
       example.source.baseCommit,
@@ -348,9 +362,16 @@ async function requirePublicCommit(repository: string, commit: string): Promise<
 async function requireCommit(
   repository: string,
   commit: string,
+  isPublic: boolean,
+  bundleHeads: ReadonlySet<string>,
   exampleId: string,
   versionName: string,
 ): Promise<void> {
+  if (!isPublic && !bundleHeads.has(commit)) {
+    throw new Error(
+      `Commit ${commit} for ${exampleId}/${versionName} is not public or advertised by this example's commits.bundle`,
+    )
+  }
   try {
     await git(repository, ["cat-file", "-e", `${commit}^{commit}`])
   } catch (error) {
@@ -359,6 +380,41 @@ async function requireCommit(
       { cause: error },
     )
   }
+}
+
+async function clearExampleRefs(repository: string, exampleId: string): Promise<void> {
+  const { stdout } = await git(repository, [
+    "for-each-ref",
+    "--format=%(refname)",
+    `refs/reviewbot-eval/${exampleId}/`,
+  ])
+  for (const ref of stdout.split("\n").filter(Boolean)) {
+    await git(repository, ["update-ref", "-d", ref])
+  }
+}
+
+async function readBundleHeader(path: string): Promise<{
+  heads: string[]
+  prerequisites: string[]
+}> {
+  const contents = await readFile(path)
+  const end = contents.indexOf("\n\n")
+  if (end === -1) throw new Error(`Invalid Git bundle header: ${path}`)
+  const lines = contents.subarray(0, end).toString("utf8").split("\n")
+  if (!lines[0]?.startsWith("# v")) throw new Error(`Invalid Git bundle header: ${path}`)
+  const heads: string[] = []
+  const prerequisites: string[] = []
+  for (const line of lines.slice(1)) {
+    const prerequisite = /^-([0-9a-f]{40})(?: |$)/i.exec(line)?.[1]
+    if (prerequisite) {
+      prerequisites.push(prerequisite)
+      continue
+    }
+    const head = /^([0-9a-f]{40}) refs\/heads\//i.exec(line)?.[1]
+    if (head) heads.push(head)
+  }
+  if (heads.length === 0) throw new Error(`Git bundle has no branch heads: ${path}`)
+  return { heads, prerequisites }
 }
 
 async function deriveChangedLines(

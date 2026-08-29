@@ -8,7 +8,7 @@ import { promisify } from "node:util"
 import { judgeIssue, resolveMatchingVotes } from "../eval/judge.js"
 import { checkPack, exampleSchema, loadPack } from "../eval/pack.js"
 import { formatReport } from "../eval/report.js"
-import { reviewerEnvironment } from "../eval/reviewer.js"
+import { reviewerEnvironment, verifySeparateAmpAccounts } from "../eval/reviewer.js"
 import {
   corpusContentHash,
   evalCaseSchema,
@@ -102,6 +102,12 @@ describe("eval example packs", () => {
         reloaded.sourcePreparation.get("local-example/serious-bug"),
         preparation,
       )
+
+      await rm(join(fixture.pack, "examples", "local-example", "commits.bundle"))
+      await assert.rejects(
+        loadPack(fixture.pack, fixture.cache, () => fixture.origin),
+        /not public or advertised by this example's commits\.bundle/,
+      )
     } finally {
       await rm(fixture.root, { recursive: true, force: true })
     }
@@ -124,6 +130,26 @@ describe("eval example packs", () => {
     } finally {
       delete process.env.EVAL_TEST_SECRET
     }
+  })
+
+  it("verifies the two keys belong to different Amp accounts", async () => {
+    const separate = await verifySeparateAmpAccounts(
+      "trusted-key",
+      "reviewer-key",
+      accountFetch({ "trusted-key": "user-one", "reviewer-key": "user-two" }),
+    )
+    assert.equal(separate.separation, "verified-user-id")
+    assert.match(separate.trustedIdHash, /^sha256:[0-9a-f]{64}$/)
+    assert.notEqual(separate.trustedIdHash, separate.reviewerIdHash)
+
+    await assert.rejects(
+      verifySeparateAmpAccounts(
+        "trusted-key",
+        "another-key",
+        accountFetch({ "trusted-key": "same-user", "another-key": "same-user" }),
+      ),
+      /belong to the same Amp account/,
+    )
   })
 })
 
@@ -489,8 +515,12 @@ function runFields(cases: ReturnType<typeof evalCase>[], samplesPerCase: number)
       failOn: "high",
       reviewSourceHash: "source",
       methodologyHash: "methodology",
-      project: "agent",
-      account: "separate-key",
+      project: "source-project",
+      account: {
+        separation: "verified-user-id",
+        trustedIdHash: artifactHash,
+        reviewerIdHash: `sha256:${"b".repeat(64)}`,
+      },
     },
     cases,
   }
@@ -614,4 +644,15 @@ function waitForTestRelease(release: Promise<void>, signal: AbortSignal): Promis
       resolveWait()
     })
   })
+}
+
+function accountFetch(accounts: Record<string, string>): typeof fetch {
+  return async (_input, init) => {
+    const authorization = new Headers(init?.headers).get("authorization")
+    const key = authorization?.replace(/^Bearer /, "") ?? ""
+    const userId = accounts[key]
+    return userId
+      ? Response.json({ userId, wsToken: "unused", poolName: "unused" }, { status: 201 })
+      : Response.json({ error: "unauthorized" }, { status: 401 })
+  }
 }
