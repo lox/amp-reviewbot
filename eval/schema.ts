@@ -151,7 +151,7 @@ const judgementFields = {
     version: z.string(),
     mode: z.string(),
     sdkVersion: z.string(),
-    project: z.string(),
+    project: z.string().nullable(),
     promptHash: z.string(),
     schemaHash: z.string(),
   }),
@@ -208,6 +208,13 @@ export const evalRunSchema = z
     requestedSamplesPerCase: z.number().int().positive(),
     concurrency: z.number().int().positive(),
     timeoutMs: z.number().int().positive(),
+    finishedFrom: z
+      .object({
+        sourceArtifactHash: artifactHashSchema,
+        finishedAt: z.string(),
+      })
+      .strict()
+      .optional(),
     reviewer: z.object({
       gitCommit: z.string(),
       dirty: z.boolean(),
