@@ -59,6 +59,8 @@ Evaluation does not call GitHub, publish Checks, use production queueing, or giv
 
 If a deliberately changed commit is not public, the trusted runner verifies the pack's Git bundle and makes a second bundle containing only the source history needed for that target. Those source-only bytes go in the trusted source-preparation section of the review prompt. Known bugs and focused tests do not.
 
+The runner rejects a generated source-only transfer over 64 KiB. This keeps repeated reviews bounded and makes an oversized synthetic example a clear pack error instead of an unexpectedly slow or expensive run.
+
 ## Account boundary
 
 The example pack stays with the trusted account. Blind reviews use a separate Amp account that can access the source project but not the example pack.

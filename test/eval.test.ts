@@ -1,5 +1,6 @@
 import assert from "node:assert/strict"
 import { execFile } from "node:child_process"
+import { randomBytes } from "node:crypto"
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -97,16 +98,37 @@ describe("eval example packs", () => {
       assert.equal(heads.length, 1)
       assert.match(heads[0]!, new RegExp(`^${loaded.corpus.cases[1]!.headSha} `))
 
+      await git(fixture.origin, ["tag", "public-clean", fixture.clean])
+      await git(fixture.origin, ["update-ref", "refs/heads/main", fixture.base])
       const reloaded = await loadPack(fixture.pack, fixture.cache, () => fixture.origin)
       assert.equal(
         reloaded.sourcePreparation.get("local-example/serious-bug"),
         preparation,
       )
 
+      await git(fixture.origin, ["tag", "--delete", "public-clean"])
+      await assert.rejects(
+        loadPack(fixture.pack, fixture.cache, () => fixture.origin),
+        /not (?:reachable from a public branch or tag|public or advertised)/,
+      )
+
+      await git(fixture.origin, ["update-ref", "refs/heads/main", fixture.clean])
       await rm(join(fixture.pack, "examples", "local-example", "commits.bundle"))
       await assert.rejects(
         loadPack(fixture.pack, fixture.cache, () => fixture.origin),
         /not public or advertised by this example's commits\.bundle/,
+      )
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  it("rejects source transfers that would make reviews too large", async () => {
+    const fixture = await createPackFixture(true)
+    try {
+      await assert.rejects(
+        loadPack(fixture.pack, fixture.cache, () => fixture.origin),
+        /Generated source transfer .* the limit is 64 KiB/,
       )
     } finally {
       await rm(fixture.root, { recursive: true, force: true })
@@ -434,11 +456,13 @@ describe("eval judging", () => {
   })
 })
 
-async function createPackFixture(): Promise<{
+async function createPackFixture(largeSourceTransfer = false): Promise<{
   root: string
   pack: string
   cache: string
   origin: string
+  base: string
+  clean: string
 }> {
   const root = await mkdtemp(join(tmpdir(), "amp-reviewbot-pack-"))
   const source = join(root, "source")
@@ -459,7 +483,11 @@ async function createPackFixture(): Promise<{
   await execFileAsync("git", ["clone", "--bare", source, origin])
 
   await writeFile(join(source, "code.txt"), "line one\nbug\n")
-  await git(source, ["commit", "-am", "source-only bug"])
+  if (largeSourceTransfer) {
+    await writeFile(join(source, "large-source.bin"), randomBytes(128 * 1024))
+  }
+  await git(source, ["add", "--all"])
+  await git(source, ["commit", "-m", "source-only bug"])
   const bug = (await git(source, ["rev-parse", "HEAD"])).trim()
   await git(source, ["branch", "eval/local-bug", bug])
   await mkdir(join(exampleDirectory, "witnesses"), { recursive: true })
@@ -512,7 +540,7 @@ async function createPackFixture(): Promise<{
       2,
     )}\n`,
   )
-  return { root, pack, cache: join(root, "cache"), origin }
+  return { root, pack, cache: join(root, "cache"), origin, base, clean }
 }
 
 async function git(cwd: string, args: string[]): Promise<string> {

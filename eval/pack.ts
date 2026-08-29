@@ -328,10 +328,11 @@ async function prepareRepository(
   }
   await git(directory, [
     "fetch",
-    "--no-tags",
     "--prune",
+    "--prune-tags",
     "origin",
     "+refs/heads/*:refs/remotes/origin/*",
+    "+refs/tags/*:refs/tags/*",
   ])
   return directory
 }
@@ -462,6 +463,11 @@ async function createSourcePreparation(
       ...publicCommits.map((commit) => `^${commit}`),
     ])
     const bundle = await readFile(bundlePath)
+    if (bundle.byteLength > 64 * 1024) {
+      throw new Error(
+        `Generated source transfer for ${headCommit} is ${bundle.byteLength} bytes; the limit is 64 KiB`,
+      )
+    }
     const advertised = (await git(repository, ["bundle", "list-heads", bundlePath])).stdout
       .trim()
       .split(/\s+/)[1]

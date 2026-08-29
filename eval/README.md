@@ -52,6 +52,8 @@ The reviewer receives only:
 
 It never receives `knownIssues`, focused tests, or the path to the pack. The trusted process checks the bundle and commit IDs before any reviews start.
 
+Source-only transfers over 64 KiB are rejected so one deliberately changed commit cannot make every repeated review unexpectedly large or expensive. Keep each synthetic change focused.
+
 ## Commands
 
 Check the pack's files without starting reviews:
