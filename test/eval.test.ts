@@ -168,13 +168,18 @@ describe("eval example packs", () => {
     }
   })
 
-  it("waits for the reviewer child to exit after an input failure", async () => {
+  it("waits for the reviewer child to exit and force-stops it after an input failure", async (context) => {
+    context.mock.timers.enable({ apis: ["setTimeout"] })
     const spawned = deferred<void>()
+    const signals: Array<NodeJS.Signals | number | undefined> = []
     const child = Object.assign(new EventEmitter(), {
       stdin: new PassThrough(),
       stdout: new PassThrough(),
       stderr: new PassThrough(),
-      kill: () => true,
+      kill: (signal?: NodeJS.Signals | number) => {
+        signals.push(signal)
+        return true
+      },
     }) as unknown as ChildProcessWithoutNullStreams
     const review = runBlindReview(
       {
@@ -204,6 +209,10 @@ describe("eval example packs", () => {
     child.stdin.emit("error", new Error("broken pipe"))
     await new Promise((resolveImmediate) => setImmediate(resolveImmediate))
     assert.equal(settled, false)
+    assert.deepEqual(signals, ["SIGTERM"])
+
+    context.mock.timers.tick(5_000)
+    assert.deepEqual(signals, ["SIGTERM", "SIGKILL"])
 
     child.emit("close", 1, null)
     await assert.rejects(review, /Could not send review input/)

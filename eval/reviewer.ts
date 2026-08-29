@@ -75,7 +75,13 @@ export async function runBlindReview(
       const stderr: Buffer[] = []
       let childError: Error | undefined
       let inputError: Error | undefined
-      const abort = () => child.kill("SIGTERM")
+      let forceKillTimer: NodeJS.Timeout | undefined
+      const stopChild = () => {
+        if (forceKillTimer) return
+        child.kill("SIGTERM")
+        forceKillTimer = setTimeout(() => child.kill("SIGKILL"), 5_000)
+      }
+      const abort = () => stopChild()
       input.signal.addEventListener("abort", abort, { once: true })
       child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk))
       child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk))
@@ -84,7 +90,7 @@ export async function runBlindReview(
       })
       child.stdin.once("error", (error) => {
         inputError = new Error("Could not send review input to the blind reviewer", { cause: error })
-        child.kill("SIGTERM")
+        stopChild()
       })
       child.once("close", (code) => {
         cleanup()
@@ -122,6 +128,7 @@ export async function runBlindReview(
 
       function cleanup(): void {
         input.signal.removeEventListener("abort", abort)
+        if (forceKillTimer) clearTimeout(forceKillTimer)
       }
     })
   } finally {
