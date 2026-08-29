@@ -219,6 +219,32 @@ describe("eval scoring", () => {
     assert.equal(score.groundedConclusionAgreement, 0)
   })
 
+  it("uses the valid severity pairing when finding matches overlap", () => {
+    const mixedIssues: ExpectedResult = {
+      issues: [
+        blocking.issues[0]!,
+        {
+          ...blocking.issues[0]!,
+          id: "smaller-failure",
+          severity: "medium",
+        },
+      ],
+    }
+    const cases = [evalCase("mixed-issues", mixedIssues)]
+    const run = makeRun(cases, 1, [
+      completed("mixed-issues", 1, mixedIssues, "failure", [highFinding, mediumFinding], [
+        judgement([0, 1], false, "known-failure"),
+        judgement([0, 1], false, "smaller-failure"),
+      ]),
+    ])
+
+    const score = scoreRun(run).cases[0]!
+    assert.equal(score.issueDetectionRate, 1)
+    assert.equal(score.severityAgreement, 1)
+    assert.equal(score.severityThresholdAgreement, 1)
+    assert.equal(score.groundedConclusionAgreement, 1)
+  })
+
   it("keeps duplicate findings visible in the plain report", () => {
     const cases = [evalCase("blocking", blocking)]
     const run = makeRun(cases, 1, [

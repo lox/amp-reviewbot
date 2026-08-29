@@ -68,6 +68,14 @@ function scoreCase(caseId: string, samples: EvalSample[]): CaseScore {
   const completed = samples.filter((sample): sample is CompletedSample => sample.status === "completed")
   const assignments = new Map(completed.map((sample) => [sample.sample, assignFindings(sample)]))
   const detected = [...assignments.values()].reduce((total, assignment) => total + assignment.size, 0)
+  const severityMatches = completed.reduce(
+    (total, sample) => total + assignFindings(sample, matchedSeverity).size,
+    0,
+  )
+  const thresholdMatches = completed.reduce(
+    (total, sample) => total + assignFindings(sample, matchedThreshold).size,
+    0,
+  )
   const reportedFindings = completed.reduce(
     (total, sample) => total + sample.retainedResult.findings.length,
     0,
@@ -84,14 +92,6 @@ function scoreCase(caseId: string, samples: EvalSample[]): CaseScore {
     if (sample.status === "error") conclusions.error += 1
     else conclusions[sample.conclusion] += 1
   }
-
-  const detectedPairs = completed.flatMap((sample) => {
-    const assignment = assignments.get(sample.sample) ?? new Map<string, number>()
-    return expected.issues.flatMap((issue) => {
-      const findingIndex = assignment.get(issue.id)
-      return findingIndex === undefined ? [] : [{ issue, sample, findingIndex }]
-    })
-  })
 
   return {
     caseId,
@@ -117,17 +117,9 @@ function scoreCase(caseId: string, samples: EvalSample[]): CaseScore {
     findingPrecision:
       kind === "control" || reportedFindings === 0 ? null : detected / reportedFindings,
     severityAgreement:
-      kind === "control" || detectedPairs.length === 0
-        ? null
-        : detectedPairs.filter(({ issue, sample, findingIndex }) =>
-            matchedSeverity(issue, sample, findingIndex),
-          ).length / detectedPairs.length,
+      kind === "control" || detected === 0 ? null : severityMatches / detected,
     severityThresholdAgreement:
-      kind === "control" || detectedPairs.length === 0
-        ? null
-        : detectedPairs.filter(({ issue, sample, findingIndex }) =>
-            matchedThreshold(issue, sample, findingIndex),
-          ).length / detectedPairs.length,
+      kind === "control" || detected === 0 ? null : thresholdMatches / detected,
     judgeCoverage:
       kind === "control" || eligibleJudgements === 0
         ? null
@@ -146,19 +138,26 @@ function isGroundedConclusion(sample: EvalSample): boolean {
   if (kind === "control") {
     return sample.conclusion === "success" && sample.retainedResult.findings.length === 0
   }
-  const assignment = assignFindings(sample)
+  const assignment = assignFindings(sample, matchedThreshold)
   return (
     sample.conclusion === expectedConclusion(sample.expected) &&
-    sample.expected.issues.every((issue) => {
-      const findingIndex = assignment.get(issue.id)
-      return findingIndex !== undefined && matchedThreshold(issue, sample, findingIndex)
-    })
+    assignment.size === sample.expected.issues.length
   )
 }
 
-function assignFindings(sample: CompletedSample): Map<string, number> {
-  const choices = new Map(
+function assignFindings(
+  sample: CompletedSample,
+  accepts: (issue: ExpectedIssue, sample: CompletedSample, findingIndex: number) => boolean = () =>
+    true,
+): Map<string, number> {
+  const judgements = new Map(
     sample.judgements.map((judgement) => [judgement.issueId, judgement.matchingFindingIndices]),
+  )
+  const choices = new Map(
+    sample.expected.issues.map((issue) => [
+      issue.id,
+      (judgements.get(issue.id) ?? []).filter((finding) => accepts(issue, sample, finding)),
+    ]),
   )
   const findingToIssue = new Map<number, string>()
 
