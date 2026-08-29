@@ -12,9 +12,9 @@ import { judgeIssue, resolveMatchingVotes } from "../eval/judge.js"
 import { checkPack, exampleSchema, loadPack } from "../eval/pack.js"
 import { formatReport } from "../eval/report.js"
 import {
+  reviewAuthentication,
   reviewerEnvironment,
   runBlindReview,
-  verifySeparateAmpAccounts,
 } from "../eval/reviewer.js"
 import {
   corpusContentHash,
@@ -155,15 +155,27 @@ describe("eval example packs", () => {
     assert.deepEqual(evalSampleSchema.parse(sample).models, [])
   })
 
-  it("passes only a dedicated key and basic connection settings to the blind reviewer", () => {
+  it("uses local CLI authentication unless a dedicated review key is provided", () => {
+    const previousApiKey = process.env.AMP_API_KEY
+    const previousReviewerApiKey = process.env.AMP_EVAL_REVIEWER_API_KEY
+    process.env.AMP_API_KEY = "ambient-key"
+    process.env.AMP_EVAL_REVIEWER_API_KEY = "ambient-reviewer-key"
     process.env.EVAL_TEST_SECRET = "must-not-pass"
     try {
-      const environment = reviewerEnvironment("work-key", "/tmp/empty-home")
-      assert.equal(environment.AMP_API_KEY, "work-key")
-      assert.equal(environment.HOME, "/tmp/empty-home")
-      assert.equal(environment.AMP_EVAL_REVIEWER_API_KEY, undefined)
-      assert.equal(environment.EVAL_TEST_SECRET, undefined)
+      const local = reviewerEnvironment()
+      assert.equal(local.AMP_API_KEY, undefined)
+      assert.equal(local.AMP_EVAL_REVIEWER_API_KEY, undefined)
+      assert.equal(local.HOME, process.env.HOME)
+      assert.equal(local.EVAL_TEST_SECRET, undefined)
+
+      const keyed = reviewerEnvironment("work-key", "/tmp/empty-home")
+      assert.equal(keyed.AMP_API_KEY, "work-key")
+      assert.equal(keyed.HOME, "/tmp/empty-home")
+      assert.equal(keyed.AMP_EVAL_REVIEWER_API_KEY, undefined)
+      assert.equal(keyed.EVAL_TEST_SECRET, undefined)
     } finally {
+      restoreEnvironment("AMP_API_KEY", previousApiKey)
+      restoreEnvironment("AMP_EVAL_REVIEWER_API_KEY", previousReviewerApiKey)
       delete process.env.EVAL_TEST_SECRET
     }
   })
@@ -218,24 +230,15 @@ describe("eval example packs", () => {
     await assert.rejects(review, /Could not send review input/)
   })
 
-  it("verifies the two keys belong to different Amp accounts", async () => {
-    const separate = await verifySeparateAmpAccounts(
-      "trusted-key",
-      "reviewer-key",
-      accountFetch({ "trusted-key": "user-one", "reviewer-key": "user-two" }),
-    )
-    assert.equal(separate.separation, "verified-user-id")
-    assert.match(separate.trustedIdHash, /^sha256:[0-9a-f]{64}$/)
-    assert.notEqual(separate.trustedIdHash, separate.reviewerIdHash)
+  it("records whether reviews use the local CLI or a dedicated key", async () => {
+    assert.deepEqual(await reviewAuthentication(undefined), { authentication: "local-cli" })
 
-    await assert.rejects(
-      verifySeparateAmpAccounts(
-        "trusted-key",
-        "another-key",
-        accountFetch({ "trusted-key": "same-user", "another-key": "same-user" }),
-      ),
-      /belong to the same Amp account/,
+    const separate = await reviewAuthentication(
+      "reviewer-key",
+      accountFetch({ "reviewer-key": "user-two" }),
     )
+    assert.equal(separate.authentication, "reviewer-api-key")
+    assert.match(separate.reviewerIdHash, /^sha256:[0-9a-f]{64}$/)
   })
 })
 
@@ -347,6 +350,25 @@ describe("eval scoring", () => {
   it("does not report failed clean reviews as clean", () => {
     const cases = [evalCase("control", control)]
     assert.equal(scoreRun(makeRun(cases, 1, [failed("control", 1, control)])).cleanAlertRate, null)
+  })
+
+  it("keeps older two-key run evidence readable", () => {
+    const cases = [evalCase("control", control)]
+    const fields = runFields(cases, 1)
+    assert.doesNotThrow(() =>
+      evalRunSchema.parse({
+        ...fields,
+        reviewer: {
+          ...fields.reviewer,
+          account: {
+            separation: "verified-user-id",
+            trustedIdHash: artifactHash,
+            reviewerIdHash: `sha256:${"b".repeat(64)}`,
+          },
+        },
+        samples: [completed("control", 1, control, "success", [], [])],
+      }),
+    )
   })
 
   it("rejects changed run evidence", () => {
@@ -611,6 +633,11 @@ async function git(cwd: string, args: string[]): Promise<string> {
   return (await execFileAsync("git", args, { cwd, encoding: "utf8" })).stdout
 }
 
+function restoreEnvironment(name: string, value: string | undefined): void {
+  if (value === undefined) delete process.env[name]
+  else process.env[name] = value
+}
+
 function makeRun(cases: ReturnType<typeof evalCase>[], samplesPerCase: number, samples: unknown[]) {
   return evalRunSchema.parse({ ...runFields(cases, samplesPerCase), samples })
 }
@@ -635,9 +662,7 @@ function runFields(cases: ReturnType<typeof evalCase>[], samplesPerCase: number)
       methodologyHash: "methodology",
       project: "source-project",
       account: {
-        separation: "verified-user-id",
-        trustedIdHash: artifactHash,
-        reviewerIdHash: `sha256:${"b".repeat(64)}`,
+        authentication: "local-cli",
       },
     },
     cases,

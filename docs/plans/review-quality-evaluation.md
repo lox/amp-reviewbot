@@ -63,16 +63,15 @@ The runner rejects a generated source-only transfer over 64 KiB. This keeps repe
 
 ## Account boundary
 
-The example pack stays with the trusted account. Blind reviews use a separate Amp account that can access the source project but not the example pack.
+The example pack stays with the trusted account. The trusted process and matching orbs use the authenticated local Amp CLI.
 
-The local command uses two environment variables:
+By default, review orbs use that same CLI login. This is convenient for a smoke run but does not prove that the reviewer is isolated from the answers. For blind evidence, set one optional environment variable:
 
-- `AMP_API_KEY`: trusted account, used for matching;
-- `AMP_EVAL_REVIEWER_API_KEY`: work account, used only by the blind-review child process.
+- `AMP_EVAL_REVIEWER_API_KEY`: separate review account, used only by the review child process.
 
-Before reading the pack, the runner resolves both keys to stable Amp user IDs and rejects a match. It stores only hashes of those IDs in the run evidence. The review child then gets a new empty home directory and an allowlisted environment. `--project` selects the review account's source project. We do not switch the global Amp CLI login and we never put a key in a command argument.
+When set, the runner validates the key and stores only a hash of its Amp user ID. The review child gets a new empty home directory and an allowlisted environment, while matching continues through the local login. `--project` selects the review account's source project. The runner cannot compare a stored CLI login with the supplied key, so the operator must confirm that the accounts differ and that the review account cannot read the example project.
 
-This is safe only when the keys belong to genuinely different accounts and the work account cannot read the private example project. Two projects owned by the same account are not an isolation boundary.
+`AMP_API_KEY` is rejected for eval runs so it cannot silently replace the local CLI login. Two projects owned by the same account are not an isolation boundary.
 
 ## Repeated runs
 
@@ -115,7 +114,7 @@ Because LLMs create and check most labels, report agreement with the labeled exa
 
 1. Keep the example pack private under the trusted account.
 2. Confirm the work account cannot clone that project.
-3. Set the trusted and review account keys securely in the local environment.
+3. Log the local Amp CLI into the trusted account and, for blind reviews, set a separate `AMP_EVAL_REVIEWER_API_KEY`.
 4. Run `npm run eval -- check /path/to/review-eval-pack`.
 5. Run one sample with `--project REVIEW_PROJECT --samples 1` to prove checkout, source preparation, and account access.
 6. Inspect the saved evidence for label leakage and production parity.
@@ -127,7 +126,7 @@ Because LLMs create and check most labels, report agreement with the labeled exa
 - Normal typecheck, tests, and build pass without live Amp calls.
 - A local Git fixture proves source commits, bundles, changed lines, and issue anchors are checked.
 - The generated review source bundle contains one target and no known-bug or witness data.
-- The runner rejects two keys belonging to the same Amp user, and the review child receives only its dedicated API key and basic connection settings.
+- The runner uses local CLI authentication by default; when a review key is supplied, the review child receives only that key and basic connection settings.
 - Production prompts are unchanged when no eval source preparation is supplied.
 - Saved runs reject altered corpus evidence, invalid finding indexes, and conclusions that do not follow from raw production output.
 - One finding cannot earn recall for two known bugs.

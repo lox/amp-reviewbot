@@ -12,9 +12,9 @@ import { judgeIssue } from "./judge.js"
 import { checkPack, describePack, loadPack } from "./pack.js"
 import { formatReport } from "./report.js"
 import {
+  reviewAuthentication,
   runBlindReview,
-  verifySeparateAmpAccounts,
-  type AccountSeparation,
+  type ReviewAuthentication,
 } from "./reviewer.js"
 import {
   corpusContentHash,
@@ -32,8 +32,7 @@ const failOn = "high" as const
 type RunOptions = {
   packPath: string
   project: string
-  trustedApiKey: string
-  reviewerApiKey: string
+  reviewerApiKey?: string
   outputPath: string
   judgeCache: string
   sourceCache: string
@@ -79,8 +78,12 @@ async function main(): Promise<void> {
 }
 
 async function runEvaluation(options: RunOptions): Promise<{ run: EvalRun; score: EvalScore }> {
-  console.log("Checking that the review account is separate...")
-  const account = await verifySeparateAmpAccounts(options.trustedApiKey, options.reviewerApiKey)
+  console.log(
+    options.reviewerApiKey
+      ? "Checking the review account key..."
+      : "Using the authenticated local Amp CLI for reviews and matching...",
+  )
+  const account = await reviewAuthentication(options.reviewerApiKey)
   console.log("Checking source commits and changed lines...")
   const { corpus, sourcePreparation } = await loadPack(options.packPath, options.sourceCache)
   const startedAt = new Date().toISOString()
@@ -156,8 +159,8 @@ async function runSample(
       title: reviewThreadTitle(job),
       project: options.project,
       timeoutMs: options.timeoutMs,
-      apiKey: options.reviewerApiKey,
       signal: controller.signal,
+      ...(options.reviewerApiKey ? { apiKey: options.reviewerApiKey } : {}),
     })
     threadId = review.threadId
     models = review.models
@@ -248,7 +251,7 @@ function changedLineMap(evalCase: EvalCase): Map<string, Set<number>> {
 
 async function reviewerProvenance(
   project: string,
-  account: AccountSeparation,
+  account: ReviewAuthentication,
 ): Promise<EvalRun["reviewer"]> {
   const [
     { stdout: gitCommit },
@@ -309,17 +312,13 @@ function runOptions(args: string[]): RunOptions {
   const packPath = requiredInput(args, "--corpus")
   const project = flag(args, "--project")
   if (!project) throw new Error("Missing --project")
-  const trustedApiKey = process.env.AMP_API_KEY
+  if (process.env.AMP_API_KEY) {
+    throw new Error(
+      "Unset AMP_API_KEY; evaluation uses the authenticated local Amp CLI. Set AMP_EVAL_REVIEWER_API_KEY only to override review-orb authentication.",
+    )
+  }
   const reviewerApiKey = process.env.AMP_EVAL_REVIEWER_API_KEY
-  if (!trustedApiKey) {
-    throw new Error("AMP_API_KEY must identify the trusted account running the evaluation")
-  }
-  if (!reviewerApiKey) {
-    throw new Error("AMP_EVAL_REVIEWER_API_KEY must identify the separate blind-review account")
-  }
-  if (reviewerApiKey === trustedApiKey) {
-    throw new Error("The trusted account and blind-review account must use different keys")
-  }
+  delete process.env.AMP_EVAL_REVIEWER_API_KEY
 
   const samplesPerCase = positiveInteger(flag(args, "--samples") ?? "3", "--samples", 20)
   const concurrency = positiveInteger(flag(args, "--concurrency") ?? "2", "--concurrency", 10)
@@ -333,8 +332,7 @@ function runOptions(args: string[]): RunOptions {
   return {
     packPath,
     project,
-    trustedApiKey,
-    reviewerApiKey,
+    ...(reviewerApiKey ? { reviewerApiKey } : {}),
     outputPath: flag(args, "--output") ?? resolve(".eval-runs", `${stamp}.json`),
     judgeCache: resolve(cacheRoot, "judge"),
     sourceCache: resolve(cacheRoot, "source"),
@@ -403,7 +401,7 @@ function printHelp(): void {
   npm run eval -- run PACK --project PROJECT [--samples 3] [--concurrency 2]
   npm run eval -- report RUN.json
 
-Check an example pack, run blind reviews, or read a saved report. Running reviews requires AMP_API_KEY for the trusted account and AMP_EVAL_REVIEWER_API_KEY for a separate account that can access PROJECT.`)
+Check an example pack, run reviews, or read a saved report. Reviews and matching use the authenticated local Amp CLI. Set AMP_EVAL_REVIEWER_API_KEY only when review orbs should use another account.`)
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
