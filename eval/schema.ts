@@ -217,13 +217,26 @@ export const evalRunSchema = z
       reviewSourceHash: z.string(),
       methodologyHash: z.string(),
       project: z.string().min(1),
-      account: z
-        .object({
-          separation: z.literal("verified-user-id"),
-          trustedIdHash: artifactHashSchema,
-          reviewerIdHash: artifactHashSchema,
-        })
-        .strict(),
+      account: z.union([
+        z
+          .object({
+            authentication: z.literal("local-cli"),
+          })
+          .strict(),
+        z
+          .object({
+            authentication: z.literal("reviewer-api-key"),
+            reviewerIdHash: artifactHashSchema,
+          })
+          .strict(),
+        z
+          .object({
+            separation: z.literal("verified-user-id"),
+            trustedIdHash: artifactHashSchema,
+            reviewerIdHash: artifactHashSchema,
+          })
+          .strict(),
+      ]),
     }),
     cases: z.array(evalCaseSchema).min(1),
     samples: z.array(evalSampleSchema).min(1),

@@ -17,15 +17,13 @@ export type BlindReviewInput = {
   title: string
   project: string
   timeoutMs: number
-  apiKey: string
+  apiKey?: string
   signal: AbortSignal
 }
 
-export type AccountSeparation = {
-  separation: "verified-user-id"
-  trustedIdHash: string
-  reviewerIdHash: string
-}
+export type ReviewAuthentication =
+  | { authentication: "local-cli" }
+  | { authentication: "reviewer-api-key"; reviewerIdHash: string }
 
 type SpawnReviewer = (
   command: string,
@@ -37,22 +35,15 @@ type SpawnReviewer = (
   },
 ) => ChildProcessWithoutNullStreams
 
-export async function verifySeparateAmpAccounts(
-  trustedApiKey: string,
-  reviewerApiKey: string,
+export async function reviewAuthentication(
+  reviewerApiKey: string | undefined,
   fetchAmp: typeof fetch = fetch,
   ampUrl = process.env.AMP_URL ?? "https://ampcode.com",
-): Promise<AccountSeparation> {
-  const [trustedUserId, reviewerUserId] = await Promise.all([
-    ampUserId(trustedApiKey, fetchAmp, ampUrl),
-    ampUserId(reviewerApiKey, fetchAmp, ampUrl),
-  ])
-  if (trustedUserId === reviewerUserId) {
-    throw new Error("The trusted and blind-review keys belong to the same Amp account")
-  }
+): Promise<ReviewAuthentication> {
+  if (!reviewerApiKey) return { authentication: "local-cli" }
+  const reviewerUserId = await ampUserId(reviewerApiKey, fetchAmp, ampUrl)
   return {
-    separation: "verified-user-id",
-    trustedIdHash: hashId(trustedUserId),
+    authentication: "reviewer-api-key",
     reviewerIdHash: hashId(reviewerUserId),
   }
 }
@@ -62,7 +53,9 @@ export async function runBlindReview(
   spawnReviewer: SpawnReviewer = spawn,
 ): Promise<z.infer<typeof outputSchema>> {
   input.signal.throwIfAborted()
-  const home = await mkdtemp(join(tmpdir(), "amp-reviewbot-reviewer-"))
+  const home = input.apiKey
+    ? await mkdtemp(join(tmpdir(), "amp-reviewbot-reviewer-"))
+    : undefined
   try {
     const { args, entry } = await childCommand()
     return await new Promise((resolveReview, rejectReview) => {
@@ -132,11 +125,11 @@ export async function runBlindReview(
       }
     })
   } finally {
-    await rm(home, { recursive: true, force: true })
+    if (home) await rm(home, { recursive: true, force: true })
   }
 }
 
-export function reviewerEnvironment(apiKey: string, home: string): NodeJS.ProcessEnv {
+export function reviewerEnvironment(apiKey?: string, isolatedHome?: string): NodeJS.ProcessEnv {
   const inherited = [
     "PATH",
     "HTTPS_PROXY",
@@ -146,14 +139,20 @@ export function reviewerEnvironment(apiKey: string, home: string): NodeJS.Proces
     "NODE_EXTRA_CA_CERTS",
     "AMP_URL",
   ]
-  const environment: NodeJS.ProcessEnv = {
-    HOME: home,
-    XDG_CONFIG_HOME: join(home, ".config"),
-    XDG_DATA_HOME: join(home, ".local", "share"),
-    AMP_API_KEY: apiKey,
-  }
+  const environment: NodeJS.ProcessEnv = {}
   for (const name of inherited) {
     if (process.env[name]) environment[name] = process.env[name]
+  }
+  if (apiKey) {
+    if (!isolatedHome) throw new Error("A reviewer API key requires an isolated home directory")
+    environment.HOME = isolatedHome
+    environment.XDG_CONFIG_HOME = join(isolatedHome, ".config")
+    environment.XDG_DATA_HOME = join(isolatedHome, ".local", "share")
+    environment.AMP_API_KEY = apiKey
+  } else {
+    for (const name of ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME"]) {
+      if (process.env[name]) environment[name] = process.env[name]
+    }
   }
   return environment
 }

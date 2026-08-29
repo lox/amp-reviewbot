@@ -27,21 +27,22 @@ The runner calculates changed lines from the exact Git diff. It does not store a
 
 ## Keep reviews blind
 
-Use two Amp accounts:
-
-- The trusted account can read the private example pack and checks whether findings match known bugs.
-- A separate review account can access the source project, but cannot access the example pack.
-
-Supply the keys through the environment, never as command arguments:
+The command uses the account from your authenticated local Amp CLI for trusted matching. By default it also uses that account for review orbs:
 
 ```sh
-export AMP_API_KEY="trusted-account-key"
+amp login
+npm run eval -- run /path/to/review-eval-pack --project REVIEW_PROJECT
+```
+
+For account-isolated reviews, provide a key from a separate account that can access the source project but cannot access the example pack:
+
+```sh
 export AMP_EVAL_REVIEWER_API_KEY="separate-review-account-key"
 ```
 
-`AMP_API_KEY` is used by the main process. `AMP_EVAL_REVIEWER_API_KEY` is passed only to a child process with an empty home directory. Before reading the pack, the runner resolves both keys to Amp user IDs and rejects keys from the same account. The child then starts fresh private review orbs in the project named by `--project`.
+`AMP_EVAL_REVIEWER_API_KEY` is passed only to a child process with an empty home directory. The trusted process and matching orbs continue to use the local CLI login. The runner validates the review key and stores only a hash of its Amp user ID, but cannot compare it with the CLI's stored login. Confirm that they are different accounts before relying on the run as blind evidence.
 
-The project is selected by `--project`; there is no need to log the Amp CLI in and out between reviews. Amp's SDK uses the standard `AMP_API_KEY` value in each process.
+Do not set `AMP_API_KEY`; the command rejects it so the trusted side cannot silently override the local CLI login. The project is selected by `--project`. Without the optional review key, the run records that both roles used the local CLI and does not claim an account boundary.
 
 The reviewer receives only:
 
@@ -71,7 +72,7 @@ npm run eval -- run /path/to/review-eval-pack \
   --concurrency 2
 ```
 
-Before the first review, this command verifies the account boundary, fetches the public source, verifies any source bundle, checks every commit, calculates changed lines, and rejects a known bug that does not point to a changed line.
+Before the first review, this command validates any review key, fetches the public source, verifies any source bundle, checks every commit, calculates changed lines, and rejects a known bug that does not point to a changed line.
 
 Every review then uses a fresh private Amp orb and the same prompt builder, two-pass review method, JSON parser, changed-line filter, and conclusion calculation as production. The trusted account uses two independent high-mode checks to decide whether a finding describes a known bug; it uses a third only when they disagree.
 

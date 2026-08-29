@@ -15,7 +15,6 @@ const inputSchema = z.object({
 })
 
 async function main(): Promise<void> {
-  if (!process.env.AMP_API_KEY) throw new Error("Blind reviewer account key is missing")
   const input = inputSchema.parse(JSON.parse(await readStdin()))
   const controller = new AbortController()
   const abort = () => controller.abort(new Error("Blind review was cancelled"))
