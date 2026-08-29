@@ -1,15 +1,21 @@
 import assert from "node:assert/strict"
-import { execFile } from "node:child_process"
+import { execFile, type ChildProcessWithoutNullStreams } from "node:child_process"
 import { randomBytes } from "node:crypto"
+import { EventEmitter } from "node:events"
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { PassThrough } from "node:stream"
 import { describe, it } from "node:test"
 import { promisify } from "node:util"
 import { judgeIssue, resolveMatchingVotes } from "../eval/judge.js"
 import { checkPack, exampleSchema, loadPack } from "../eval/pack.js"
 import { formatReport } from "../eval/report.js"
-import { reviewerEnvironment, verifySeparateAmpAccounts } from "../eval/reviewer.js"
+import {
+  reviewerEnvironment,
+  runBlindReview,
+  verifySeparateAmpAccounts,
+} from "../eval/reviewer.js"
 import {
   corpusContentHash,
   evalCaseSchema,
@@ -65,6 +71,14 @@ describe("eval example packs", () => {
     }
     input.versions[1]!.commit = input.versions[0]!.commit
     assert.throws(() => exampleSchema.parse(input), /different commit/)
+  })
+
+  it("rejects names that cannot safely form Git references", async () => {
+    const input = JSON.parse(await readFile("eval/example.json", "utf8")) as { id: string }
+    for (const id of ["bad..id", "bad.lock", "bad."]) {
+      input.id = id
+      assert.throws(() => exampleSchema.parse(input), /safe for Git references/)
+    }
   })
 
   it("rejects a known issue outside the exact changed lines", () => {
@@ -152,6 +166,47 @@ describe("eval example packs", () => {
     } finally {
       delete process.env.EVAL_TEST_SECRET
     }
+  })
+
+  it("waits for the reviewer child to exit after an input failure", async () => {
+    const spawned = deferred<void>()
+    const child = Object.assign(new EventEmitter(), {
+      stdin: new PassThrough(),
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      kill: () => true,
+    }) as unknown as ChildProcessWithoutNullStreams
+    const review = runBlindReview(
+      {
+        prompt: "Review this change.",
+        title: "Test review",
+        project: "test-project",
+        timeoutMs: 1_000,
+        apiKey: "test-key",
+        signal: new AbortController().signal,
+      },
+      () => {
+        spawned.resolve()
+        return child
+      },
+    )
+    let settled = false
+    void review.then(
+      () => {
+        settled = true
+      },
+      () => {
+        settled = true
+      },
+    )
+
+    await spawned.promise
+    child.stdin.emit("error", new Error("broken pipe"))
+    await new Promise((resolveImmediate) => setImmediate(resolveImmediate))
+    assert.equal(settled, false)
+
+    child.emit("close", 1, null)
+    await assert.rejects(review, /Could not send review input/)
   })
 
   it("verifies the two keys belong to different Amp accounts", async () => {

@@ -18,7 +18,13 @@ import { corpusSchema, pullRequestContextSchema, type EvalCorpus } from "./schem
 
 const execFileAsync = promisify(execFile)
 const shaSchema = z.string().regex(/^[0-9a-f]{40}$/i, "must be a full 40-character commit SHA")
-const nameSchema = z.string().regex(/^[a-z0-9][a-z0-9._-]*$/i, "must be a simple name")
+const nameSchema = z
+  .string()
+  .max(100)
+  .regex(
+    /^(?!.*(?:\.\.|\.lock$))[a-z0-9](?:[a-z0-9._-]*[a-z0-9_-])?$/i,
+    "must be a simple name safe for Git references",
+  )
 const relativePathSchema = z.string().min(1).max(1_000).superRefine((value, context) => {
   if (value.startsWith("/") || value.split(/[\\/]/).includes("..")) {
     context.addIssue({ code: "custom", message: "must stay inside the example directory" })

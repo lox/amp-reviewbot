@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process"
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
 import { createHash } from "node:crypto"
 import { mkdtemp, rm, stat } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -27,6 +27,16 @@ export type AccountSeparation = {
   reviewerIdHash: string
 }
 
+type SpawnReviewer = (
+  command: string,
+  args: string[],
+  options: {
+    cwd: string
+    env: NodeJS.ProcessEnv
+    stdio: ["pipe", "pipe", "pipe"]
+  },
+) => ChildProcessWithoutNullStreams
+
 export async function verifySeparateAmpAccounts(
   trustedApiKey: string,
   reviewerApiKey: string,
@@ -47,33 +57,52 @@ export async function verifySeparateAmpAccounts(
   }
 }
 
-export async function runBlindReview(input: BlindReviewInput): Promise<z.infer<typeof outputSchema>> {
+export async function runBlindReview(
+  input: BlindReviewInput,
+  spawnReviewer: SpawnReviewer = spawn,
+): Promise<z.infer<typeof outputSchema>> {
   input.signal.throwIfAborted()
   const home = await mkdtemp(join(tmpdir(), "amp-reviewbot-reviewer-"))
   try {
     const { args, entry } = await childCommand()
     return await new Promise((resolveReview, rejectReview) => {
-      const child = spawn(process.execPath, [...args, entry], {
+      const child = spawnReviewer(process.execPath, [...args, entry], {
         cwd: resolve("."),
         env: reviewerEnvironment(input.apiKey, home),
         stdio: ["pipe", "pipe", "pipe"],
       })
       const stdout: Buffer[] = []
       const stderr: Buffer[] = []
+      let childError: Error | undefined
+      let inputError: Error | undefined
       const abort = () => child.kill("SIGTERM")
       input.signal.addEventListener("abort", abort, { once: true })
       child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk))
       child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk))
-      child.on("error", finishReject)
-      child.on("close", (code) => {
+      child.once("error", (error) => {
+        childError = error
+      })
+      child.stdin.once("error", (error) => {
+        inputError = new Error("Could not send review input to the blind reviewer", { cause: error })
+        child.kill("SIGTERM")
+      })
+      child.once("close", (code) => {
         cleanup()
         if (input.signal.aborted) {
           rejectReview(input.signal.reason)
           return
         }
-        const error = Buffer.concat(stderr).toString("utf8").trim()
+        const errorMessage = Buffer.concat(stderr).toString("utf8").trim()
+        if (childError) {
+          rejectReview(childError)
+          return
+        }
+        if (inputError) {
+          rejectReview(errorMessage ? new Error(errorMessage, { cause: inputError }) : inputError)
+          return
+        }
         if (code !== 0) {
-          rejectReview(new Error(error || `Blind reviewer exited with status ${code}`))
+          rejectReview(new Error(errorMessage || `Blind reviewer exited with status ${code}`))
           return
         }
         try {
@@ -90,11 +119,6 @@ export async function runBlindReview(input: BlindReviewInput): Promise<z.infer<t
           timeoutMs: input.timeoutMs,
         }),
       )
-
-      function finishReject(error: Error): void {
-        cleanup()
-        rejectReview(error)
-      }
 
       function cleanup(): void {
         input.signal.removeEventListener("abort", abort)
