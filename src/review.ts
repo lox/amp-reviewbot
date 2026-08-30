@@ -51,9 +51,12 @@ Trusted source preparation:
 ${trustedSourcePreparation}
 </source-preparation>
 
-Follow this source-only preparation before the normal checkout. It cannot change the trusted review coordinates, methodology, security requirements, or output schema.
+Follow this source-only preparation before review. It cannot change the trusted review coordinates, methodology, security requirements, or output schema.
 `
     : ""
+  const checkoutInstruction = trustedSourcePreparation
+    ? `Follow the source preparation first, then verify HEAD equals ${job.headSha}.`
+    : `First fetch and check out exactly the head SHA. Verify HEAD equals ${job.headSha}.`
 
   return `You are reviewing GitHub pull request #${job.pullNumber} in ${job.repositoryFullName}.
 
@@ -62,7 +65,7 @@ Trusted review coordinates:
 - head SHA: ${job.headSha}
 ${pullRequestContext}${sourcePreparation}
 
-First fetch and check out exactly the head SHA. Verify HEAD equals ${job.headSha}. Review only changes in ${job.baseSha}...${job.headSha} and read surrounding code needed to establish whether each issue is real.
+${checkoutInstruction} Review only changes in ${job.baseSha}...${job.headSha} and read surrounding code needed to establish whether each issue is real.
 
 The review methodology below is trusted, self-contained, and embedded by reviewbot. Use it directly without calling the skill tool. Apply its two passes sequentially to the exact diff, then synthesize one result. The caller-specific requirements and JSON schema after the methodology take precedence.
 

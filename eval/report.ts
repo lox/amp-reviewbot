@@ -3,13 +3,23 @@ import { expectedKind } from "./schema.js"
 import type { EvalScore } from "./score.js"
 
 export function formatReport(run: EvalRun, score: EvalScore): string {
-  const lines = [`Review evaluation: ${reportVerdict(score)}`, ""]
+  const lines = [`Review evaluation: ${reportVerdict(run, score)}`, ""]
   const counts = countKinds(run.cases)
+  const seedCounts = countSeedOutcomes(score)
   lines.push(
-    `${countLabel(counts.control, "clean change")}, ${countLabel(counts.advisory, "smaller issue")}, and ${countLabel(counts.blocking, "serious issue")}.`,
+    `${countLabel(score.seeds.length, "pull-request seed")}: ${seedCounts.pass} pass, ${seedCounts.unstable} unstable, ${seedCounts.fail} fail.`,
+    `${countLabel(counts.control, "version with no frozen issue")}, ${countLabel(counts.advisory, "version with advisory label")}, and ${countLabel(counts.blocking, "version with blocking label")}.`,
     `Each was reviewed ${run.requestedSamplesPerCase} ${run.requestedSamplesPerCase === 1 ? "time" : "times"}. ${completionSentence(run, score)}`,
-    "A right response reports a smaller issue without blocking, and blocks a serious issue.",
+    "A seed vote matches only when every version finds every frozen issue at the correct blocking threshold and raises no alert on a version with no frozen issues.",
   )
+  const boundaryViolations = run.samples.filter(
+    (sample) => (sample.evidenceBoundaryViolations?.length ?? 0) > 0,
+  ).length
+  if (boundaryViolations > 0) {
+    lines.push(
+      `${boundaryViolations} review ${boundaryViolations === 1 ? "sample crossed" : "samples crossed"} the declared source-evidence boundary; treat this run as contaminated.`,
+    )
+  }
 
   const scores = new Map(score.cases.map((caseScore) => [caseScore.caseId, caseScore]))
   const samples = new Map<string, EvalSample[]>()
@@ -26,9 +36,14 @@ export function formatReport(run: EvalRun, score: EvalScore): string {
   }
 
   let exampleNumber = 0
+  const seedScores = new Map(score.seeds.map((seed) => [seed.seedId, seed]))
   for (const cases of examples.values()) {
     exampleNumber += 1
-    lines.push("", `Example ${exampleNumber} (pull request #${cases[0]!.pullNumber})`)
+    const seed = seedScores.get(cases[0]!.seedId)!
+    lines.push(
+      "",
+      `Example ${exampleNumber} (pull request #${cases[0]!.pullNumber}): ${seed.outcome.toUpperCase()} (${seed.passedSamples}/${seed.samples} seed votes matched)`,
+    )
     for (const evalCase of cases) {
       const caseScore = scores.get(evalCase.id)
       if (!caseScore) continue
@@ -42,6 +57,12 @@ export function formatReport(run: EvalRun, score: EvalScore): string {
     "This result covers only these examples; it is not a general quality claim.",
   )
   return lines.join("\n")
+}
+
+function countSeedOutcomes(score: EvalScore): Record<"pass" | "unstable" | "fail", number> {
+  const counts = { pass: 0, unstable: 0, fail: 0 }
+  for (const seed of score.seeds) counts[seed.outcome] += 1
+  return counts
 }
 
 function countKinds(cases: EvalCase[]): Record<"control" | "advisory" | "blocking", number> {
@@ -67,16 +88,22 @@ function caseResult(
   samples: EvalSample[],
 ): string {
   const kind = expectedKind(evalCase.expected)
+  const role =
+    evalCase.versionRole === "baseline"
+      ? "Baseline"
+      : evalCase.versionRole === "introduced-issue"
+        ? "Introduced-issue version"
+        : "Version"
   const completed = rateCount(score.operationalCompletion, score.samples)
   if (kind === "control") {
-    if (completed === 0) return "Clean change: no reviews completed"
-    const falseAlarms = rateCount(score.cleanAlertRate, completed)
-    return `Clean change: ${completed - falseAlarms} of ${completed} completed reviews had no false alarms`
+    if (completed === 0) return `${role}, no frozen issues: no reviews completed`
+    const cleanAlerts = rateCount(score.cleanAlertRate, completed)
+    return `${role}, no frozen issues: ${completed - cleanAlerts} of ${completed} completed reviews raised no clean alert`
   }
   const opportunities = score.samples * score.knownIssues
   const found = rateCount(score.issueDetectionRate, opportunities)
   const rightResponse = rateCount(score.groundedConclusionAgreement, score.samples)
-  const label = kind === "advisory" ? "Smaller issue" : "Serious issue"
+  const label = kind === "advisory" ? "advisory labels" : "blocking labels"
   const retainedFindings = samples.reduce(
     (total, sample) =>
       total + (sample.status === "completed" ? sample.retainedResult.findings.length : 0),
@@ -86,37 +113,28 @@ function caseResult(
   const otherFindingsText =
     otherFindings === 0
       ? ""
-      : `; ${otherFindings} other ${otherFindings === 1 ? "finding needs" : "findings need"} checking`
+      : `; ${otherFindings} unmatched ${otherFindings === 1 ? "finding needs" : "findings need"} source checking`
   const foundText =
     score.knownIssues === 1
       ? `found in ${found} of ${score.samples}`
       : `${found} of ${opportunities} known issues found`
-  return `${label}: ${foundText}; right response in ${rightResponse} of ${score.samples}${otherFindingsText}`
+  return `${role}, ${label}: ${foundText}; frozen-label response matched in ${rightResponse} of ${score.samples}${otherFindingsText}`
 }
 
-function reportVerdict(score: EvalScore): string {
+function reportVerdict(run: EvalRun, score: EvalScore): string {
+  if (score.seeds.length === 0) return "INCOMPLETE"
   if (
     score.operationalCompletion < 1 ||
     (score.judgeCoverage !== null && score.judgeCoverage < 1)
   ) {
     return "INCOMPLETE"
   }
-  let needsMoreRuns = false
-  for (const caseScore of score.cases) {
-    const correct = rateCount(caseScore.groundedConclusionAgreement, caseScore.samples)
-    if (caseScore.samples === 3 && correct === 2) {
-      needsMoreRuns = true
-      continue
-    }
-    if (caseScore.samples === 5 && correct >= 4) continue
-    if (correct === caseScore.samples) continue
-    if (caseScore.samples !== 5 && correct > caseScore.samples / 2) {
-      needsMoreRuns = true
-      continue
-    }
-    return "NEEDS WORK"
+  if (run.samples.some((sample) => (sample.evidenceBoundaryViolations?.length ?? 0) > 0)) {
+    return "CONTAMINATED"
   }
-  return needsMoreRuns ? "MORE RUNS NEEDED" : "PASSED THESE EXAMPLES"
+  if (score.seeds.some((seed) => seed.outcome === "fail")) return "NEEDS WORK"
+  if (score.seeds.some((seed) => seed.outcome === "unstable")) return "UNSTABLE"
+  return "PASSED THESE EXAMPLES"
 }
 
 function bottomLine(run: EvalRun, score: EvalScore): string {
@@ -133,7 +151,7 @@ function bottomLine(run: EvalRun, score: EvalScore): string {
   const bugScores = score.cases.filter(
     (caseScore) => expectedKind(cases.get(caseScore.caseId)!.expected) !== "control",
   )
-  const falseAlarms = cleanScores.reduce((total, caseScore) => {
+  const cleanAlerts = cleanScores.reduce((total, caseScore) => {
     const completed = rateCount(caseScore.operationalCompletion, caseScore.samples)
     return total + rateCount(caseScore.cleanAlertRate, completed)
   }, 0)
@@ -151,16 +169,27 @@ function bottomLine(run: EvalRun, score: EvalScore): string {
     (total, caseScore) => total + rateCount(caseScore.groundedConclusionAgreement, caseScore.samples),
     0,
   )
+  const retainedFindings = run.samples.reduce(
+    (total, sample) =>
+      total + (sample.status === "completed" ? sample.retainedResult.findings.length : 0),
+    0,
+  )
+  const unmatchedFindings = Math.max(0, retainedFindings - bugsFound)
 
   const observations: string[] = []
-  if (falseAlarms > 0) {
+  if (cleanAlerts > 0) {
     observations.push(
-      `The reviewer raised ${falseAlarms} ${falseAlarms === 1 ? "false alarm" : "false alarms"} on clean code.`,
+      `The reviewer raised ${cleanAlerts} ${cleanAlerts === 1 ? "alert" : "alerts"} on versions with no frozen issues; these require source checking before they can be called unsupported.`,
+    )
+  }
+  if (unmatchedFindings > 0) {
+    observations.push(
+      `${unmatchedFindings} unmatched ${unmatchedFindings === 1 ? "finding needs" : "findings need"} source checking.`,
     )
   }
   if (bugsFound < bugReviews) {
     observations.push(
-      `The reviewer missed the known issue in ${bugReviews - bugsFound} of ${bugReviews} issue reviews.`,
+      `The reviewer did not match the frozen issue in ${bugReviews - bugsFound} of ${bugReviews} labeled-issue reviews.`,
     )
   } else if (rightResponses < bugVersionReviews) {
     observations.push(

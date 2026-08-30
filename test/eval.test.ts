@@ -16,7 +16,13 @@ import {
   reviewerEnvironment,
   runBlindReview,
 } from "../eval/reviewer.js"
-import { finishJudgements, recordFinishedRun, selectCases } from "../eval/run.js"
+import {
+  auditEvidenceBoundary,
+  finishJudgements,
+  orderedReviewTasks,
+  recordFinishedRun,
+  selectCases,
+} from "../eval/run.js"
 import {
   corpusContentHash,
   evalCaseSchema,
@@ -86,6 +92,28 @@ describe("eval example packs", () => {
     issue.category = "maintainability"
     issue.subtype = "duplication"
     assert.throws(() => exampleSchema.parse(input), /maintainability advisory cannot be blocking/)
+  })
+
+  it("allows source-confirmed baseline issues when the introduced version repeats them", async () => {
+    const input = JSON.parse(await readFile("eval/example.json", "utf8")) as {
+      versions: Array<{ knownIssues: Array<Record<string, unknown>> }>
+    }
+    const introducedIssue = input.versions[1]!.knownIssues[0]!
+    const baselineIssue = {
+      ...introducedIssue,
+      id: "inherited-defect",
+      severity: "medium",
+      rootCause: "The baseline change already mishandles an interrupted response.",
+      failureBehavior: "An interrupted response leaves completed work unrecorded.",
+      line: 80,
+      verification: "Source inspection and a focused regression establish the baseline defect.",
+    }
+    input.versions[0]!.knownIssues.push(baselineIssue)
+    input.versions[1]!.knownIssues.unshift(structuredClone(baselineIssue))
+
+    assert.doesNotThrow(() => exampleSchema.parse(input))
+    input.versions[1]!.knownIssues[0]!.failureBehavior = "A different claim."
+    assert.throws(() => exampleSchema.parse(input), /repeat every baseline issue unchanged/)
   })
 
   it("requires synthetic maintainability issues to identify their subtype", async () => {
@@ -171,10 +199,19 @@ describe("eval example packs", () => {
         [{ "code.txt": [2, 3] }, { "code.txt": [2, 3] }],
       )
       assert.equal(expectedConclusion(loaded.corpus.cases[1]!.expected), "failure")
-      assert.equal(loaded.sourcePreparation.has("local-example/clean-change"), false)
+      assert.deepEqual(
+        loaded.corpus.cases.map((item) => item.versionRole),
+        ["baseline", "introduced-issue"],
+      )
+      assert.equal(loaded.sourcePreparation.has("local-example/clean-change"), true)
+      const baselinePreparation = loaded.sourcePreparation.get("local-example/clean-change")!
       const preparation = loaded.sourcePreparation.get("local-example/serious-bug")!
-      assert.match(preparation, /source history/)
+      assert.match(preparation, /source snapshot/)
       assert.match(preparation, /base64 --decode/)
+      assert.doesNotMatch(preparation, /eval|reviewbot|expected answers|focused tests/i)
+      assert.doesNotMatch(baselinePreparation, /eval|reviewbot|expected answers|focused tests/i)
+      assert.match(baselinePreparation, new RegExp(`git fetch origin ${fixture.base}`))
+      assert.match(preparation, new RegExp(`git fetch origin ${fixture.base}`))
       assert.doesNotMatch(preparation, /known-bug|Loses the useful result|witnesses\//)
       const encodedBundle = /printf '%s' '([^']+)' \| base64 --decode/.exec(preparation)?.[1]
       assert.ok(encodedBundle)
@@ -185,13 +222,36 @@ describe("eval example packs", () => {
         .split("\n")
       assert.equal(heads.length, 1)
       assert.match(heads[0]!, new RegExp(`^${loaded.corpus.cases[1]!.headSha} `))
+      const advertised = heads[0]!.split(/\s+/)[1]!
+      const prepared = join(fixture.root, "prepared")
+      await execFileAsync("git", ["clone", fixture.origin, prepared])
+      await git(prepared, ["fetch", generatedBundle, `${advertised}:refs/source/target`])
+      await git(prepared, ["checkout", "--detach", loaded.corpus.cases[1]!.headSha])
+      await git(prepared, ["remote", "remove", "origin"])
+      const refs = (await git(prepared, ["for-each-ref", "--format=%(refname)"]))
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+      for (const ref of refs) await git(prepared, ["update-ref", "-d", ref])
+      await git(prepared, ["update-ref", "refs/source/base", fixture.base])
+      await git(prepared, [
+        "update-ref",
+        "refs/source/target",
+        loaded.corpus.cases[1]!.headSha,
+      ])
+      assert.equal((await git(prepared, ["rev-parse", "HEAD"])).trim(), loaded.corpus.cases[1]!.headSha)
+      assert.equal((await git(prepared, ["remote"])).trim(), "")
+      assert.deepEqual(
+        (await git(prepared, ["for-each-ref", "--format=%(refname)"])).trim().split("\n"),
+        ["refs/source/base", "refs/source/target"],
+      )
 
       await git(fixture.origin, ["tag", "public-clean", fixture.clean])
       await git(fixture.origin, ["update-ref", "refs/heads/main", fixture.base])
       const reloaded = await loadPack(fixture.pack, fixture.cache, () => fixture.origin)
-      assert.equal(
-        reloaded.sourcePreparation.get("local-example/serious-bug"),
-        preparation,
+      assert.match(
+        reloaded.sourcePreparation.get("local-example/serious-bug")!,
+        new RegExp(`refs/source/target.*${loaded.corpus.cases[1]!.headSha}`, "s"),
       )
 
       await git(fixture.origin, ["tag", "--delete", "public-clean"])
@@ -282,7 +342,7 @@ describe("eval example packs", () => {
       const encodedBundle = /printf '%s' '([^']+)' \| base64 --decode/.exec(preparation)?.[1]
       assert.ok(encodedBundle)
       const header = Buffer.from(encodedBundle, "base64").subarray(0, 1_024).toString("utf8")
-      assert.match(header, new RegExp(`-${fixture.clean} `))
+      assert.match(header, new RegExp(`-${fixture.base} `))
     } finally {
       await rm(fixture.root, { recursive: true, force: true })
     }
@@ -381,6 +441,56 @@ describe("eval example packs", () => {
     await assert.rejects(review, /Could not send review input/)
   })
 
+  it("returns the complete reviewer trace and model evidence", async () => {
+    const spawned = deferred<void>()
+    const stdout = new PassThrough()
+    const child = Object.assign(new EventEmitter(), {
+      stdin: new PassThrough(),
+      stdout,
+      stderr: new PassThrough(),
+      kill: () => true,
+    }) as unknown as ChildProcessWithoutNullStreams
+    const trace = [
+      {
+        type: "assistant",
+        session_id: "thread-1",
+        message: { model: "test-model", content: [] },
+      },
+    ]
+    const review = runBlindReview(
+      {
+        prompt: "Review this change.",
+        title: "Test review",
+        project: "test-project",
+        timeoutMs: 1_000,
+        signal: new AbortController().signal,
+      },
+      () => {
+        spawned.resolve()
+        return child
+      },
+    )
+    await spawned.promise
+    stdout.write(
+      JSON.stringify({
+        status: "completed",
+        rawResult: '{"summary":"Done","findings":[]}',
+        threadId: "thread-1",
+        models: ["test-model"],
+        trace,
+      }),
+    )
+    child.emit("close", 0, null)
+
+    assert.deepEqual(await review, {
+      status: "completed",
+      rawResult: '{"summary":"Done","findings":[]}',
+      threadId: "thread-1",
+      models: ["test-model"],
+      trace,
+    })
+  })
+
   it("records whether reviews use the local CLI or a dedicated key", async () => {
     assert.deepEqual(await reviewAuthentication(undefined), { authentication: "local-cli" })
 
@@ -406,6 +516,52 @@ describe("eval example packs", () => {
       ["holdout"],
     )
   })
+
+  it("randomizes each complete sample block reproducibly", () => {
+    const cases = [evalCase("one", control), evalCase("two", control), evalCase("three", control)]
+    const first = orderedReviewTasks(cases, 3, "fixed-seed")
+    const second = orderedReviewTasks(cases, 3, "fixed-seed")
+
+    assert.deepEqual(
+      first.map(({ evalCase: item, sample }) => [item.id, sample]),
+      second.map(({ evalCase: item, sample }) => [item.id, sample]),
+    )
+    for (const sample of [1, 2, 3]) {
+      const block = first.filter((task) => task.sample === sample)
+      assert.deepEqual(
+        new Set(block.map((task) => task.evalCase.id)),
+        new Set(cases.map((item) => item.id)),
+      )
+    }
+  })
+
+  it("flags external evidence while allowing the exact source setup", () => {
+    const sourcePreparation = `git fetch origin ${"a".repeat(40)}
+git for-each-ref --format='delete %(refname)' | git update-ref --stdin`
+    const trace = [
+      toolMessage("shell_command", {
+        command: `git fetch origin ${"a".repeat(40)}\ngit for-each-ref --format='delete %(refname)' | git update-ref --stdin`,
+      }),
+      toolMessage("web_search", { objective: "Find later fixes" }),
+      toolMessage("shell_command", { command: "gh pr view 42 --comments" }),
+    ]
+
+    assert.deepEqual(auditEvidenceBoundary(trace, sourcePreparation), [
+      "used external-source tool web_search",
+      "ran an external network command",
+    ])
+    assert.deepEqual(
+      auditEvidenceBoundary(
+        [
+          toolMessage("shell_command", {
+            command: `git -c protocol.version=2 fetch origin ${"b".repeat(40)}`,
+          }),
+        ],
+        sourcePreparation,
+      ),
+      ["ran an unapproved Git network command"],
+    )
+  })
 })
 
 describe("eval scoring", () => {
@@ -429,7 +585,7 @@ describe("eval scoring", () => {
     assert.equal(score.groundedConclusionAgreement, 1 / 3)
     assert.equal(controlScore.cleanAlertRate, 1 / 2)
     assert.equal(blockingScore.issueDetectionRate, 2 / 3)
-    assert.equal(blockingScore.findingPrecision, 2 / 3)
+    assert.equal(blockingScore.frozenLabelMatchFraction, 2 / 3)
     assert.equal(blockingScore.severityAgreement, 1 / 2)
     assert.equal(blockingScore.severityThresholdAgreement, 1 / 2)
     assert.equal(blockingScore.judgeCoverage, 1)
@@ -437,8 +593,8 @@ describe("eval scoring", () => {
 
     const report = formatReport(run, score)
     assert.match(report, /Review evaluation: INCOMPLETE/)
-    assert.match(report, /Clean change: 1 of 2 completed reviews had no false alarms/)
-    assert.match(report, /Serious issue: found in 2 of 3; right response in 1 of 3/)
+    assert.match(report, /no frozen issues: 1 of 2 completed reviews raised no clean alert/)
+    assert.match(report, /blocking labels: found in 2 of 3; frozen-label response matched in 1 of 3/)
     assert.match(report, /This result covers only these examples/)
 
     const completeRun = makeRun(cases, 3, [
@@ -451,7 +607,10 @@ describe("eval scoring", () => {
     ])
     const completeReport = formatReport(completeRun, scoreRun(completeRun))
     assert.match(completeReport, /Review evaluation: NEEDS WORK/)
-    assert.match(completeReport, /Serious issue: found in 3 of 3; right response in 0 of 3/)
+    assert.match(
+      completeReport,
+      /blocking labels: found in 3 of 3; frozen-label response matched in 0 of 3/,
+    )
   })
 
   it("does not let one finding count as two known issues", () => {
@@ -470,7 +629,7 @@ describe("eval scoring", () => {
     ])
     const score = scoreRun(run).cases[0]!
     assert.equal(score.issueDetectionRate, 1 / 2)
-    assert.equal(score.findingPrecision, 1)
+    assert.equal(score.frozenLabelMatchFraction, 1)
     assert.equal(score.groundedConclusionAgreement, 0)
   })
 
@@ -509,13 +668,81 @@ describe("eval scoring", () => {
     ])
 
     const score = scoreRun(run)
-    assert.equal(score.cases[0]!.findingPrecision, 1 / 2)
-    assert.match(formatReport(run, score), /1 other finding needs checking/)
+    assert.equal(score.cases[0]!.frozenLabelMatchFraction, 1 / 2)
+    assert.match(formatReport(run, score), /1 unmatched finding needs source checking/)
   })
 
   it("does not report failed clean reviews as clean", () => {
     const cases = [evalCase("control", control)]
     assert.equal(scoreRun(makeRun(cases, 1, [failed("control", 1, control)])).cleanAlertRate, null)
+  })
+
+  it("scores a synthetic seed only when both paired versions match", () => {
+    const baseline = {
+      ...evalCase("paired-baseline", control),
+      seedId: "paired",
+      origin: "synthetic" as const,
+      versionRole: "baseline" as const,
+      headSha: "b".repeat(40),
+    }
+    const introduced = {
+      ...evalCase("paired-introduced", blocking),
+      seedId: "paired",
+      origin: "synthetic" as const,
+      versionRole: "introduced-issue" as const,
+      headSha: "c".repeat(40),
+    }
+    const run = makeRun([baseline, introduced], 3, [
+      completed(baseline.id, 1, control, "success", [], []),
+      completed(introduced.id, 1, blocking, "failure", [highFinding], [judgement([0], false)]),
+      completed(baseline.id, 2, control, "success", [], []),
+      completed(introduced.id, 2, blocking, "failure", [highFinding], [judgement([0], false)]),
+      completed(baseline.id, 3, control, "neutral", [lowFinding], []),
+      completed(introduced.id, 3, blocking, "failure", [highFinding], [judgement([0], false)]),
+    ])
+
+    assert.deepEqual(scoreRun(run).seeds[0], {
+      seedId: "paired",
+      pullNumber: 42,
+      origin: "synthetic",
+      samples: 3,
+      passedSamples: 2,
+      outcome: "unstable",
+    })
+  })
+
+  it("requires complete prompts and traces in new run artifacts", () => {
+    const cases = [evalCase("control", control)]
+    const oldRun = makeRun(cases, 1, [completed("control", 1, control, "success", [], [])])
+    const prompt = "complete review prompt"
+    const sample = {
+      ...oldRun.samples[0]!,
+      prompt,
+      promptHash: createHash("sha256").update(prompt).digest("hex"),
+      trace: [{ type: "result", result: "review result" }],
+      reviewDurationMs: 10,
+      matchingDurationMs: 0,
+      durationMs: 10,
+      evidenceBoundaryViolations: [],
+    }
+    const run = {
+      ...oldRun,
+      schemaVersion: 3,
+      judgeTimeoutMs: 60_000,
+      reviewsCompletedAt: oldRun.completedAt,
+      orderSeed: "fixed-seed",
+      executionOrder: [{ caseId: "control", sample: 1 }],
+      samples: [sample],
+    }
+    assert.doesNotThrow(() => evalRunSchema.parse(run))
+    run.samples[0]!.promptHash = "0".repeat(64)
+    assert.throws(() => evalRunSchema.parse(run), /prompt hash does not match/)
+    run.samples[0]!.promptHash = createHash("sha256").update(prompt).digest("hex")
+    run.samples[0]!.durationMs = 11
+    assert.throws(() => evalRunSchema.parse(run), /sample duration must equal/)
+    run.samples[0]!.durationMs = 10
+    delete (run.samples[0] as { prompt?: string }).prompt
+    assert.throws(() => evalRunSchema.parse(run), /full prompt, trace, phase timings/)
   })
 
   it("keeps older two-key run evidence readable", () => {
@@ -1026,6 +1253,15 @@ function judgeResult() {
     type: "result",
     is_error: false,
     result: '{"matchingFindingIndices":[0]}',
+  }
+}
+
+function toolMessage(name: string, input: Record<string, unknown>) {
+  return {
+    type: "assistant",
+    message: {
+      content: [{ type: "tool_use", name, input }],
+    },
   }
 }
 

@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process"
-import { createHash } from "node:crypto"
-import { mkdir, open, readFile, unlink } from "node:fs/promises"
+import { createHash, randomBytes } from "node:crypto"
+import { mkdir, open, readFile, rename, unlink } from "node:fs/promises"
 import { dirname, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
@@ -40,6 +40,8 @@ type RunOptions = {
   samplesPerCase: number
   concurrency: number
   timeoutMs: number
+  judgeTimeoutMs: number
+  orderSeed: string
   split: NonNullable<EvalCase["split"]>
 }
 
@@ -66,15 +68,20 @@ async function main(): Promise<void> {
     await mkdir(dirname(options.outputPath), { recursive: true })
     const output = await createRunArtifact(options.outputPath)
     let complete = false
+    let checkpointed = false
     try {
-      const { run, score } = await runEvaluation(options)
-      await output.writeFile(`${JSON.stringify(run, null, 2)}\n`)
+      const { run, score } = await runEvaluation(options, async (reviewedRun) => {
+        await writeRunArtifact(output, reviewedRun)
+        checkpointed = true
+        console.log(`Review checkpoint: ${options.outputPath}`)
+      })
+      await replaceRunArtifact(options.outputPath, run)
       complete = true
       console.log(`\n${formatReport(run, score)}`)
       console.log(`\nFull results: ${options.outputPath}`)
     } finally {
       await output.close()
-      if (!complete) await unlink(options.outputPath).catch(() => {})
+      if (!complete && !checkpointed) await unlink(options.outputPath).catch(() => {})
     }
     return
   }
@@ -121,7 +128,10 @@ async function main(): Promise<void> {
   if (command && command !== "help" && command !== "--help") process.exitCode = 1
 }
 
-async function runEvaluation(options: RunOptions): Promise<{ run: EvalRun; score: EvalScore }> {
+async function runEvaluation(
+  options: RunOptions,
+  onReviewsCompleted: (run: EvalRun) => Promise<void>,
+): Promise<{ run: EvalRun; score: EvalScore }> {
   console.log(
     options.reviewerApiKey
       ? "Checking the review account key..."
@@ -139,12 +149,12 @@ async function runEvaluation(options: RunOptions): Promise<{ run: EvalRun; score
   const sourcePreparation = loaded.sourcePreparation
   const startedAt = new Date().toISOString()
   const reviewer = await reviewerProvenance(options.project, account)
-  const tasks = corpus.cases.flatMap((evalCase) =>
-    Array.from({ length: options.samplesPerCase }, (_, index) => ({
+  const tasks = orderedReviewTasks(corpus.cases, options.samplesPerCase, options.orderSeed).map(
+    ({ evalCase, sample }) => ({
       evalCase,
       sourcePreparation: sourcePreparation.get(evalCase.id),
-      sample: index + 1,
-    })),
+      sample,
+    }),
   )
   const exampleNumbers = new Map<string, number>()
   for (const evalCase of corpus.cases) {
@@ -155,34 +165,79 @@ async function runEvaluation(options: RunOptions): Promise<{ run: EvalRun; score
   let finished = 0
   console.log(`Running ${tasks.length} reviews, up to ${options.concurrency} at a time...`)
 
-  const samples = await mapConcurrent(
-    tasks,
-    options.concurrency,
-    async ({ evalCase, sourcePreparation: preparation, sample }) => {
-      const result = await runSample(evalCase, preparation, sample, options, reviewer.sdkVersion)
-      finished += 1
-      const outcome = result.status === "completed" ? "completed" : "did not complete"
-      console.log(
-        `[${finished}/${tasks.length}] Example ${exampleNumbers.get(evalCase.seedId)}, ${kindLabel(evalCase)}, run ${sample} of ${options.samplesPerCase}: ${outcome} (${formatDuration(result.durationMs)})`,
-      )
-      return result
-    },
-  )
+  const samples: EvalSample[] = []
+  for (let sampleNumber = 1; sampleNumber <= options.samplesPerCase; sampleNumber += 1) {
+    const block = tasks.filter((task) => task.sample === sampleNumber)
+    samples.push(
+      ...(await mapConcurrent(
+        block,
+        options.concurrency,
+        async ({ evalCase, sourcePreparation: preparation, sample }) => {
+          const result = await runReviewSample(evalCase, preparation, sample, options)
+          finished += 1
+          const outcome = result.status === "completed" ? "completed" : "did not complete"
+          console.log(
+            `[${finished}/${tasks.length}] Example ${exampleNumbers.get(evalCase.seedId)}, ${kindLabel(evalCase)}, run ${sample} of ${options.samplesPerCase}: ${outcome} (${formatDuration(result.durationMs)})`,
+          )
+          return result
+        },
+      )),
+    )
+  }
 
-  const run = evalRunSchema.parse({
-    schemaVersion: 2,
+  const reviewsCompletedAt = new Date().toISOString()
+  const reviewedRun = evalRunSchema.parse({
+    schemaVersion: 3,
     corpusVersion: corpus.version,
     corpusHash: corpusContentHash(corpus),
     startedAt,
-    completedAt: new Date().toISOString(),
+    reviewsCompletedAt,
+    completedAt: reviewsCompletedAt,
     requestedSamplesPerCase: options.samplesPerCase,
     concurrency: options.concurrency,
     timeoutMs: options.timeoutMs,
+    judgeTimeoutMs: options.judgeTimeoutMs,
+    orderSeed: options.orderSeed,
+    executionOrder: tasks.map(({ evalCase, sample }) => ({ caseId: evalCase.id, sample })),
     reviewer,
     cases: corpus.cases,
     samples,
   })
+  await onReviewsCompleted(reviewedRun)
+  console.log("Checking retained findings against the frozen labels...")
+  const { run: judgedRun } = await finishJudgements(
+    reviewedRun,
+    {
+      judgeCache: options.judgeCache,
+      concurrency: options.concurrency,
+      timeoutMs: options.judgeTimeoutMs,
+    },
+    reviewer.sdkVersion,
+    judgeIssue,
+    (matched, total, succeeded) => {
+      console.log(
+        `[${matched}/${total}] Finding comparison ${succeeded ? "completed" : "did not complete"}`,
+      )
+    },
+  )
+  const run = evalRunSchema.parse({ ...judgedRun, completedAt: new Date().toISOString() })
   return { run, score: scoreRun(run) }
+}
+
+export function orderedReviewTasks(
+  cases: EvalCase[],
+  samplesPerCase: number,
+  orderSeed: string,
+): Array<{ evalCase: EvalCase; sample: number }> {
+  return Array.from({ length: samplesPerCase }, (_, index) => index + 1).flatMap((sample) =>
+    [...cases]
+      .sort((left, right) => {
+        const leftKey = hash(`${orderSeed}\0${sample}\0${left.id}`)
+        const rightKey = hash(`${orderSeed}\0${sample}\0${right.id}`)
+        return leftKey.localeCompare(rightKey)
+      })
+      .map((evalCase) => ({ evalCase, sample })),
+  )
 }
 
 export function selectCases(
@@ -211,6 +266,7 @@ export async function finishJudgements(
   })
   let finished = 0
   const results = await mapConcurrent(tasks, options.concurrency, async (task) => {
+    const startedAt = Date.now()
     const sample = samples[task.sampleIndex]!
     if (sample.status !== "completed") throw new Error("Expected a completed review sample")
     const findings: ReviewFinding[] = sample.retainedResult.findings.map(
@@ -230,11 +286,11 @@ export async function finishJudgements(
       )
       finished += 1
       onProgress?.(finished, tasks.length, true)
-      return { ...task, judgement }
+      return { ...task, judgement, durationMs: Date.now() - startedAt }
     } catch (error) {
       finished += 1
       onProgress?.(finished, tasks.length, false)
-      return { ...task, error: errorMessage(error) }
+      return { ...task, error: errorMessage(error), durationMs: Date.now() - startedAt }
     }
   })
 
@@ -244,6 +300,8 @@ export async function finishJudgements(
     sample.judgementErrors = sample.judgementErrors.filter(
       (error) => error.issueId !== result.issue.id,
     )
+    sample.matchingDurationMs = (sample.matchingDurationMs ?? 0) + result.durationMs
+    sample.durationMs += result.durationMs
     if ("judgement" in result) sample.judgements.push(result.judgement)
     else sample.judgementErrors.push({ issueId: result.issue.id, error: result.error })
   }
@@ -268,12 +326,11 @@ export function recordFinishedRun(
   })
 }
 
-async function runSample(
+async function runReviewSample(
   evalCase: EvalCase,
   sourcePreparation: string | undefined,
   sample: number,
   options: RunOptions,
-  sdkVersion: string,
 ): Promise<EvalSample> {
   const startedAt = Date.now()
   const controller = new AbortController()
@@ -283,6 +340,7 @@ async function runSample(
   )
   let threadId: string | null = null
   let models: string[] = []
+  let trace: unknown[] = []
   const job = evalJob(evalCase, sample, options.project)
   const prompt = buildReviewPrompt(job, sourcePreparation)
   const promptHash = hash(prompt)
@@ -297,58 +355,68 @@ async function runSample(
       ...(options.reviewerApiKey ? { apiKey: options.reviewerApiKey } : {}),
     })
     threadId = review.threadId
-    models = review.models
-    const parsedResult = parseReviewResult(review.rawResult)
-    const finalized = finalizeReview(parsedResult, changedLineMap(evalCase), failOn)
-    const judgements = []
-    const judgementErrors = []
-
-    if (finalized.result.findings.length > 0) {
-      for (const issue of evalCase.expected.issues) {
-        try {
-          judgements.push(
-            await judgeIssue(
-              evalCase.id,
-              issue,
-              finalized.result.findings,
-              options.judgeCache,
-              sdkVersion,
-              controller.signal,
-            ),
-          )
-        } catch (error) {
-          controller.signal.throwIfAborted()
-          judgementErrors.push({ issueId: issue.id, error: errorMessage(error) })
-        }
+    trace = review.trace
+    models = [...new Set([...review.models, ...modelsFromTrace(trace)])]
+    const reviewDurationMs = Date.now() - startedAt
+    const evidenceBoundaryViolations = auditEvidenceBoundary(trace, sourcePreparation)
+    if (review.status === "error") {
+      return {
+        caseId: evalCase.id,
+        sample,
+        expected: evalCase.expected,
+        promptHash,
+        prompt,
+        threadId,
+        models,
+        durationMs: reviewDurationMs,
+        reviewDurationMs,
+        matchingDurationMs: 0,
+        trace,
+        evidenceBoundaryViolations,
+        status: "error",
+        error: review.error,
       }
     }
+    const parsedResult = parseReviewResult(review.rawResult)
+    const finalized = finalizeReview(parsedResult, changedLineMap(evalCase), failOn)
 
     return {
       caseId: evalCase.id,
       sample,
       expected: evalCase.expected,
       promptHash,
+      prompt,
       threadId,
       models,
-      durationMs: Date.now() - startedAt,
+      durationMs: reviewDurationMs,
+      reviewDurationMs,
+      matchingDurationMs: 0,
+      trace,
+      evidenceBoundaryViolations,
       status: "completed",
       rawResult: review.rawResult,
       parsedResult,
       retainedResult: finalized.result,
       omitted: finalized.omitted,
       conclusion: finalized.conclusion,
-      judgements,
-      judgementErrors,
+      judgements: [],
+      judgementErrors: [],
     }
   } catch (error) {
+    const reviewDurationMs = Date.now() - startedAt
     return {
       caseId: evalCase.id,
       sample,
       expected: evalCase.expected,
       promptHash,
+      prompt,
       threadId,
       models,
-      durationMs: Date.now() - startedAt,
+      durationMs: reviewDurationMs,
+      reviewDurationMs,
+      matchingDurationMs: 0,
+      trace,
+      evidenceBoundaryViolations: auditEvidenceBoundary(trace, sourcePreparation),
       status: "error",
       error: errorMessage(error),
     }
@@ -461,6 +529,11 @@ function runOptions(args: string[]): RunOptions {
     "--timeout-minutes",
     120,
   )
+  const judgeTimeoutMinutes = positiveInteger(
+    flag(args, "--judge-timeout-minutes") ?? "30",
+    "--judge-timeout-minutes",
+    120,
+  )
   const stamp = new Date().toISOString().replaceAll(/[:.]/g, "-")
   const cacheRoot = flag(args, "--cache") ?? resolve(".eval-cache")
   const split = flag(args, "--split") ?? "development"
@@ -477,6 +550,8 @@ function runOptions(args: string[]): RunOptions {
     samplesPerCase,
     concurrency,
     timeoutMs: timeoutMinutes * 60_000,
+    judgeTimeoutMs: judgeTimeoutMinutes * 60_000,
+    orderSeed: flag(args, "--order-seed") ?? randomBytes(16).toString("hex"),
     split,
   }
 }
@@ -530,6 +605,89 @@ function hash(value: string): string {
   return createHash("sha256").update(value).digest("hex")
 }
 
+function modelsFromTrace(trace: unknown[]): string[] {
+  const models = new Set<string>()
+  for (const message of trace) {
+    if (!message || typeof message !== "object" || !("message" in message)) continue
+    const body = message.message
+    if (body && typeof body === "object" && "model" in body && typeof body.model === "string") {
+      models.add(body.model)
+    }
+  }
+  return [...models]
+}
+
+export function auditEvidenceBoundary(
+  trace: unknown[],
+  sourcePreparation: string | undefined,
+): string[] {
+  const violations = new Set<string>()
+  for (const message of trace) {
+    if (!message || typeof message !== "object" || !("message" in message)) continue
+    const body = message.message
+    if (!body || typeof body !== "object" || !("content" in body) || !Array.isArray(body.content)) {
+      continue
+    }
+    for (const content of body.content) {
+      if (
+        !content ||
+        typeof content !== "object" ||
+        !("type" in content) ||
+        content.type !== "tool_use" ||
+        !("name" in content) ||
+        typeof content.name !== "string"
+      ) {
+        continue
+      }
+      const tool = content.name.toLowerCase()
+      if (/web|librarian|thread|github/.test(tool)) {
+        violations.add(`used external-source tool ${content.name}`)
+      }
+      if (!("input" in content) || !content.input || typeof content.input !== "object") continue
+      const input = content.input as Record<string, unknown>
+      const serializedInput = JSON.stringify(input)
+      if (/AGENTS\.md|SKILL\.md|\.agents\//i.test(serializedInput)) {
+        violations.add("loaded repository or project instructions outside the embedded methodology")
+      }
+      const command =
+        typeof input.command === "string"
+          ? input.command
+          : typeof input.cmd === "string"
+            ? input.cmd
+            : undefined
+      if (!command) continue
+      if (/\b(?:curl|wget|gh)\b|https?:\/\//i.test(command)) {
+        violations.add("ran an external network command")
+      }
+      const unapprovedGitNetwork = command
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => /\bgit\b[^\n;&|]*?\b(?:clone|fetch|pull|ls-remote)\b/.test(line))
+        .some((line) => !isApprovedSourceCommand(line, sourcePreparation))
+      if (unapprovedGitNetwork) violations.add("ran an unapproved Git network command")
+      const unapprovedHistoryInspection = command
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => /\bgit\s+(?:log\s+.*(?:--all|\bmain\b|\borigin\/)|branch\s+-a|for-each-ref)\b/.test(line))
+        .some((line) => !isApprovedSourceCommand(line, sourcePreparation))
+      if (unapprovedHistoryInspection) {
+        violations.add("inspected source outside the exact review history")
+      }
+    }
+  }
+  return [...violations]
+}
+
+function isApprovedSourceCommand(command: string, sourcePreparation: string | undefined): boolean {
+  return (
+    sourcePreparation
+      ?.split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.startsWith("git "))
+      .some((approved) => command === approved) ?? false
+  )
+}
+
 function artifactHash(value: Buffer): string {
   return `sha256:${createHash("sha256").update(value).digest("hex")}`
 }
@@ -549,6 +707,41 @@ async function createRunArtifact(path: string) {
   }
 }
 
+async function writeRunArtifact(
+  output: Awaited<ReturnType<typeof open>>,
+  run: EvalRun,
+): Promise<void> {
+  const contents = Buffer.from(`${JSON.stringify(run, null, 2)}\n`)
+  await output.truncate(0)
+  let offset = 0
+  while (offset < contents.length) {
+    const { bytesWritten } = await output.write(
+      contents,
+      offset,
+      contents.length - offset,
+      offset,
+    )
+    if (bytesWritten === 0) throw new Error("Could not write the run artifact")
+    offset += bytesWritten
+  }
+  await output.truncate(contents.length)
+  await output.sync()
+}
+
+async function replaceRunArtifact(path: string, run: EvalRun): Promise<void> {
+  const temporaryPath = `${path}.${process.pid}-${randomBytes(6).toString("hex")}.tmp`
+  const temporary = await open(temporaryPath, "wx", 0o600)
+  try {
+    await writeRunArtifact(temporary, run)
+    await temporary.close()
+    await rename(temporaryPath, path)
+  } catch (error) {
+    await temporary.close().catch(() => {})
+    await unlink(temporaryPath).catch(() => {})
+    throw error
+  }
+}
+
 async function installedSdkVersion(): Promise<string> {
   const packageJson: unknown = JSON.parse(
     await readFile(resolve("node_modules", "@ampcode", "sdk", "package.json"), "utf8"),
@@ -558,8 +751,8 @@ async function installedSdkVersion(): Promise<string> {
 
 function kindLabel(evalCase: EvalCase): string {
   const kind = expectedKind(evalCase.expected)
-  if (kind === "control") return "clean change"
-  return kind === "advisory" ? "smaller issue" : "serious issue"
+  if (kind === "control") return "no frozen issues"
+  return kind === "advisory" ? "advisory labels" : "blocking labels"
 }
 
 function formatDuration(milliseconds: number): string {
@@ -571,7 +764,7 @@ function formatDuration(milliseconds: number): string {
 function printHelp(): void {
   console.log(`Usage:
   npm run eval -- check PACK
-  npm run eval -- run PACK --project PROJECT [--split development|holdout] [--samples 3] [--concurrency 2]
+  npm run eval -- run PACK --project PROJECT [--split development|holdout] [--samples 3] [--concurrency 2] [--timeout-minutes 30] [--judge-timeout-minutes 30] [--order-seed SEED]
   npm run eval -- finish RUN.json [--concurrency 2]
   npm run eval -- report RUN.json
 

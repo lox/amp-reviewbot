@@ -11,7 +11,7 @@ import {
   stat,
 } from "node:fs/promises"
 import { basename, dirname, join, resolve, sep } from "node:path"
-import { promisify } from "node:util"
+import { isDeepStrictEqual, promisify } from "node:util"
 import { z } from "zod"
 import { parseChangedLines } from "../src/github.js"
 import {
@@ -146,18 +146,38 @@ export const exampleSchema = z
       }
     }
     if (example.origin === "synthetic") {
-      const cleanVersions = example.versions.filter((version) => version.knownIssues.length === 0)
-      const changedVersions = example.versions.filter((version) => version.knownIssues.length === 1)
-      if (
-        example.versions.length !== 2 ||
-        cleanVersions.length !== 1 ||
-        changedVersions.length !== 1
-      ) {
+      if (example.versions.length !== 2) {
         context.addIssue({
           code: "custom",
           path: ["versions"],
-          message: "a synthetic example must have one clean version and one single-issue version",
+          message: "a synthetic example must have one baseline and one introduced-issue version",
         })
+      } else {
+        const [first, second] = example.versions
+        const [baseline, introduced] =
+          first!.knownIssues.length < second!.knownIssues.length
+            ? [first!, second!]
+            : [second!, first!]
+        const baselineIssues = new Map(baseline.knownIssues.map((issue) => [issue.id, issue]))
+        const addedIssues = introduced.knownIssues.filter((issue) => !baselineIssues.has(issue.id))
+        const inheritedIssuesMatch = baseline.knownIssues.every((issue) =>
+          isDeepStrictEqual(
+            issue,
+            introduced.knownIssues.find((candidate) => candidate.id === issue.id),
+          ),
+        )
+        if (
+          introduced.knownIssues.length !== baseline.knownIssues.length + 1 ||
+          addedIssues.length !== 1 ||
+          !inheritedIssuesMatch
+        ) {
+          context.addIssue({
+            code: "custom",
+            path: ["versions"],
+            message:
+              "a synthetic introduced-issue version must repeat every baseline issue unchanged and add exactly one issue",
+          })
+        }
       }
     }
     const names = new Set<string>()
@@ -377,25 +397,41 @@ async function resolveExample(
     ])
   }
 
+  let syntheticBaselineCommit: string | undefined
+  let syntheticIntroducedCommit: string | undefined
   if (example.origin === "synthetic") {
-    const cleanVersion = example.versions.find((version) => version.knownIssues.length === 0)!
-    const issueVersion = example.versions.find((version) => version.knownIssues.length === 1)!
-    const { stdout } = await git(repository, ["rev-list", "--parents", "-n", "1", issueVersion.commit])
+    const [first, second] = example.versions
+    const [baselineVersion, introducedVersion] =
+      first!.knownIssues.length < second!.knownIssues.length
+        ? [first!, second!]
+        : [second!, first!]
+    const { stdout } = await git(repository, [
+      "rev-list",
+      "--parents",
+      "-n",
+      "1",
+      introducedVersion.commit,
+    ])
     const parents = stdout.trim().split(/\s+/).slice(1)
-    if (parents.length !== 1 || parents[0] !== cleanVersion.commit) {
+    if (parents.length !== 1 || parents[0] !== baselineVersion.commit) {
       throw new Error(
-        `Synthetic version ${example.id}/${issueVersion.name} must be one direct commit on top of ${cleanVersion.name}`,
+        `Synthetic version ${example.id}/${introducedVersion.name} must be one direct commit on top of ${baselineVersion.name}`,
       )
     }
+    syntheticBaselineCommit = baselineVersion.commit
+    syntheticIntroducedCommit = introducedVersion.commit
     const mutationLines = await deriveChangedLines(
       repository,
-      cleanVersion.commit,
-      issueVersion.commit,
+      baselineVersion.commit,
+      introducedVersion.commit,
     )
-    const issue = issueVersion.knownIssues[0]!
-    if (!mutationLines[issue.path]?.includes(issue.line)) {
+    const baselineIssueIds = new Set(baselineVersion.knownIssues.map((issue) => issue.id))
+    const introducedIssue = introducedVersion.knownIssues.find(
+      (issue) => !baselineIssueIds.has(issue.id),
+    )!
+    if (!mutationLines[introducedIssue.path]?.includes(introducedIssue.line)) {
       throw new Error(
-        `Known issue ${issue.id} must point to a line changed by the synthetic commit`,
+        `Known issue ${introducedIssue.id} must point to a line changed by the synthetic commit`,
       )
     }
   }
@@ -427,6 +463,11 @@ async function resolveExample(
       headSha: version.commit,
       ...(example.origin ? { origin: example.origin } : {}),
       ...(example.split ? { split: example.split } : {}),
+      ...(version.commit === syntheticBaselineCommit
+        ? { versionRole: "baseline" as const }
+        : version.commit === syntheticIntroducedCommit
+          ? { versionRole: "introduced-issue" as const }
+          : {}),
       context: example.source.context,
       changedLines,
       expected: {
@@ -437,12 +478,10 @@ async function resolveExample(
       },
     })
 
-    if (!publicCommits.has(version.commit)) {
-      sourcePreparation.set(
-        caseId,
-        await createSourcePreparation(repository, version.commit, [...publicCommits]),
-      )
-    }
+    sourcePreparation.set(
+      caseId,
+      await createSourcePreparation(repository, version.commit, example.source.baseCommit),
+    )
   }
   return { cases, sourcePreparation }
 }
@@ -591,11 +630,11 @@ async function deriveChangedLines(
 async function createSourcePreparation(
   repository: string,
   headCommit: string,
-  publicCommits: string[],
+  baseCommit: string,
 ): Promise<string> {
-  const temporaryDirectory = await mkdtemp(join(repository, ".git", "reviewbot-eval-"))
+  const temporaryDirectory = await mkdtemp(join(repository, ".git", "source-transfer-"))
   const bundlePath = join(temporaryDirectory, "commit.bundle")
-  const ref = `refs/heads/reviewbot-eval-${headCommit}`
+  const ref = `refs/heads/source-target-${headCommit}`
   try {
     await git(repository, ["update-ref", ref, headCommit])
     await git(repository, [
@@ -603,7 +642,7 @@ async function createSourcePreparation(
       "create",
       bundlePath,
       ref,
-      ...publicCommits.map((commit) => `^${commit}`),
+      `^${baseCommit}`,
     ])
     const bundle = await readFile(bundlePath)
     if (bundle.byteLength > 64 * 1024) {
@@ -616,19 +655,25 @@ async function createSourcePreparation(
       .split(/\s+/)[1]
     if (!advertised) throw new Error(`Generated source bundle for ${headCommit} has no head`)
     const bundleBase64 = bundle.toString("base64")
-    const temporaryBundle = `/tmp/reviewbot-eval-${headCommit}.bundle`
-    const publicFetches = publicCommits.map((commit) => `git fetch origin ${commit}`).join("\n")
+    const temporaryBundle = `/tmp/source-${headCommit}.bundle`
 
-    return `This exact eval revision includes source history that is not on the public remote. Prepare it before the normal checkout. These bytes contain source history only; they contain no expected answers or focused tests.
+    return `Prepare the exact source snapshot before review. The transfer contains Git source objects only.
 
 Run these commands from the repository:
 
-${publicFetches}
+git fetch origin ${baseCommit}
 printf '%s' '${bundleBase64}' | base64 --decode > '${temporaryBundle}'
 git bundle verify '${temporaryBundle}'
-git fetch '${temporaryBundle}' '${advertised}:refs/reviewbot-eval/target'
-test "$(git rev-parse refs/reviewbot-eval/target)" = '${headCommit}'
-rm -f '${temporaryBundle}'`
+git fetch '${temporaryBundle}' '${advertised}:refs/source/target'
+test "$(git rev-parse refs/source/target)" = '${headCommit}'
+git checkout --detach '${headCommit}'
+rm -f '${temporaryBundle}'
+git remote remove origin
+git for-each-ref --format='delete %(refname)' | git update-ref --stdin
+git update-ref refs/source/base '${baseCommit}'
+git update-ref refs/source/target '${headCommit}'
+
+Use only this checked-out source snapshot and the pull-request context in the prompt. Do not inspect remote pull-request pages, reviews, comments, checks, issues, external documentation, or commits that are not ancestors of the exact head.`
   } finally {
     await rm(temporaryDirectory, { recursive: true, force: true })
   }

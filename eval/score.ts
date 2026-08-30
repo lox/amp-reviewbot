@@ -11,7 +11,7 @@ export type CaseScore = {
   groundedConclusionAgreement: number
   cleanAlertRate: number | null
   issueDetectionRate: number | null
-  findingPrecision: number | null
+  frozenLabelMatchFraction: number | null
   severityAgreement: number | null
   severityThresholdAgreement: number | null
   judgeCoverage: number | null
@@ -19,14 +19,24 @@ export type CaseScore = {
   conclusions: Record<"success" | "neutral" | "failure" | "error", number>
 }
 
+export type SeedScore = {
+  seedId: string
+  pullNumber: number
+  origin: EvalRun["cases"][number]["origin"]
+  samples: number
+  passedSamples: number
+  outcome: "pass" | "unstable" | "fail"
+}
+
 export type EvalScore = {
   cases: CaseScore[]
+  seeds: SeedScore[]
   operationalCompletion: number
   conclusionAgreement: number
   groundedConclusionAgreement: number
   cleanAlertRate: number | null
   issueDetectionRate: number | null
-  findingPrecision: number | null
+  frozenLabelMatchFraction: number | null
   severityAgreement: number | null
   severityThresholdAgreement: number | null
   judgeCoverage: number | null
@@ -46,15 +56,41 @@ export function scoreRun(run: EvalRun): EvalScore {
   const cases = [...byCase.entries()]
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([caseId, samples]) => scoreCase(caseId, samples))
+  const casesBySeed = new Map<string, EvalRun["cases"]>()
+  for (const evalCase of run.cases) {
+    const seedCases = casesBySeed.get(evalCase.seedId) ?? []
+    seedCases.push(evalCase)
+    casesBySeed.set(evalCase.seedId, seedCases)
+  }
+  const seeds = [...casesBySeed.entries()].map(([seedId, seedCases]) => {
+    const passedSamples = Array.from(
+      { length: run.requestedSamplesPerCase },
+      (_, index) => index + 1,
+    ).filter((sampleNumber) =>
+      seedCases.every((evalCase) => {
+        const sample = byCase.get(evalCase.id)?.find((candidate) => candidate.sample === sampleNumber)
+        return sample !== undefined && isGroundedConclusion(sample)
+      }),
+    ).length
+    return {
+      seedId,
+      pullNumber: seedCases[0]!.pullNumber,
+      origin: seedCases[0]!.origin,
+      samples: run.requestedSamplesPerCase,
+      passedSamples,
+      outcome: seedOutcome(passedSamples, run.requestedSamplesPerCase),
+    }
+  })
 
   return {
     cases,
+    seeds,
     operationalCompletion: mean(cases.map((item) => item.operationalCompletion))!,
     conclusionAgreement: mean(cases.map((item) => item.conclusionAgreement))!,
     groundedConclusionAgreement: mean(cases.map((item) => item.groundedConclusionAgreement))!,
     cleanAlertRate: mean(cases.map((item) => item.cleanAlertRate)),
     issueDetectionRate: mean(cases.map((item) => item.issueDetectionRate)),
-    findingPrecision: mean(cases.map((item) => item.findingPrecision)),
+    frozenLabelMatchFraction: mean(cases.map((item) => item.frozenLabelMatchFraction)),
     severityAgreement: mean(cases.map((item) => item.severityAgreement)),
     severityThresholdAgreement: mean(cases.map((item) => item.severityThresholdAgreement)),
     judgeCoverage: mean(cases.map((item) => item.judgeCoverage)),
@@ -114,7 +150,7 @@ function scoreCase(caseId: string, samples: EvalSample[]): CaseScore {
         : null,
     issueDetectionRate:
       kind === "control" ? null : detected / (expected.issues.length * samples.length),
-    findingPrecision:
+    frozenLabelMatchFraction:
       kind === "control" || reportedFindings === 0 ? null : detected / reportedFindings,
     severityAgreement:
       kind === "control" || detected === 0 ? null : severityMatches / detected,
@@ -130,6 +166,19 @@ function scoreCase(caseId: string, samples: EvalSample[]): CaseScore {
         : judgements.filter((judgement) => judgement.disagreement).length / judgements.length,
     conclusions,
   }
+}
+
+function seedOutcome(passedSamples: number, samples: number): SeedScore["outcome"] {
+  if (samples === 3) {
+    if (passedSamples === 3) return "pass"
+    return passedSamples === 2 ? "unstable" : "fail"
+  }
+  if (samples === 5) {
+    if (passedSamples >= 4) return "pass"
+    return passedSamples === 3 ? "unstable" : "fail"
+  }
+  if (passedSamples === samples) return "pass"
+  return passedSamples > samples / 2 ? "unstable" : "fail"
 }
 
 function isGroundedConclusion(sample: EvalSample): boolean {

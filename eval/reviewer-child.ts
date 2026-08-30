@@ -2,6 +2,7 @@ import { execFile } from "node:child_process"
 import { resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
+import type { StreamMessage } from "@ampcode/sdk"
 import pino from "pino"
 import { z } from "zod"
 import { executeReviewWithRetries } from "../src/worker.js"
@@ -25,27 +26,37 @@ async function main(): Promise<void> {
     input.timeoutMs,
   )
   const models = new Set<string>()
+  const trace: StreamMessage[] = []
   let threadId: string | null = null
 
   try {
-    const rawResult = await executeReviewWithRetries({
-      prompt: input.prompt,
-      title: input.title,
-      project: input.project,
-      visibility: "private",
-      signal: controller.signal,
-      logger: pino({ level: "silent" }),
-      onThread: async (id) => {
-        threadId = id
-      },
-      beforeRetry: async () => {},
-      onMessage: (message) => {
-        if (message.type === "assistant" && typeof message.message.model === "string") {
-          models.add(message.message.model)
-        }
-      },
-    })
-    process.stdout.write(`${JSON.stringify({ rawResult, threadId, models: [...models] })}\n`)
+    try {
+      const rawResult = await executeReviewWithRetries({
+        prompt: input.prompt,
+        title: input.title,
+        project: input.project,
+        visibility: "private",
+        signal: controller.signal,
+        logger: pino({ level: "silent" }),
+        onThread: async (id) => {
+          threadId = id
+        },
+        beforeRetry: async () => {},
+        onMessage: (message) => {
+          trace.push(message)
+          if (message.type === "assistant" && typeof message.message.model === "string") {
+            models.add(message.message.model)
+          }
+        },
+      })
+      process.stdout.write(
+        `${JSON.stringify({ status: "completed", rawResult, threadId, models: [...models], trace })}\n`,
+      )
+    } catch (error) {
+      process.stdout.write(
+        `${JSON.stringify({ status: "error", error: errorMessage(error), threadId, models: [...models], trace })}\n`,
+      )
+    }
   } finally {
     clearTimeout(timeout)
     process.removeListener("SIGTERM", abort)

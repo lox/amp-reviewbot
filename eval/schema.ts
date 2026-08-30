@@ -10,6 +10,7 @@ const artifactHashSchema = z
 const conclusionSchema = z.enum(["success", "neutral", "failure"])
 export const exampleOriginSchema = z.enum(["pilot", "human-review", "synthetic"])
 export const exampleSplitSchema = z.enum(["development", "holdout"])
+export const versionRoleSchema = z.enum(["baseline", "introduced-issue"])
 export const issueNatureSchema = z.enum(["behavioral-defect", "maintainability-advisory"])
 export const issueCategorySchema = z.enum([
   "functional-correctness",
@@ -115,6 +116,7 @@ export const evalCaseSchema = z
     headSha: shaSchema,
     origin: exampleOriginSchema.optional(),
     split: exampleSplitSchema.optional(),
+    versionRole: versionRoleSchema.optional(),
     context: pullRequestContextSchema,
     changedLines: z.record(
       z.string().min(1),
@@ -196,6 +198,20 @@ export const corpusSchema = z
           })
         }
       }
+
+      if (first.origin === "synthetic") {
+        const roles = cases.map(({ evalCase }) => evalCase.versionRole)
+        if (
+          roles.filter((role) => role === "baseline").length !== 1 ||
+          roles.filter((role) => role === "introduced-issue").length !== 1
+        ) {
+          context.addIssue({
+            code: "custom",
+            path: ["cases", cases[0]!.index, "versionRole"],
+            message: `synthetic seed ${seedId} must have one baseline and one introduced-issue version`,
+          })
+        }
+      }
     }
   })
 
@@ -222,9 +238,14 @@ const sampleFields = {
   sample: z.number().int().positive(),
   expected: expectedSchema,
   promptHash: z.string(),
+  prompt: z.string().optional(),
   threadId: z.string().nullable(),
   models: z.array(z.string()),
   durationMs: z.number().int().nonnegative(),
+  reviewDurationMs: z.number().int().nonnegative().optional(),
+  matchingDurationMs: z.number().int().nonnegative().optional(),
+  trace: z.array(z.unknown()).optional(),
+  evidenceBoundaryViolations: z.array(z.string().min(1)).optional(),
 }
 
 const completedSampleSchema = z
@@ -258,7 +279,7 @@ export const evalSampleSchema = z.discriminatedUnion("status", [
 
 export const evalRunSchema = z
   .object({
-    schemaVersion: z.literal(2),
+    schemaVersion: z.union([z.literal(2), z.literal(3)]),
     corpusVersion: z.string(),
     corpusHash: artifactHashSchema,
     startedAt: z.string(),
@@ -266,6 +287,19 @@ export const evalRunSchema = z
     requestedSamplesPerCase: z.number().int().positive(),
     concurrency: z.number().int().positive(),
     timeoutMs: z.number().int().positive(),
+    judgeTimeoutMs: z.number().int().positive().optional(),
+    reviewsCompletedAt: z.string().optional(),
+    orderSeed: z.string().min(1).optional(),
+    executionOrder: z
+      .array(
+        z
+          .object({
+            caseId: z.string().min(1),
+            sample: z.number().int().positive(),
+          })
+          .strict(),
+      )
+      .optional(),
     finishedFrom: z
       .object({
         sourceArtifactHash: artifactHashSchema,
@@ -308,6 +342,36 @@ export const evalRunSchema = z
   })
   .strict()
   .superRefine((run, context) => {
+    if (run.schemaVersion === 3) {
+      for (const field of ["judgeTimeoutMs", "reviewsCompletedAt", "orderSeed", "executionOrder"] as const) {
+        if (run[field] === undefined) {
+          context.addIssue({
+            code: "custom",
+            path: [field],
+            message: `schema version 3 requires ${field}`,
+          })
+        }
+      }
+      if (run.executionOrder?.length !== run.samples.length) {
+        context.addIssue({
+          code: "custom",
+          path: ["executionOrder"],
+          message: "execution order must record every review sample",
+        })
+      } else {
+        run.executionOrder?.forEach((task, index) => {
+          const sample = run.samples[index]
+          if (sample && (task.caseId !== sample.caseId || task.sample !== sample.sample)) {
+            context.addIssue({
+              code: "custom",
+              path: ["executionOrder", index],
+              message: "execution order must match the saved sample order",
+            })
+          }
+        })
+      }
+    }
+
     const expectedCorpusHash = corpusContentHash({
       version: run.corpusVersion,
       cases: run.cases,
@@ -342,6 +406,41 @@ export const evalRunSchema = z
       }
       if (sample.status === "completed") {
         validateCompletedSample(sample, evalCase, index, context)
+      }
+      if (
+        run.schemaVersion === 3 &&
+        (sample.prompt === undefined ||
+          sample.trace === undefined ||
+          sample.reviewDurationMs === undefined ||
+          sample.matchingDurationMs === undefined ||
+          sample.evidenceBoundaryViolations === undefined)
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["samples", index],
+          message: "schema version 3 requires the full prompt, trace, phase timings, and evidence audit",
+        })
+      }
+      if (run.schemaVersion === 3 && sample.prompt !== undefined) {
+        const expectedPromptHash = createHash("sha256").update(sample.prompt).digest("hex")
+        if (sample.promptHash !== expectedPromptHash) {
+          context.addIssue({
+            code: "custom",
+            path: ["samples", index, "promptHash"],
+            message: "prompt hash does not match the saved full prompt",
+          })
+        }
+        if (
+          sample.reviewDurationMs !== undefined &&
+          sample.matchingDurationMs !== undefined &&
+          sample.durationMs !== sample.reviewDurationMs + sample.matchingDurationMs
+        ) {
+          context.addIssue({
+            code: "custom",
+            path: ["samples", index, "durationMs"],
+            message: "sample duration must equal its review and matching phase durations",
+          })
+        }
       }
 
       const numbers = sampleNumbers.get(sample.caseId) ?? new Set<number>()
