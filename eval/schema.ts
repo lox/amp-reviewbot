@@ -318,7 +318,7 @@ export const evalRunSchema = z
       failOn: z.literal("high"),
       reviewSourceHash: z.string(),
       methodologyHash: z.string(),
-      project: z.string().min(1),
+      project: z.string().min(1).nullable(),
       account: z.union([
         z
           .object({

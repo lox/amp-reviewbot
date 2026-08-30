@@ -33,10 +33,10 @@ The command uses the account from your authenticated local Amp CLI for trusted m
 
 ```sh
 amp login
-npm run eval -- run /path/to/review-eval-pack --project REVIEW_PROJECT
+npm run eval -- run /path/to/review-eval-pack
 ```
 
-For account-isolated reviews, provide a key from a separate account that can access the source project but cannot access the example pack:
+For account-isolated reviews, provide a key from a separate account that cannot access the example pack:
 
 ```sh
 export AMP_EVAL_REVIEWER_API_KEY="separate-review-account-key"
@@ -44,7 +44,7 @@ export AMP_EVAL_REVIEWER_API_KEY="separate-review-account-key"
 
 `AMP_EVAL_REVIEWER_API_KEY` is passed only to a child process with an empty home directory. The trusted process and matching orbs continue to use the local CLI login. The runner validates the review key and stores only a hash of its Amp user ID, but cannot compare it with the CLI's stored login. Confirm that they are different accounts before relying on the run as blind evidence.
 
-Do not set `AMP_API_KEY`; the command rejects it so the trusted side cannot silently override the local CLI login. The project is selected by `--project`. Without the optional review key, the run records that both roles used the local CLI and does not claim an account boundary.
+Do not set `AMP_API_KEY`; the command rejects it so the trusted side cannot silently override the local CLI login. Reviewers always start in clean no-project orbs, so no source project or repository snapshot is loaded before the review trace begins. Without the optional review key, the run records that both roles used the local CLI and does not claim an account boundary.
 
 The reviewer receives only:
 
@@ -53,9 +53,9 @@ The reviewer receives only:
 - the production review instructions; and
 - the same neutral source-snapshot setup for every version.
 
-It never receives `knownIssues`, focused tests, or the path to the pack. The trusted process checks every bundle and commit ID before any reviews start. Each review replaces the checkout's Git repository with a clean one containing only the exact public base and source-only target history, checks out the exact head, and removes the Git remote. Prior refs, reflogs, and future objects are not retained. The prompt limits evidence to that snapshot and the frozen pull-request context; it forbids remote PR pages, reviews, comments, checks, issues, future commits, and external documentation.
+It never receives `knownIssues`, focused tests, or the path to the pack. The trusted process checks every bundle and commit ID before any reviews start. Each review starts in a clean no-project orb with an empty workspace, then creates a Git repository containing only the exact public base and source-only target history, checks out the exact head, and removes the Git remote. Project setup, repository instructions, prior refs, reflogs, and future objects are never loaded. The prompt limits evidence to that snapshot and the frozen pull-request context; it forbids remote PR pages, reviews, comments, checks, issues, future commits, and external documentation.
 
-The saved tool trace must show the complete fail-fast source-preparation block ran as one successful shell command, including the exact HEAD/ref attestation. It is also checked for obvious boundary crossings such as web tools, `gh`, `curl`, unapproved Git network commands, future-ref or reflog recovery, or repository-local instruction files. A skipped, failed, altered, or boundary-crossing preparation is reported as `CONTAMINATED`, not silently scored as clean evidence. This audit is useful evidence, not a perfect network sandbox.
+The saved tool trace must begin with one stable workspace initialization followed by the complete fail-fast source-preparation block as its first tool call. It must succeed in the initial workspace, with no other tool started first, and finish with exact HEAD/base/target attestations. The trace is also checked for obvious boundary crossings such as web tools, `gh`, `curl`, unapproved Git network commands, future-ref or reflog recovery, or repository-local instruction files. A skipped, failed, altered, misplaced, or boundary-crossing preparation is reported as `CONTAMINATED`, not silently scored as clean evidence. This audit is useful evidence, not a perfect network sandbox.
 
 Source-only transfers over 64 KiB are rejected so one source revision cannot make every repeated review unexpectedly large or expensive. Keep each synthetic change focused.
 
@@ -71,7 +71,6 @@ Run development code versions three times, with at most two reviews running at o
 
 ```sh
 npm run eval -- run /path/to/review-eval-pack \
-  --project REVIEW_PROJECT \
   --samples 3 \
   --concurrency 2 \
   --order-seed RECORDED_RANDOM_SEED
@@ -81,7 +80,6 @@ After choosing a candidate reviewer, run only the held-back examples explicitly:
 
 ```sh
 npm run eval -- run /path/to/review-eval-pack \
-  --project REVIEW_PROJECT \
   --split holdout \
   --samples 3 \
   --concurrency 2
@@ -89,7 +87,7 @@ npm run eval -- run /path/to/review-eval-pack \
 
 Before the first review, this command validates any review key, fetches the public source, verifies any source bundle, checks every commit, calculates changed lines, and rejects a known issue that does not point to a changed line. For a synthetic example, it also checks that the introduced version is one commit on top of the baseline, repeats every baseline issue without semantic changes, adds exactly one issue, and changes that issue's labeled line. An inherited issue's line may move with the source.
 
-Every review then uses a fresh private Amp orb and the same prompt builder, two-pass review method, JSON parser, changed-line filter, and conclusion calculation as production. Review tasks run in reproducibly shuffled blocks: every version gets run once before the next repeat block begins. The artifact records the seed and exact start order.
+Every review then uses a fresh private no-project Amp orb and the same prompt builder, two-pass review method, JSON parser, changed-line filter, and conclusion calculation as production. Review tasks run in reproducibly shuffled blocks: every version gets run once before the next repeat block begins. The artifact records the seed and exact start order.
 
 Only after all reviews finish does the runner save a private checkpoint, then the trusted account compares retained findings with frozen issue labels. It uses two independent high-mode checks and a third only when they disagree. Review and matching timeouts are separate, so a slow matcher cannot turn a completed review into an operational review error. Use `--timeout-minutes` for reviews and `--judge-timeout-minutes` for each comparison. If matching is interrupted, the output path retains the completed-review checkpoint for `finish`.
 

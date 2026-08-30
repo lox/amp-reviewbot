@@ -696,6 +696,9 @@ git remote remove origin
 git for-each-ref --format='delete %(refname)' | git update-ref --stdin
 git update-ref refs/source/base '${baseCommit}'
 git update-ref refs/source/target '${headCommit}'
+test "$(git rev-parse HEAD)" = '${headCommit}'
+test "$(git rev-parse refs/source/base)" = '${baseCommit}'
+test "$(git rev-parse refs/source/target)" = '${headCommit}'
 
 Use only this checked-out source snapshot and the pull-request context in the prompt. Do not inspect remote pull-request pages, reviews, comments, checks, issues, external documentation, or commits outside the exact base and head histories.`
   } finally {

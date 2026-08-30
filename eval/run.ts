@@ -33,7 +33,6 @@ const failOn = "high" as const
 
 type RunOptions = {
   packPath: string
-  project: string
   reviewerApiKey?: string
   outputPath: string
   judgeCache: string
@@ -149,7 +148,7 @@ async function runEvaluation(
   })
   const sourcePreparation = loaded.sourcePreparation
   const startedAt = new Date().toISOString()
-  const reviewer = await reviewerProvenance(options.project, account)
+  const reviewer = await reviewerProvenance(account)
   const tasks = orderedReviewTasks(corpus.cases, options.samplesPerCase, options.orderSeed).map(
     ({ evalCase, sample }) => ({
       evalCase,
@@ -344,7 +343,7 @@ async function runReviewSample(
   let threadId: string | null = null
   let models: string[] = []
   let trace: unknown[] = []
-  const job = evalJob(evalCase, sample, options.project)
+  const job = evalJob(evalCase, sample)
   const prompt = buildReviewPrompt(job, sourcePreparation)
   const promptHash = hash(prompt)
 
@@ -352,7 +351,6 @@ async function runReviewSample(
     const review = await runBlindReview({
       prompt,
       title: reviewThreadTitle(job),
-      project: options.project,
       timeoutMs: options.timeoutMs,
       signal: controller.signal,
       ...(options.reviewerApiKey ? { apiKey: options.reviewerApiKey } : {}),
@@ -428,7 +426,7 @@ async function runReviewSample(
   }
 }
 
-function evalJob(evalCase: EvalCase, sample: number, project: string): ReviewJob {
+function evalJob(evalCase: EvalCase, sample: number): ReviewJob {
   return {
     id: `eval-${evalCase.id}-${sample}`,
     sourceDeliveryId: `eval-${evalCase.id}-${sample}`,
@@ -439,7 +437,7 @@ function evalJob(evalCase: EvalCase, sample: number, project: string): ReviewJob
     pullNumber: evalCase.pullNumber,
     baseSha: evalCase.baseSha,
     headSha: evalCase.headSha,
-    ampProject: project,
+    ampProject: "no-project",
     pullRequestContext: evalCase.context,
     checkRunId: null,
     ampThreadId: null,
@@ -454,10 +452,7 @@ function changedLineMap(evalCase: EvalCase): Map<string, Set<number>> {
   )
 }
 
-async function reviewerProvenance(
-  project: string,
-  account: ReviewAuthentication,
-): Promise<EvalRun["reviewer"]> {
+async function reviewerProvenance(account: ReviewAuthentication): Promise<EvalRun["reviewer"]> {
   const [
     { stdout: gitCommit },
     { stdout: status },
@@ -489,7 +484,7 @@ async function reviewerProvenance(
       `${reviewSource}\n${workerSource}\n${reviewerSource}\n${reviewerChildSource}`,
     ),
     methodologyHash: hash(methodology),
-    project,
+    project: null,
     account,
   }
 }
@@ -515,8 +510,9 @@ async function mapConcurrent<Input, Output>(
 
 function runOptions(args: string[]): RunOptions {
   const packPath = requiredInput(args, "--corpus")
-  const project = flag(args, "--project")
-  if (!project) throw new Error("Missing --project")
+  if (flag(args, "--project")) {
+    throw new Error("Remove --project; evaluation reviews now use clean no-project orbs")
+  }
   if (process.env.AMP_API_KEY) {
     throw new Error(
       "Unset AMP_API_KEY; evaluation uses the authenticated local Amp CLI. Set AMP_EVAL_REVIEWER_API_KEY only to override review-orb authentication.",
@@ -545,7 +541,6 @@ function runOptions(args: string[]): RunOptions {
   }
   return {
     packPath,
-    project,
     ...(reviewerApiKey ? { reviewerApiKey } : {}),
     outputPath: flag(args, "--output") ?? resolve(".eval-runs", `${stamp}.json`),
     judgeCache: resolve(cacheRoot, "judge"),
@@ -698,7 +693,7 @@ function formatDuration(milliseconds: number): string {
 function printHelp(): void {
   console.log(`Usage:
   npm run eval -- check PACK
-  npm run eval -- run PACK --project PROJECT [--split development|holdout] [--samples 3] [--concurrency 2] [--timeout-minutes 30] [--judge-timeout-minutes 30] [--order-seed SEED]
+  npm run eval -- run PACK [--split development|holdout] [--samples 3] [--concurrency 2] [--timeout-minutes 30] [--judge-timeout-minutes 30] [--order-seed SEED]
   npm run eval -- finish RUN.json [--concurrency 2]
   npm run eval -- report RUN.json
 

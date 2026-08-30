@@ -1,10 +1,20 @@
+import { posix } from "node:path"
+
 export function auditEvidenceBoundary(
   trace: unknown[],
   sourcePreparation: string | undefined,
 ): string[] {
   const violations = new Set<string>()
-  const shellCommands: Array<{ id: string; command: string }> = []
-  const successfulToolResults = new Set<string>()
+  const toolUses: Array<{
+    id: string
+    tool: string
+    command?: string
+    workdir?: unknown
+  }> = []
+  const toolEvents: Array<
+    | { type: "use"; id: string }
+    | { type: "result"; id: string; succeeded: boolean }
+  > = []
   for (const message of trace) {
     if (!message || typeof message !== "object" || !("message" in message)) continue
     const body = message.message
@@ -18,11 +28,13 @@ export function auditEvidenceBoundary(
         "type" in content &&
         content.type === "tool_result" &&
         "tool_use_id" in content &&
-        typeof content.tool_use_id === "string" &&
-        "is_error" in content &&
-        content.is_error === false
+        typeof content.tool_use_id === "string"
       ) {
-        successfulToolResults.add(content.tool_use_id)
+        toolEvents.push({
+          type: "result",
+          id: content.tool_use_id,
+          succeeded: "is_error" in content && content.is_error === false,
+        })
         continue
       }
       if (
@@ -51,15 +63,19 @@ export function auditEvidenceBoundary(
           : typeof input.cmd === "string"
             ? input.cmd
             : undefined
+      if ("id" in content && typeof content.id === "string") {
+        toolEvents.push({ type: "use", id: content.id })
+        toolUses.push({
+          id: content.id,
+          tool,
+          ...(command === undefined ? {} : { command }),
+          ...(input.workdir === undefined && input.cwd === undefined
+            ? {}
+            : { workdir: input.workdir ?? input.cwd }),
+        })
+      }
       if (!command) continue
       const segments = shellCommandSegments(command)
-      if (
-        /shell|terminal/.test(tool) &&
-        "id" in content &&
-        typeof content.id === "string"
-      ) {
-        shellCommands.push({ id: content.id, command })
-      }
       if (
         segments.some(
           (segment) =>
@@ -87,11 +103,42 @@ export function auditEvidenceBoundary(
   }
   if (sourcePreparation !== undefined) {
     const required = sourcePreparationCommand(sourcePreparation)
+    const initial = systemInit(trace[0])
+    const systems = trace.flatMap((message) => {
+      const system = systemInit(message)
+      return system ? [system] : []
+    })
+    if (!initial) violations.add("did not start in an isolated review workspace")
+    if (
+      initial &&
+      systems.some(
+        ({ sessionId, cwd }) => sessionId !== initial.sessionId || cwd !== initial.cwd,
+      )
+    ) {
+      violations.add("review continuation changed the isolated workspace")
+    }
+    const firstTool = toolUses[0]
+    const firstUseIndex = firstTool
+      ? toolEvents.findIndex(({ type, id }) => type === "use" && id === firstTool.id)
+      : -1
+    const firstResultIndex = firstTool
+      ? toolEvents.findIndex(({ type, id }) => type === "result" && id === firstTool.id)
+      : -1
+    const firstResult = toolEvents[firstResultIndex]
+    const startedAnotherTool = toolEvents
+      .slice(firstUseIndex + 1, firstResultIndex < 0 ? undefined : firstResultIndex)
+      .some(({ type }) => type === "use")
     if (
       required === undefined ||
-      !shellCommands.some(
-        ({ id, command }) => successfulToolResults.has(id) && command === required,
-      )
+      !initial ||
+      !firstTool ||
+      !isShellTool(firstTool.tool) ||
+      firstTool.command !== required ||
+      !isInitialWorkdir(firstTool.workdir, initial.cwd) ||
+      firstResultIndex <= firstUseIndex ||
+      firstResult?.type !== "result" ||
+      !firstResult.succeeded ||
+      startedAnotherTool
     ) {
       violations.add("did not complete the trusted source preparation")
     }
@@ -123,4 +170,33 @@ function sourcePreparationCommand(sourcePreparation: string): string | undefined
   return /Run these commands from the repository:\n\n([\s\S]*?)\n\nUse only/.exec(
     sourcePreparation,
   )?.[1]
+}
+
+function systemInit(message: unknown): { sessionId: string; cwd: string } | undefined {
+  if (
+    !message ||
+    typeof message !== "object" ||
+    !("type" in message) ||
+    message.type !== "system" ||
+    !("subtype" in message) ||
+    message.subtype !== "init" ||
+    !("session_id" in message) ||
+    typeof message.session_id !== "string" ||
+    !("cwd" in message) ||
+    typeof message.cwd !== "string"
+  ) {
+    return undefined
+  }
+  return { sessionId: message.session_id, cwd: message.cwd }
+}
+
+function isInitialWorkdir(workdir: unknown, initialCwd: string): boolean {
+  return (
+    workdir === undefined ||
+    (typeof workdir === "string" && posix.resolve(initialCwd, workdir) === posix.normalize(initialCwd))
+  )
+}
+
+function isShellTool(tool: string): boolean {
+  return /bash|shell|terminal/.test(tool)
 }

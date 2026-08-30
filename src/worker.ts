@@ -23,7 +23,6 @@ type ExecuteAmp = typeof execute
 type ExecuteReviewOptions = {
   prompt: string
   title: string
-  project: string
   visibility: Config["ampThreadVisibility"]
   signal: AbortSignal
   logger: Logger
@@ -32,12 +31,13 @@ type ExecuteReviewOptions = {
   onMessage?: (message: StreamMessage) => void
   executeAmp?: ExecuteAmp
   retryDelaysMs?: number[]
-}
+} & ({ project: string; cwd?: never } | { cwd: string; project?: never })
 
 export async function executeReviewWithRetries({
   prompt,
   title,
   project,
+  cwd,
   visibility,
   signal,
   logger,
@@ -58,9 +58,15 @@ export async function executeReviewWithRetries({
         signal,
         options: {
           executor: "orb",
+          ...(cwd === undefined ? {} : { cwd }),
           ...(continuing
             ? { continue: threadId }
-            : { project, title, visibility, labels: ["reviewbot"] }),
+            : {
+                ...(project === undefined ? {} : { project }),
+                title,
+                visibility,
+                labels: ["reviewbot"],
+              }),
           mode: reviewMode,
           noArchiveAfterExecute: true,
         },

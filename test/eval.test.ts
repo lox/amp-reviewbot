@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { execFile, type ChildProcessWithoutNullStreams } from "node:child_process"
 import { createHash, randomBytes } from "node:crypto"
 import { EventEmitter } from "node:events"
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { PassThrough } from "node:stream"
@@ -351,7 +351,7 @@ describe("eval example packs", () => {
       assert.match(preparation, new RegExp(`git fetch --depth=2 origin ${fixture.alternate}`))
 
       const prepared = join(fixture.root, "prepared-historical")
-      await execFileAsync("git", ["clone", fixture.origin, prepared])
+      await mkdir(prepared)
       await runSourcePreparation(preparation, prepared)
       assert.equal((await git(prepared, ["rev-parse", "HEAD"])).trim(), loaded.corpus.cases[0]!.headSha)
       assert.equal(
@@ -423,7 +423,6 @@ describe("eval example packs", () => {
       {
         prompt: "Review this change.",
         title: "Test review",
-        project: "test-project",
         timeoutMs: 1_000,
         apiKey: "test-key",
         signal: new AbortController().signal,
@@ -458,9 +457,14 @@ describe("eval example packs", () => {
 
   it("returns the complete reviewer trace and model evidence", async () => {
     const spawned = deferred<void>()
+    const childInput = deferred<{ cwd: string; [key: string]: unknown }>()
     const stdout = new PassThrough()
+    const stdin = new PassThrough()
+    stdin.on("data", (chunk: Buffer) => {
+      childInput.resolve(JSON.parse(chunk.toString("utf8")))
+    })
     const child = Object.assign(new EventEmitter(), {
-      stdin: new PassThrough(),
+      stdin,
       stdout,
       stderr: new PassThrough(),
       kill: () => true,
@@ -476,7 +480,6 @@ describe("eval example packs", () => {
       {
         prompt: "Review this change.",
         title: "Test review",
-        project: "test-project",
         timeoutMs: 1_000,
         signal: new AbortController().signal,
       },
@@ -486,6 +489,10 @@ describe("eval example packs", () => {
       },
     )
     await spawned.promise
+    const submitted = await childInput.promise
+    assert.equal("project" in submitted, false)
+    await stat(submitted.cwd)
+    await assert.rejects(stat(join(submitted.cwd, ".git")))
     stdout.write(
       JSON.stringify({
         status: "completed",
@@ -504,6 +511,7 @@ describe("eval example packs", () => {
       models: ["test-model"],
       trace,
     })
+    await assert.rejects(stat(submitted.cwd))
   })
 
   it("records whether reviews use the local CLI or a dedicated key", async () => {
@@ -556,6 +564,7 @@ describe("eval example packs", () => {
 git remote add origin 'https://github.com/example/repository.git'
 git fetch origin ${"a".repeat(40)}
 test "$(git rev-parse refs/source/target)" = '${target}'
+test "$(git rev-parse HEAD)" = '${target}'
 git for-each-ref --format='delete %(refname)' | git update-ref --stdin`
     const sourcePreparation = `Prepare the exact source snapshot before review.
 
@@ -565,10 +574,12 @@ ${sourceCommand}
 
 Use only this checked-out source snapshot.`
     const trace = [
+      traceSystemMessage(),
       toolMessage(
         "shell_command",
         {
           command: sourceCommand,
+          workdir: "/workspace",
         },
         "source-preparation",
       ),
@@ -584,6 +595,7 @@ Use only this checked-out source snapshot.`
     assert.deepEqual(
       auditEvidenceBoundary(
         [
+          traceSystemMessage(),
           toolMessage(
             "shell_command",
             {
@@ -592,6 +604,19 @@ Use only this checked-out source snapshot.`
             "altered-preparation",
           ),
           toolResultMessage("altered-preparation"),
+        ],
+        sourcePreparation,
+      ),
+      ["did not complete the trusted source preparation"],
+    )
+    assert.deepEqual(
+      auditEvidenceBoundary(
+        [
+          traceSystemMessage(),
+          toolMessage("shell_command", { command: sourceCommand }, "source-preparation"),
+          toolMessage("shell_command", { command: "git status" }, "early-inspection"),
+          toolResultMessage("source-preparation"),
+          toolResultMessage("early-inspection"),
         ],
         sourcePreparation,
       ),
@@ -616,11 +641,13 @@ Use only this checked-out source snapshot.`
       ["inspected source outside the exact review history"],
     )
     assert.deepEqual(auditEvidenceBoundary([], sourcePreparation), [
+      "did not start in an isolated review workspace",
       "did not complete the trusted source preparation",
     ])
     assert.deepEqual(
       auditEvidenceBoundary(
         [
+          traceSystemMessage(),
           toolMessage("shell_command", { command: sourceCommand }, "failed-preparation"),
           toolResultMessage("failed-preparation", true),
           toolMessage("shell_command", { command: sourceCommand }, "successful-retry"),
@@ -628,14 +655,17 @@ Use only this checked-out source snapshot.`
         ],
         sourcePreparation,
       ),
-      [],
+      ["did not complete the trusted source preparation"],
     )
     assert.deepEqual(
       auditEvidenceBoundary(
-        sourceCommand.split("\n").flatMap((command, index) => [
-          toolMessage("shell_command", { command }, `split-${index}`),
-          toolResultMessage(`split-${index}`),
-        ]),
+        [
+          traceSystemMessage(),
+          ...sourceCommand.split("\n").flatMap((command, index) => [
+            toolMessage("shell_command", { command }, `split-${index}`),
+            toolResultMessage(`split-${index}`),
+          ]),
+        ],
         sourcePreparation,
       ),
       ["did not complete the trusted source preparation"],
@@ -643,6 +673,7 @@ Use only this checked-out source snapshot.`
     assert.deepEqual(
       auditEvidenceBoundary(
         [
+          traceSystemMessage(),
           toolMessage(
             "shell_command",
             { command: sourceCommand.replace(/^test .*\n/m, "") },
@@ -653,6 +684,43 @@ Use only this checked-out source snapshot.`
         sourcePreparation,
       ),
       ["did not complete the trusted source preparation"],
+    )
+    assert.deepEqual(
+      auditEvidenceBoundary(
+        [
+          traceSystemMessage(),
+          toolMessage(
+            "shell_command",
+            { command: sourceCommand, workdir: "/tmp/other" },
+            "wrong-workdir",
+          ),
+          toolResultMessage("wrong-workdir"),
+        ],
+        sourcePreparation,
+      ),
+      ["did not complete the trusted source preparation"],
+    )
+    assert.deepEqual(
+      auditEvidenceBoundary(
+        [
+          traceSystemMessage(),
+          toolMessage("web_search", { objective: "Inspect the source" }, "early-web"),
+          toolMessage("shell_command", { command: sourceCommand }, "source-preparation"),
+          toolResultMessage("source-preparation"),
+        ],
+        sourcePreparation,
+      ),
+      [
+        "used external-source tool web_search",
+        "did not complete the trusted source preparation",
+      ],
+    )
+    assert.deepEqual(
+      auditEvidenceBoundary(
+        [...trace.slice(0, 3), traceSystemMessage("thread-2")],
+        sourcePreparation,
+      ),
+      ["review continuation changed the isolated workspace"],
     )
   })
 })
@@ -1386,6 +1454,17 @@ function judgeResult() {
     type: "result",
     is_error: false,
     result: '{"matchingFindingIndices":[0]}',
+  }
+}
+
+function traceSystemMessage(sessionId = "thread-1", cwd = "/workspace") {
+  return {
+    type: "system",
+    subtype: "init",
+    session_id: sessionId,
+    cwd,
+    tools: [],
+    mcp_servers: [],
   }
 }
 

@@ -59,9 +59,9 @@ Production and evaluation share:
 
 Evaluation does not call GitHub, publish Checks, use production queueing, or give credentials to a review orb.
 
-The trusted runner verifies any delivered Git bundle, then makes a fresh source-only bundle for every target, public or private. Every review receives the same neutral preparation block and reference names. The preparation replaces the checkout's Git repository with a clean repository containing only the exact public base and target history, checks out the exact head, and removes the Git remote. Prior refs, reflogs, and future objects are not retained. Known issues and focused tests do not enter the transfer.
+The trusted runner verifies any delivered Git bundle, then makes a fresh source-only bundle for every target, public or private. Every review starts in a clean no-project orb with an empty workspace and receives the same neutral preparation block and reference names. The preparation creates a repository containing only the exact public base and target history, checks out the exact head, and removes the Git remote. Project setup, repository instructions, prior refs, reflogs, and future objects are never loaded. Known issues and focused tests do not enter the transfer.
 
-The reviewer is instructed to run the complete fail-fast preparation block as one shell command, then use only that snapshot and the frozen pull-request context. Remote PR activity, reviews, comments, checks, issues, future commits, external documentation, and repository-local instruction files are outside the evidence boundary. Full tool traces must prove the exact block, including its HEAD/ref attestation, succeeded and are also audited for obvious boundary crossings. A skipped, failed, altered, or boundary-crossing preparation marks the run contaminated. This is an auditable restriction, not a claim of perfect network isolation.
+The reviewer is instructed to run the complete fail-fast preparation block as one shell command, then use only that snapshot and the frozen pull-request context. Remote PR activity, reviews, comments, checks, issues, future commits, external documentation, and repository-local instruction files are outside the evidence boundary. Full tool traces must begin with a stable workspace initialization and prove that the exact preparation block was the first tool call, succeeded in that workspace before any other tool started, and finished with exact HEAD/base/target attestations. A skipped, failed, altered, misplaced, or boundary-crossing preparation marks the run contaminated. This is an auditable restriction, not a claim of perfect network isolation.
 
 The runner rejects a generated source-only transfer over 64 KiB. This keeps repeated reviews bounded and makes an oversized synthetic example a clear pack error instead of an unexpectedly slow or expensive run.
 
@@ -73,7 +73,7 @@ By default, review orbs use that same CLI login. This is convenient for a smoke 
 
 - `AMP_EVAL_REVIEWER_API_KEY`: separate review account, used only by the review child process.
 
-When set, the runner validates the key and stores only a hash of its Amp user ID. The review child gets a new empty home directory and an allowlisted environment, while matching continues through the local login. `--project` selects the review account's source project. The runner cannot compare a stored CLI login with the supplied key, so the operator must confirm that the accounts differ and that the review account cannot read the example project.
+When set, the runner validates the key and stores only a hash of its Amp user ID. The review child gets a new empty home directory and an allowlisted environment, while matching continues through the local login. Reviewers use no-project orbs and fetch only the public base plus the source-only transfer. The runner cannot compare a stored CLI login with the supplied key, so the operator must confirm that the accounts differ and that the review account cannot read the example project.
 
 `AMP_API_KEY` is rejected for eval runs so it cannot silently replace the local CLI login. Two projects owned by the same account are not an isolation boundary.
 
@@ -122,9 +122,9 @@ Because LLMs create and check most labels, report agreement with the labeled exa
 
 1. Keep the example pack private under the trusted account.
 2. Confirm the work account cannot clone that project.
-3. Log the local Amp CLI into the trusted account and, for blind reviews, set a separate `AMP_EVAL_REVIEWER_API_KEY`.
+3. Log the local Amp CLI into the trusted account and, for account-isolated reviews, set a separate `AMP_EVAL_REVIEWER_API_KEY`.
 4. Run `npm run eval -- check /path/to/review-eval-pack`.
-5. Run one sample with `--project REVIEW_PROJECT --samples 1` to prove checkout, source preparation, and account access.
+5. Run one sample with `--samples 1` to prove no-project launch, source preparation, and account access.
 6. Inspect the saved evidence for label leakage and production parity.
 7. Run the full first example three times.
 8. Freeze the benchmark selection and holdout before tuning the reviewer against it.
@@ -141,4 +141,4 @@ Normal `run` commands select development examples and exclude holdouts. After ch
 - Saved runs reject altered corpus evidence, invalid finding indexes, conclusions that do not follow from raw production output, review or matching prompt/schema hash drift, evidence-audit drift from the saved trace, missing full prompts/traces, phase-timing drift, and execution-order drift.
 - Interrupted matching can finish into a new traceable result without changing or rerunning saved reviews.
 - One finding cannot earn recall for two known issues.
-- A live one-sample smoke run succeeds in the review account's source project before the full repeated run.
+- A live one-sample smoke run succeeds in a clean no-project review orb before the full repeated run.

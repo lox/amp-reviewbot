@@ -11,7 +11,7 @@ const execFileAsync = promisify(execFile)
 const inputSchema = z.object({
   prompt: z.string().min(1),
   title: z.string().min(1),
-  project: z.string().min(1),
+  cwd: z.string().min(1),
   timeoutMs: z.number().int().positive(),
 })
 
@@ -34,7 +34,7 @@ async function main(): Promise<void> {
       const rawResult = await executeReviewWithRetries({
         prompt: input.prompt,
         title: input.title,
-        project: input.project,
+        cwd: input.cwd,
         visibility: "private",
         signal: controller.signal,
         logger: pino({ level: "silent" }),

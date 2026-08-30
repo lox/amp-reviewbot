@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
 import { createHash } from "node:crypto"
-import { mkdtemp, rm, stat } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, stat } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -19,7 +19,6 @@ const outputSchema = z.discriminatedUnion("status", [
 export type BlindReviewInput = {
   prompt: string
   title: string
-  project: string
   timeoutMs: number
   apiKey?: string
   signal: AbortSignal
@@ -57,10 +56,12 @@ export async function runBlindReview(
   spawnReviewer: SpawnReviewer = spawn,
 ): Promise<z.infer<typeof outputSchema>> {
   input.signal.throwIfAborted()
-  const home = input.apiKey
-    ? await mkdtemp(join(tmpdir(), "amp-reviewbot-reviewer-"))
-    : undefined
+  const temporaryDirectory = await mkdtemp(join(tmpdir(), "amp-reviewbot-reviewer-"))
+  const cwd = join(temporaryDirectory, "source")
+  const home = input.apiKey ? join(temporaryDirectory, "home") : undefined
   try {
+    await mkdir(cwd)
+    if (home) await mkdir(home)
     const { args, entry } = await childCommand()
     return await new Promise((resolveReview, rejectReview) => {
       const child = spawnReviewer(process.execPath, [...args, entry], {
@@ -144,7 +145,7 @@ export async function runBlindReview(
         JSON.stringify({
           prompt: input.prompt,
           title: input.title,
-          project: input.project,
+          cwd,
           timeoutMs: input.timeoutMs,
         }),
       )
@@ -155,7 +156,7 @@ export async function runBlindReview(
       }
     })
   } finally {
-    if (home) await rm(home, { recursive: true, force: true })
+    await rm(temporaryDirectory, { recursive: true, force: true })
   }
 }
 
