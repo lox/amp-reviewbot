@@ -27,37 +27,21 @@ A human-review example has one exact pre-fix version. A synthetic example has a 
 
 The runner calculates changed lines from the exact Git diff. It does not store a second hand-written copy. It also calculates the expected `success`, `neutral`, or `failure` result from issue severity at `FAIL_ON=high`.
 
-## Keep reviews blind
+## Blind execution is currently unavailable
 
-The command uses the account from your authenticated local Amp CLI for trusted matching. By default it also uses that account for review orbs:
+`npm run eval -- run` deliberately exits before reading credentials, loading a pack, creating an artifact, or starting a model. The current Amp orb executor gives reviewer-controlled processes outbound network access and ignores per-run SDK permissions and tool restrictions. A tool trace can reveal many boundary crossings, but it cannot prove that external evidence was inaccessible.
 
-```sh
-amp login
-npm run eval -- run /path/to/review-eval-pack
-```
+Existing artifacts remain readable, but reports label them `DIAGNOSTIC ONLY`. An empty `evidenceBoundaryViolations` list means only that the retained trace audit detected no crossing; it is not blind review-quality evidence.
 
-For account-isolated reviews, provide a key from a separate account that cannot access the example pack:
+Blind runs can be enabled only when a reviewer executor provides all of these controls:
 
-```sh
-export AMP_EVAL_REVIEWER_API_KEY="separate-review-account-key"
-```
+- trusted source materialization before model-controlled execution;
+- execution-time default-deny egress for reviewer tools and every child process, while preserving only required Amp control-plane traffic;
+- disabled external-source and delegation tools;
+- a fresh no-project filesystem and separate reviewer identity that cannot access the pack; and
+- adversarial verification that direct clients, shell wrappers, interpreters, Git, package managers, background processes, and delegated tools are denied.
 
-`AMP_EVAL_REVIEWER_API_KEY` is passed only to a child process with an empty home directory. The trusted process and matching orbs continue to use the local CLI login. The runner validates the review key and stores only a hash of its Amp user ID, but cannot compare it with the CLI's stored login. Confirm that they are different accounts before relying on the run as blind evidence.
-
-Do not set `AMP_API_KEY`; the command rejects it so the trusted side cannot silently override the local CLI login. Reviewers always start in clean no-project orbs, so no source project or repository snapshot is loaded before the review trace begins. Without the optional review key, the run records that both roles used the local CLI and does not claim an account boundary.
-
-The reviewer receives only:
-
-- the exact base and head commits;
-- the public pull-request title, description, and branch names;
-- the production review instructions; and
-- the same neutral source-snapshot setup for every version.
-
-It never receives `knownIssues`, focused tests, or the path to the pack. The trusted process checks every bundle and commit ID before any reviews start. Each review starts in a clean no-project orb with an empty workspace, then creates a Git repository containing only the exact public base and source-only target history, checks out the exact head, and removes the Git remote. Project setup, repository instructions, prior refs, reflogs, and future objects are never loaded. The prompt limits evidence to that snapshot and the frozen pull-request context; it forbids remote PR pages, reviews, comments, checks, issues, future commits, and external documentation.
-
-The saved tool trace must begin with one stable workspace initialization followed by the complete fail-fast source-preparation block as its first tool call. It must succeed in the initial workspace, with no other tool started first, and finish with exact HEAD/base/target attestations. The trace is also checked for obvious boundary crossings such as delegated agents without nested traces, web tools, shell network clients, package-manager network operations, unapproved Git network commands, future-ref or reflog recovery, or repository-local instruction files. A skipped, failed, altered, misplaced, or boundary-crossing preparation is reported as `CONTAMINATED`, not silently scored as clean evidence. This audit is useful evidence, not a perfect network sandbox.
-
-Source-only transfers over 64 KiB are rejected so one source revision cannot make every repeated review unexpectedly large or expensive. Keep each synthetic change focused.
+The source preparation and trace audit remain in the code as diagnostic evidence and as inputs to a future enforced executor. They do not establish isolation by themselves.
 
 ## Commands
 
@@ -67,31 +51,9 @@ Check the pack's files without starting reviews:
 npm run eval -- check /path/to/review-eval-pack
 ```
 
-Run development code versions three times, with at most two reviews running at once. Holdout examples are excluded by default:
+New review runs are disabled until the execution boundary above is enforceable. The command fails without creating an output artifact.
 
-```sh
-npm run eval -- run /path/to/review-eval-pack \
-  --samples 3 \
-  --concurrency 2 \
-  --order-seed RECORDED_RANDOM_SEED
-```
-
-After choosing a candidate reviewer, run only the held-back examples explicitly:
-
-```sh
-npm run eval -- run /path/to/review-eval-pack \
-  --split holdout \
-  --samples 3 \
-  --concurrency 2
-```
-
-Before the first review, this command validates any review key, fetches the public source, verifies any source bundle, checks every commit, calculates changed lines, and rejects a known issue that does not point to a changed line. For a synthetic example, it also checks that the introduced version is one commit on top of the baseline, repeats every baseline issue without semantic changes, adds exactly one issue, and changes that issue's labeled line. An inherited issue's line may move with the source.
-
-Every review then uses a fresh private no-project Amp orb and the same prompt builder, two-pass review method, JSON parser, changed-line filter, and conclusion calculation as production. Review tasks run in reproducibly shuffled blocks: every version gets run once before the next repeat block begins. The artifact records the seed and exact start order.
-
-Only after all reviews finish does the runner save a private checkpoint, then the trusted account compares retained findings with frozen issue labels. It uses two independent high-mode checks and a third only when they disagree. Review and matching timeouts are separate, so a slow matcher cannot turn a completed review into an operational review error. Use `--timeout-minutes` for reviews and `--judge-timeout-minutes` for each comparison. If matching is interrupted, the output path retains the completed-review checkpoint for `finish`.
-
-The command prints progress and saves complete results under `.eval-runs/`. Read a saved result without making network or model calls:
+Read an existing diagnostic result without making network or model calls:
 
 ```sh
 npm run eval -- report .eval-runs/RUN.json
@@ -107,10 +69,12 @@ This uses the local CLI login and does not use `AMP_EVAL_REVIEWER_API_KEY`. It w
 
 ## Reading the result
 
-A normal report stays plain:
+A report makes the limitation explicit:
 
 ```text
-Review evaluation: NEEDS WORK
+Review evaluation: DIAGNOSTIC ONLY
+Recorded result: NEEDS WORK
+Reviewer egress was not isolated at execution time, so these counts are not blind review-quality evidence.
 
 2 pull-request seeds: 1 pass, 1 unstable, 0 fail.
 1 version with no frozen issue, 1 version with an advisory label, and 1 version with a blocking label.
@@ -121,7 +85,7 @@ Example 1 (pull request #1234): PASS (3/3 seed votes matched)
   Introduced-issue version, blocking labels: found in 3 of 3; frozen-label response matched in 3 of 3
 ```
 
-The saved file retains exact commits and context, every complete review and matching prompt, each matching response schema, the full SDK tool trace, model IDs, raw and filtered findings, conclusions, matching votes, separate review/matching timing, execution order, a trace-verified evidence-boundary audit, and errors. Treat it as private and potentially sensitive.
+The saved file retains exact commits and context, every complete review and matching prompt, each matching response schema, the full SDK tool trace, model IDs, raw and filtered findings, conclusions, matching votes, separate review/matching timing, execution order, a diagnostic trace audit, and errors. Treat it as private and potentially sensitive.
 
 The primary unit is the pull-request seed, not an individual version or model call. A synthetic seed vote matches only when its baseline and introduced version both match in the same repeat. Three repeated votes are enough for an iteration check, not a broad accuracy claim: 3 of 3 is a provisional pass, 2 of 3 is unstable, and 0 or 1 needs work. With five predeclared runs, require at least 4 of 5. Never add only favorable reruns.
 

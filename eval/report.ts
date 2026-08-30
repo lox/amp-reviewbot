@@ -3,7 +3,12 @@ import { expectedKind } from "./schema.js"
 import type { EvalScore } from "./score.js"
 
 export function formatReport(run: EvalRun, score: EvalScore): string {
-  const lines = [`Review evaluation: ${reportVerdict(run, score)}`, ""]
+  const lines = [
+    "Review evaluation: DIAGNOSTIC ONLY",
+    `Recorded result: ${reportVerdict(run, score)}`,
+    "Reviewer egress was not isolated at execution time, so these counts are not blind review-quality evidence.",
+    "",
+  ]
   const counts = countKinds(run.cases)
   const seedCounts = countSeedOutcomes(score)
   lines.push(
@@ -136,13 +141,15 @@ function reportVerdict(run: EvalRun, score: EvalScore): string {
 function bottomLine(run: EvalRun, score: EvalScore): string {
   const contaminated = contaminationCount(run)
   if (contaminated > 0) {
-    return `${contaminated} review ${contaminated === 1 ? "sample crossed" : "samples crossed"} the source-evidence boundary, so this run must not be used as review-quality evidence.`
+    return `This run is diagnostic only because reviewer egress was not execution-isolated. The trace audit also detected ${contaminated} review ${contaminated === 1 ? "sample crossing" : "sample crossings"} of the declared source-evidence boundary.`
   }
+  const diagnosticPrefix =
+    "This run is diagnostic only because reviewer egress was not execution-isolated."
   if (score.operationalCompletion < 1) {
-    return "Some reviews did not finish, so this run cannot give a complete answer."
+    return `${diagnosticPrefix} Some reviews did not finish, so the recorded counts are also incomplete.`
   }
   if (score.judgeCoverage !== null && score.judgeCoverage < 1) {
-    return "Some findings could not be checked against the known issues, so this run cannot give a complete answer."
+    return `${diagnosticPrefix} Some findings could not be checked against the known issues, so the recorded counts are also incomplete.`
   }
   const cases = new Map(run.cases.map((evalCase) => [evalCase.id, evalCase]))
   const cleanScores = score.cases.filter(
@@ -197,8 +204,8 @@ function bottomLine(run: EvalRun, score: EvalScore): string {
     )
   }
   return observations.length > 0
-    ? observations.join(" ")
-    : "The reviewer handled every example correctly in these runs."
+    ? `${diagnosticPrefix} ${observations.join(" ")}`
+    : `${diagnosticPrefix} Within that limitation, the reviewer handled every recorded example correctly.`
 }
 
 function contaminationCount(run: EvalRun): number {

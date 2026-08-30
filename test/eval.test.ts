@@ -4,7 +4,7 @@ import { createHash, randomBytes } from "node:crypto"
 import { EventEmitter } from "node:events"
 import { mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
 import { PassThrough } from "node:stream"
 import { describe, it } from "node:test"
 import { promisify } from "node:util"
@@ -783,6 +783,31 @@ Use only this checked-out source snapshot.`
       [],
     )
   })
+
+  it("refuses a review run before creating an artifact", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "amp-reviewbot-disabled-eval-"))
+    const output = join(directory, "run.json")
+    try {
+      await assert.rejects(
+        execFileAsync(
+          process.execPath,
+          ["--import", "tsx", "eval/run.ts", "run", "missing-pack", "--output", output],
+          {
+            cwd: resolve("."),
+            env: {
+              ...process.env,
+              AMP_API_KEY: "must-not-be-read",
+              AMP_EVAL_REVIEWER_API_KEY: "must-not-be-read",
+            },
+          },
+        ),
+        /current Amp orb executor cannot enforce the required external-evidence boundary/,
+      )
+      assert.equal(await stat(output).catch(() => null), null)
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
 })
 
 describe("eval scoring", () => {
@@ -813,7 +838,9 @@ describe("eval scoring", () => {
     assert.equal(blockingScore.judgeDisagreementRate, 1 / 3)
 
     const report = formatReport(run, score)
-    assert.match(report, /Review evaluation: INCOMPLETE/)
+    assert.match(report, /Review evaluation: DIAGNOSTIC ONLY/)
+    assert.match(report, /Recorded result: INCOMPLETE/)
+    assert.match(report, /not blind review-quality evidence/)
     assert.match(report, /no frozen issues: 1 of 2 completed reviews raised no clean alert/)
     assert.match(report, /blocking labels: found in 2 of 3; frozen-label response matched in 1 of 3/)
     assert.match(report, /This result covers only these examples/)
@@ -823,10 +850,10 @@ describe("eval scoring", () => {
       "did not complete the trusted source preparation",
     ]
     const contaminatedReport = formatReport(contaminatedRun, scoreRun(contaminatedRun))
-    assert.match(contaminatedReport, /Review evaluation: CONTAMINATED/)
+    assert.match(contaminatedReport, /Recorded result: CONTAMINATED/)
     assert.match(
       contaminatedReport,
-      /this run must not be used as review-quality evidence/,
+      /trace audit also detected 1 review sample crossing/,
     )
 
     const completeRun = makeRun(cases, 3, [
@@ -838,7 +865,7 @@ describe("eval scoring", () => {
       completed("blocking", 3, blocking, "neutral", [mediumFinding], [judgement([0], false)]),
     ])
     const completeReport = formatReport(completeRun, scoreRun(completeRun))
-    assert.match(completeReport, /Review evaluation: NEEDS WORK/)
+    assert.match(completeReport, /Recorded result: NEEDS WORK/)
     assert.match(
       completeReport,
       /blocking labels: found in 3 of 3; frozen-label response matched in 0 of 3/,

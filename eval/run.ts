@@ -30,6 +30,8 @@ import { scoreRun, type EvalScore } from "./score.js"
 
 const execFileAsync = promisify(execFile)
 const failOn = "high" as const
+const blindRunUnavailable =
+  "Blind evaluation runs are disabled: the current Amp orb executor cannot enforce the required external-evidence boundary. Use `eval check` to validate a pack or `eval report` to inspect an existing diagnostic artifact."
 
 type RunOptions = {
   packPath: string
@@ -64,6 +66,7 @@ async function main(): Promise<void> {
     return
   }
   if (command === "run") {
+    requireBlindExecutor()
     const options = runOptions(process.argv.slice(3))
     await mkdir(dirname(options.outputPath), { recursive: true })
     const output = await createRunArtifact(options.outputPath)
@@ -126,6 +129,10 @@ async function main(): Promise<void> {
   }
   printHelp()
   if (command && command !== "help" && command !== "--help") process.exitCode = 1
+}
+
+function requireBlindExecutor(): void {
+  throw new Error(blindRunUnavailable)
 }
 
 async function runEvaluation(
@@ -693,11 +700,10 @@ function formatDuration(milliseconds: number): string {
 function printHelp(): void {
   console.log(`Usage:
   npm run eval -- check PACK
-  npm run eval -- run PACK [--split development|holdout] [--samples 3] [--concurrency 2] [--timeout-minutes 30] [--judge-timeout-minutes 30] [--order-seed SEED]
   npm run eval -- finish RUN.json [--concurrency 2]
   npm run eval -- report RUN.json
 
-Check an example pack, run development reviews by default, finish interrupted finding comparisons, or read a saved report. Reviews and matching use the authenticated local Amp CLI. Set AMP_EVAL_REVIEWER_API_KEY only when review orbs should use another account.`)
+Check an example pack, finish interrupted comparisons in an existing diagnostic artifact, or read a saved report. New review runs are disabled until the reviewer executor can enforce the external-evidence boundary.`)
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
