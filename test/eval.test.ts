@@ -758,6 +758,17 @@ describe("eval scoring", () => {
     assert.match(report, /blocking labels: found in 2 of 3; frozen-label response matched in 1 of 3/)
     assert.match(report, /This result covers only these examples/)
 
+    const contaminatedRun = structuredClone(run)
+    contaminatedRun.samples[2]!.evidenceBoundaryViolations = [
+      "did not complete the trusted source preparation",
+    ]
+    const contaminatedReport = formatReport(contaminatedRun, scoreRun(contaminatedRun))
+    assert.match(contaminatedReport, /Review evaluation: CONTAMINATED/)
+    assert.match(
+      contaminatedReport,
+      /this run must not be used as review-quality evidence/,
+    )
+
     const completeRun = makeRun(cases, 3, [
       completed("control", 1, control, "success", [], []),
       completed("control", 2, control, "success", [], []),

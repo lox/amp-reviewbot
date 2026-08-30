@@ -12,9 +12,7 @@ export function formatReport(run: EvalRun, score: EvalScore): string {
     `Each was reviewed ${run.requestedSamplesPerCase} ${run.requestedSamplesPerCase === 1 ? "time" : "times"}. ${completionSentence(run, score)}`,
     "A seed vote matches only when every version finds every frozen issue at the correct blocking threshold and raises no alert on a version with no frozen issues.",
   )
-  const boundaryViolations = run.samples.filter(
-    (sample) => (sample.evidenceBoundaryViolations?.length ?? 0) > 0,
-  ).length
+  const boundaryViolations = contaminationCount(run)
   if (boundaryViolations > 0) {
     lines.push(
       `${boundaryViolations} review ${boundaryViolations === 1 ? "sample crossed" : "samples crossed"} the declared source-evidence boundary; treat this run as contaminated.`,
@@ -122,6 +120,7 @@ function caseResult(
 }
 
 function reportVerdict(run: EvalRun, score: EvalScore): string {
+  if (contaminationCount(run) > 0) return "CONTAMINATED"
   if (score.seeds.length === 0) return "INCOMPLETE"
   if (
     score.operationalCompletion < 1 ||
@@ -129,15 +128,16 @@ function reportVerdict(run: EvalRun, score: EvalScore): string {
   ) {
     return "INCOMPLETE"
   }
-  if (run.samples.some((sample) => (sample.evidenceBoundaryViolations?.length ?? 0) > 0)) {
-    return "CONTAMINATED"
-  }
   if (score.seeds.some((seed) => seed.outcome === "fail")) return "NEEDS WORK"
   if (score.seeds.some((seed) => seed.outcome === "unstable")) return "UNSTABLE"
   return "PASSED THESE EXAMPLES"
 }
 
 function bottomLine(run: EvalRun, score: EvalScore): string {
+  const contaminated = contaminationCount(run)
+  if (contaminated > 0) {
+    return `${contaminated} review ${contaminated === 1 ? "sample crossed" : "samples crossed"} the source-evidence boundary, so this run must not be used as review-quality evidence.`
+  }
   if (score.operationalCompletion < 1) {
     return "Some reviews did not finish, so this run cannot give a complete answer."
   }
@@ -199,6 +199,12 @@ function bottomLine(run: EvalRun, score: EvalScore): string {
   return observations.length > 0
     ? observations.join(" ")
     : "The reviewer handled every example correctly in these runs."
+}
+
+function contaminationCount(run: EvalRun): number {
+  return run.samples.filter(
+    (sample) => (sample.evidenceBoundaryViolations?.length ?? 0) > 0,
+  ).length
 }
 
 function rateCount(rate: number | null, total: number): number {
