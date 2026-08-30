@@ -677,10 +677,11 @@ async function createSourcePreparation(
       baseFetchDepth = Math.max(baseFetchDepth, Number.parseInt(count.trim(), 10) + 1)
     }
 
-    return `Prepare the exact source snapshot before review. The transfer contains Git source objects only.
+    return `Prepare the exact source snapshot before review. The transfer contains Git source objects only. Run the complete fail-fast block below as one shell command.
 
 Run these commands from the repository:
 
+set -euo pipefail
 find . -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
 git init
 git remote add origin '${sourceRemote}'

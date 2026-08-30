@@ -551,13 +551,28 @@ describe("eval example packs", () => {
   })
 
   it("flags external evidence while allowing the exact source setup", () => {
-    const sourcePreparation = `git remote add origin 'https://github.com/example/repository.git'
+    const target = "a".repeat(40)
+    const sourceCommand = `set -euo pipefail
+git remote add origin 'https://github.com/example/repository.git'
 git fetch origin ${"a".repeat(40)}
+test "$(git rev-parse refs/source/target)" = '${target}'
 git for-each-ref --format='delete %(refname)' | git update-ref --stdin`
+    const sourcePreparation = `Prepare the exact source snapshot before review.
+
+Run these commands from the repository:
+
+${sourceCommand}
+
+Use only this checked-out source snapshot.`
     const trace = [
-      toolMessage("shell_command", {
-        command: `git fetch origin ${"a".repeat(40)}\ngit for-each-ref --format='delete %(refname)' | git update-ref --stdin`,
-      }),
+      toolMessage(
+        "shell_command",
+        {
+          command: sourceCommand,
+        },
+        "source-preparation",
+      ),
+      toolResultMessage("source-preparation"),
       toolMessage("web_search", { objective: "Find later fixes" }),
       toolMessage("shell_command", { command: "gh pr view 42 --comments" }),
     ]
@@ -569,13 +584,18 @@ git for-each-ref --format='delete %(refname)' | git update-ref --stdin`
     assert.deepEqual(
       auditEvidenceBoundary(
         [
-          toolMessage("shell_command", {
-            command: `git remote add origin 'https://github.com/example/repository.git' && git fetch origin ${"a".repeat(40)} && printf 'prepared\n'`,
-          }),
+          toolMessage(
+            "shell_command",
+            {
+              command: sourceCommand.replaceAll("\n", " && "),
+            },
+            "altered-preparation",
+          ),
+          toolResultMessage("altered-preparation"),
         ],
         sourcePreparation,
       ),
-      [],
+      ["did not complete the trusted source preparation"],
     )
     assert.deepEqual(
       auditEvidenceBoundary(
@@ -584,16 +604,55 @@ git for-each-ref --format='delete %(refname)' | git update-ref --stdin`
             command: `git -c protocol.version=2 fetch origin ${"b".repeat(40)}`,
           }),
         ],
-        sourcePreparation,
+        undefined,
       ),
       ["ran an unapproved Git network command"],
     )
     assert.deepEqual(
       auditEvidenceBoundary(
         [toolMessage("shell_command", { command: "git show HEAD@{1}:src/review.ts" })],
-        sourcePreparation,
+        undefined,
       ),
       ["inspected source outside the exact review history"],
+    )
+    assert.deepEqual(auditEvidenceBoundary([], sourcePreparation), [
+      "did not complete the trusted source preparation",
+    ])
+    assert.deepEqual(
+      auditEvidenceBoundary(
+        [
+          toolMessage("shell_command", { command: sourceCommand }, "failed-preparation"),
+          toolResultMessage("failed-preparation", true),
+          toolMessage("shell_command", { command: sourceCommand }, "successful-retry"),
+          toolResultMessage("successful-retry"),
+        ],
+        sourcePreparation,
+      ),
+      [],
+    )
+    assert.deepEqual(
+      auditEvidenceBoundary(
+        sourceCommand.split("\n").flatMap((command, index) => [
+          toolMessage("shell_command", { command }, `split-${index}`),
+          toolResultMessage(`split-${index}`),
+        ]),
+        sourcePreparation,
+      ),
+      ["did not complete the trusted source preparation"],
+    )
+    assert.deepEqual(
+      auditEvidenceBoundary(
+        [
+          toolMessage(
+            "shell_command",
+            { command: sourceCommand.replace(/^test .*\n/m, "") },
+            "missing-attestation",
+          ),
+          toolResultMessage("missing-attestation"),
+        ],
+        sourcePreparation,
+      ),
+      ["did not complete the trusted source preparation"],
     )
   })
 })
@@ -1179,9 +1238,7 @@ async function runSourcePreparation(preparation: string, cwd: string): Promise<v
     preparation,
   )?.[1]
   assert.ok(commands)
-  for (const command of commands.split("\n").filter(Boolean)) {
-    await execFileAsync("bash", ["-eu", "-c", command], { cwd })
-  }
+  await execFileAsync("bash", ["-c", commands], { cwd })
 }
 
 async function git(cwd: string, args: string[]): Promise<string> {
@@ -1332,11 +1389,27 @@ function judgeResult() {
   }
 }
 
-function toolMessage(name: string, input: Record<string, unknown>) {
+function toolMessage(name: string, input: Record<string, unknown>, id = "tool") {
   return {
     type: "assistant",
     message: {
-      content: [{ type: "tool_use", name, input }],
+      content: [{ type: "tool_use", id, name, input }],
+    },
+  }
+}
+
+function toolResultMessage(toolUseId: string, isError = false) {
+  return {
+    type: "user",
+    message: {
+      content: [
+        {
+          type: "tool_result",
+          tool_use_id: toolUseId,
+          content: "command completed",
+          is_error: isError,
+        },
+      ],
     },
   }
 }

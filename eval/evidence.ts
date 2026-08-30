@@ -3,6 +3,8 @@ export function auditEvidenceBoundary(
   sourcePreparation: string | undefined,
 ): string[] {
   const violations = new Set<string>()
+  const shellCommands: Array<{ id: string; command: string }> = []
+  const successfulToolResults = new Set<string>()
   for (const message of trace) {
     if (!message || typeof message !== "object" || !("message" in message)) continue
     const body = message.message
@@ -10,6 +12,19 @@ export function auditEvidenceBoundary(
       continue
     }
     for (const content of body.content) {
+      if (
+        content &&
+        typeof content === "object" &&
+        "type" in content &&
+        content.type === "tool_result" &&
+        "tool_use_id" in content &&
+        typeof content.tool_use_id === "string" &&
+        "is_error" in content &&
+        content.is_error === false
+      ) {
+        successfulToolResults.add(content.tool_use_id)
+        continue
+      }
       if (
         !content ||
         typeof content !== "object" ||
@@ -39,6 +54,13 @@ export function auditEvidenceBoundary(
       if (!command) continue
       const segments = shellCommandSegments(command)
       if (
+        /shell|terminal/.test(tool) &&
+        "id" in content &&
+        typeof content.id === "string"
+      ) {
+        shellCommands.push({ id: content.id, command })
+      }
+      if (
         segments.some(
           (segment) =>
             /\b(?:curl|wget|gh)\b|https?:\/\//i.test(segment) &&
@@ -63,6 +85,17 @@ export function auditEvidenceBoundary(
       }
     }
   }
+  if (sourcePreparation !== undefined) {
+    const required = sourcePreparationCommand(sourcePreparation)
+    if (
+      required === undefined ||
+      !shellCommands.some(
+        ({ id, command }) => successfulToolResults.has(id) && command === required,
+      )
+    ) {
+      violations.add("did not complete the trusted source preparation")
+    }
+  }
   return [...violations]
 }
 
@@ -84,4 +117,10 @@ function shellCommandSegments(command: string): string[] {
     .split(/\n|&&|\|\||[;|]/)
     .map((segment) => segment.trim())
     .filter(Boolean)
+}
+
+function sourcePreparationCommand(sourcePreparation: string): string | undefined {
+  return /Run these commands from the repository:\n\n([\s\S]*?)\n\nUse only/.exec(
+    sourcePreparation,
+  )?.[1]
 }
