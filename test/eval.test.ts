@@ -208,10 +208,16 @@ describe("eval example packs", () => {
       const preparation = loaded.sourcePreparation.get("local-example/serious-bug")!
       assert.match(preparation, /source snapshot/)
       assert.match(preparation, /base64 --decode/)
-      assert.doesNotMatch(preparation, /eval|reviewbot|expected answers|focused tests/i)
-      assert.doesNotMatch(baselinePreparation, /eval|reviewbot|expected answers|focused tests/i)
-      assert.match(baselinePreparation, new RegExp(`git fetch origin ${fixture.base}`))
-      assert.match(preparation, new RegExp(`git fetch origin ${fixture.base}`))
+      assert.doesNotMatch(
+        preparation.replace(/^git remote add origin .*$/m, ""),
+        /eval|reviewbot|expected answers|focused tests/i,
+      )
+      assert.doesNotMatch(
+        baselinePreparation.replace(/^git remote add origin .*$/m, ""),
+        /eval|reviewbot|expected answers|focused tests/i,
+      )
+      assert.match(baselinePreparation, new RegExp(`git fetch --depth=1 origin ${fixture.base}`))
+      assert.match(preparation, new RegExp(`git fetch --depth=1 origin ${fixture.base}`))
       assert.doesNotMatch(preparation, /known-bug|Loses the useful result|witnesses\//)
       const encodedBundle = /printf '%s' '([^']+)' \| base64 --decode/.exec(preparation)?.[1]
       assert.ok(encodedBundle)
@@ -222,29 +228,32 @@ describe("eval example packs", () => {
         .split("\n")
       assert.equal(heads.length, 1)
       assert.match(heads[0]!, new RegExp(`^${loaded.corpus.cases[1]!.headSha} `))
-      const advertised = heads[0]!.split(/\s+/)[1]!
+
+      await writeFile(join(fixture.source, "future.txt"), "not part of the review\n")
+      await git(fixture.source, ["add", "future.txt"])
+      await git(fixture.source, ["commit", "-m", "future change"])
+      const future = (await git(fixture.source, ["rev-parse", "HEAD"])).trim()
+      await git(fixture.source, ["push", fixture.origin, `${future}:refs/heads/main`])
       const prepared = join(fixture.root, "prepared")
       await execFileAsync("git", ["clone", fixture.origin, prepared])
-      await git(prepared, ["fetch", generatedBundle, `${advertised}:refs/source/target`])
-      await git(prepared, ["checkout", "--detach", loaded.corpus.cases[1]!.headSha])
-      await git(prepared, ["remote", "remove", "origin"])
-      const refs = (await git(prepared, ["for-each-ref", "--format=%(refname)"]))
-        .trim()
-        .split("\n")
-        .filter(Boolean)
-      for (const ref of refs) await git(prepared, ["update-ref", "-d", ref])
-      await git(prepared, ["update-ref", "refs/source/base", fixture.base])
-      await git(prepared, [
-        "update-ref",
-        "refs/source/target",
-        loaded.corpus.cases[1]!.headSha,
-      ])
+      const commands = /Run these commands from the repository:\n\n([\s\S]+?)\n\nUse only/.exec(
+        preparation,
+      )?.[1]
+      assert.ok(commands)
+      for (const command of commands.split("\n").filter(Boolean)) {
+        await execFileAsync("bash", ["-eu", "-c", command], { cwd: prepared })
+      }
       assert.equal((await git(prepared, ["rev-parse", "HEAD"])).trim(), loaded.corpus.cases[1]!.headSha)
       assert.equal((await git(prepared, ["remote"])).trim(), "")
       assert.deepEqual(
         (await git(prepared, ["for-each-ref", "--format=%(refname)"])).trim().split("\n"),
         ["refs/source/base", "refs/source/target"],
       )
+      assert.doesNotMatch(
+        await git(prepared, ["reflog", "show", "--all", "--format=%H"]),
+        new RegExp(future),
+      )
+      await assert.rejects(git(prepared, ["cat-file", "-e", `${future}^{commit}`]))
 
       await git(fixture.origin, ["tag", "public-clean", fixture.clean])
       await git(fixture.origin, ["update-ref", "refs/heads/main", fixture.base])
@@ -536,7 +545,8 @@ describe("eval example packs", () => {
   })
 
   it("flags external evidence while allowing the exact source setup", () => {
-    const sourcePreparation = `git fetch origin ${"a".repeat(40)}
+    const sourcePreparation = `git remote add origin 'https://github.com/example/repository.git'
+git fetch origin ${"a".repeat(40)}
 git for-each-ref --format='delete %(refname)' | git update-ref --stdin`
     const trace = [
       toolMessage("shell_command", {
@@ -554,12 +564,30 @@ git for-each-ref --format='delete %(refname)' | git update-ref --stdin`
       auditEvidenceBoundary(
         [
           toolMessage("shell_command", {
+            command: `git remote add origin 'https://github.com/example/repository.git' && git fetch origin ${"a".repeat(40)} && printf 'prepared\n'`,
+          }),
+        ],
+        sourcePreparation,
+      ),
+      [],
+    )
+    assert.deepEqual(
+      auditEvidenceBoundary(
+        [
+          toolMessage("shell_command", {
             command: `git -c protocol.version=2 fetch origin ${"b".repeat(40)}`,
           }),
         ],
         sourcePreparation,
       ),
       ["ran an unapproved Git network command"],
+    )
+    assert.deepEqual(
+      auditEvidenceBoundary(
+        [toolMessage("shell_command", { command: "git show HEAD@{1}:src/review.ts" })],
+        sourcePreparation,
+      ),
+      ["inspected source outside the exact review history"],
     )
   })
 })
@@ -1014,6 +1042,7 @@ describe("eval judging", () => {
 
 async function createPackFixture(largeSourceTransfer = false): Promise<{
   root: string
+  source: string
   pack: string
   cache: string
   origin: string
@@ -1109,7 +1138,7 @@ async function createPackFixture(largeSourceTransfer = false): Promise<{
       2,
     )}\n`,
   )
-  return { root, pack, cache: join(root, "cache"), origin, base, clean, alternate }
+  return { root, source, pack, cache: join(root, "cache"), origin, base, clean, alternate }
 }
 
 async function git(cwd: string, args: string[]): Promise<string> {

@@ -53,9 +53,9 @@ The reviewer receives only:
 - the production review instructions; and
 - the same neutral source-snapshot setup for every version.
 
-It never receives `knownIssues`, focused tests, or the path to the pack. The trusted process checks every bundle and commit ID before any reviews start. Each review imports a source-only bundle, checks out the exact head, and removes the Git remote. The prompt limits evidence to that snapshot and the frozen pull-request context; it forbids remote PR pages, reviews, comments, checks, issues, future commits, and external documentation.
+It never receives `knownIssues`, focused tests, or the path to the pack. The trusted process checks every bundle and commit ID before any reviews start. Each review replaces the checkout's Git repository with a clean one containing only the exact public base and source-only target history, checks out the exact head, and removes the Git remote. Prior refs, reflogs, and future objects are not retained. The prompt limits evidence to that snapshot and the frozen pull-request context; it forbids remote PR pages, reviews, comments, checks, issues, future commits, and external documentation.
 
-The saved tool trace is checked for obvious boundary crossings such as web tools, `gh`, `curl`, unapproved Git network commands, future-ref enumeration, or repository-local instruction files. A flagged run is reported as `CONTAMINATED`, not silently scored as clean evidence. This audit is useful evidence, not a perfect network sandbox.
+The saved tool trace is checked for obvious boundary crossings such as web tools, `gh`, `curl`, unapproved Git network commands, future-ref or reflog recovery, or repository-local instruction files. A flagged run is reported as `CONTAMINATED`, not silently scored as clean evidence. This audit is useful evidence, not a perfect network sandbox.
 
 Source-only transfers over 64 KiB are rejected so one source revision cannot make every repeated review unexpectedly large or expensive. Keep each synthetic change focused.
 

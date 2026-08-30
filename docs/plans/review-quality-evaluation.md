@@ -59,7 +59,7 @@ Production and evaluation share:
 
 Evaluation does not call GitHub, publish Checks, use production queueing, or give credentials to a review orb.
 
-The trusted runner verifies any delivered Git bundle, then makes a fresh source-only bundle for every target, public or private. Every review receives the same neutral preparation block and reference names. The preparation checks out the exact head and removes the Git remote. Known issues and focused tests do not enter the transfer.
+The trusted runner verifies any delivered Git bundle, then makes a fresh source-only bundle for every target, public or private. Every review receives the same neutral preparation block and reference names. The preparation replaces the checkout's Git repository with a clean repository containing only the exact public base and target history, checks out the exact head, and removes the Git remote. Prior refs, reflogs, and future objects are not retained. Known issues and focused tests do not enter the transfer.
 
 The reviewer is instructed to use only the prepared snapshot and frozen pull-request context. Remote PR activity, reviews, comments, checks, issues, future commits, external documentation, and repository-local instruction files are outside the evidence boundary. Full tool traces are saved and audited for obvious boundary crossings; a flagged run is marked contaminated. This is an auditable restriction, not a claim of perfect network isolation.
 

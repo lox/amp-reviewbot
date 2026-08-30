@@ -367,10 +367,11 @@ async function resolveExample(
   sourceUrl: (repository: string) => string,
 ): Promise<Pick<LoadedPack, "sourcePreparation"> & { cases: EvalCorpus["cases"] }> {
   const example = checked.definition
+  const sourceRemote = sourceUrl(example.source.repository)
   const repository = await prepareRepository(
     example.source.repository,
     sourceCache,
-    sourceUrl(example.source.repository),
+    sourceRemote,
   )
   const publicCommits = new Set<string>()
 
@@ -480,7 +481,12 @@ async function resolveExample(
 
     sourcePreparation.set(
       caseId,
-      await createSourcePreparation(repository, version.commit, example.source.baseCommit),
+      await createSourcePreparation(
+        repository,
+        version.commit,
+        example.source.baseCommit,
+        sourceRemote,
+      ),
     )
   }
   return { cases, sourcePreparation }
@@ -631,6 +637,7 @@ async function createSourcePreparation(
   repository: string,
   headCommit: string,
   baseCommit: string,
+  sourceRemote: string,
 ): Promise<string> {
   const temporaryDirectory = await mkdtemp(join(repository, ".git", "source-transfer-"))
   const bundlePath = join(temporaryDirectory, "commit.bundle")
@@ -661,12 +668,15 @@ async function createSourcePreparation(
 
 Run these commands from the repository:
 
-git fetch origin ${baseCommit}
+find . -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+git init
+git remote add origin '${sourceRemote}'
+git fetch --depth=1 origin ${baseCommit}
 printf '%s' '${bundleBase64}' | base64 --decode > '${temporaryBundle}'
 git bundle verify '${temporaryBundle}'
 git fetch '${temporaryBundle}' '${advertised}:refs/source/target'
 test "$(git rev-parse refs/source/target)" = '${headCommit}'
-git checkout --detach '${headCommit}'
+git checkout --force --detach '${headCommit}'
 rm -f '${temporaryBundle}'
 git remote remove origin
 git for-each-ref --format='delete %(refname)' | git update-ref --stdin

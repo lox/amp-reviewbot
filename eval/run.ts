@@ -656,20 +656,27 @@ export function auditEvidenceBoundary(
             ? input.cmd
             : undefined
       if (!command) continue
-      if (/\b(?:curl|wget|gh)\b|https?:\/\//i.test(command)) {
+      const segments = shellCommandSegments(command)
+      if (
+        segments.some(
+          (segment) =>
+            /\b(?:curl|wget|gh)\b|https?:\/\//i.test(segment) &&
+            !isApprovedSourceCommand(segment, sourcePreparation),
+        )
+      ) {
         violations.add("ran an external network command")
       }
-      const unapprovedGitNetwork = command
-        .split("\n")
-        .map((line) => line.trim())
-        .filter((line) => /\bgit\b[^\n;&|]*?\b(?:clone|fetch|pull|ls-remote)\b/.test(line))
-        .some((line) => !isApprovedSourceCommand(line, sourcePreparation))
+      const unapprovedGitNetwork = segments
+        .filter((segment) => /\bgit\b.*?\b(?:clone|fetch|pull|ls-remote)\b/.test(segment))
+        .some((segment) => !isApprovedSourceCommand(segment, sourcePreparation))
       if (unapprovedGitNetwork) violations.add("ran an unapproved Git network command")
-      const unapprovedHistoryInspection = command
-        .split("\n")
-        .map((line) => line.trim())
-        .filter((line) => /\bgit\s+(?:log\s+.*(?:--all|\bmain\b|\borigin\/)|branch\s+-a|for-each-ref)\b/.test(line))
-        .some((line) => !isApprovedSourceCommand(line, sourcePreparation))
+      const unapprovedHistoryInspection = segments
+        .filter((segment) =>
+          /(?:\bgit\b.*?\b(?:branch\s+-a|for-each-ref|fsck|reflog|show-ref)\b|\bgit\b.*?\b(?:log|rev-list)\b.*?(?:--all|\bmain\b|\borigin\/)|HEAD@\{)/.test(
+            segment,
+          ),
+        )
+        .some((segment) => !isApprovedSourceCommand(segment, sourcePreparation))
       if (unapprovedHistoryInspection) {
         violations.add("inspected source outside the exact review history")
       }
@@ -680,12 +687,18 @@ export function auditEvidenceBoundary(
 
 function isApprovedSourceCommand(command: string, sourcePreparation: string | undefined): boolean {
   return (
-    sourcePreparation
-      ?.split("\n")
-      .map((line) => line.trim())
+    sourcePreparation !== undefined &&
+    shellCommandSegments(sourcePreparation)
       .filter((line) => line.startsWith("git "))
-      .some((approved) => command === approved) ?? false
+      .some((approved) => command === approved)
   )
+}
+
+function shellCommandSegments(command: string): string[] {
+  return command
+    .split(/\n|&&|\|\||[;|]/)
+    .map((segment) => segment.trim())
+    .filter(Boolean)
 }
 
 function artifactHash(value: Buffer): string {
