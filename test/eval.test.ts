@@ -236,13 +236,7 @@ describe("eval example packs", () => {
       await git(fixture.source, ["push", fixture.origin, `${future}:refs/heads/main`])
       const prepared = join(fixture.root, "prepared")
       await execFileAsync("git", ["clone", fixture.origin, prepared])
-      const commands = /Run these commands from the repository:\n\n([\s\S]+?)\n\nUse only/.exec(
-        preparation,
-      )?.[1]
-      assert.ok(commands)
-      for (const command of commands.split("\n").filter(Boolean)) {
-        await execFileAsync("bash", ["-eu", "-c", command], { cwd: prepared })
-      }
+      await runSourcePreparation(preparation, prepared)
       assert.equal((await git(prepared, ["rev-parse", "HEAD"])).trim(), loaded.corpus.cases[1]!.headSha)
       assert.equal((await git(prepared, ["remote"])).trim(), "")
       assert.deepEqual(
@@ -352,6 +346,16 @@ describe("eval example packs", () => {
       assert.ok(encodedBundle)
       const header = Buffer.from(encodedBundle, "base64").subarray(0, 1_024).toString("utf8")
       assert.match(header, new RegExp(`-${fixture.base} `))
+      assert.match(preparation, new RegExp(`git fetch --depth=2 origin ${fixture.alternate}`))
+
+      const prepared = join(fixture.root, "prepared-historical")
+      await execFileAsync("git", ["clone", fixture.origin, prepared])
+      await runSourcePreparation(preparation, prepared)
+      assert.equal((await git(prepared, ["rev-parse", "HEAD"])).trim(), loaded.corpus.cases[0]!.headSha)
+      assert.equal(
+        (await git(prepared, ["merge-base", fixture.alternate, loaded.corpus.cases[0]!.headSha])).trim(),
+        fixture.base,
+      )
     } finally {
       await rm(fixture.root, { recursive: true, force: true })
     }
@@ -876,6 +880,7 @@ describe("eval judging", () => {
     let calls = 0
     const judge = (async () => {
       calls += 1
+      await new Promise((resolve) => setTimeout(resolve, 5))
       return judgement([0], false)
     }) as typeof judgeIssue
 
@@ -892,6 +897,7 @@ describe("eval judging", () => {
     if (sourceRun.samples[0]!.status !== "completed") assert.fail("expected completed source")
     assert.equal(run.samples[0]!.rawResult, sourceRun.samples[0]!.rawResult)
     assert.equal(run.samples[0]!.durationMs, sourceRun.samples[0]!.durationMs)
+    assert.equal(run.samples[0]!.matchingDurationMs, undefined)
     assert.deepEqual(run.samples[0]!.judgementErrors, [])
     assert.equal(run.samples[0]!.judgements.length, 1)
 
@@ -1139,6 +1145,16 @@ async function createPackFixture(largeSourceTransfer = false): Promise<{
     )}\n`,
   )
   return { root, source, pack, cache: join(root, "cache"), origin, base, clean, alternate }
+}
+
+async function runSourcePreparation(preparation: string, cwd: string): Promise<void> {
+  const commands = /Run these commands from the repository:\n\n([\s\S]+?)\n\nUse only/.exec(
+    preparation,
+  )?.[1]
+  assert.ok(commands)
+  for (const command of commands.split("\n").filter(Boolean)) {
+    await execFileAsync("bash", ["-eu", "-c", command], { cwd })
+  }
 }
 
 async function git(cwd: string, args: string[]): Promise<string> {

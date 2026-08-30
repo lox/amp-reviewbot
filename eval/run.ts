@@ -300,8 +300,10 @@ export async function finishJudgements(
     sample.judgementErrors = sample.judgementErrors.filter(
       (error) => error.issueId !== result.issue.id,
     )
-    sample.matchingDurationMs = (sample.matchingDurationMs ?? 0) + result.durationMs
-    sample.durationMs += result.durationMs
+    if (sourceRun.schemaVersion === 3) {
+      sample.matchingDurationMs = (sample.matchingDurationMs ?? 0) + result.durationMs
+      sample.durationMs += result.durationMs
+    }
     if ("judgement" in result) sample.judgements.push(result.judgement)
     else sample.judgementErrors.push({ issueId: result.issue.id, error: result.error })
   }

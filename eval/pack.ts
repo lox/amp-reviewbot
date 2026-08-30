@@ -657,12 +657,24 @@ async function createSourcePreparation(
         `Generated source transfer for ${headCommit} is ${bundle.byteLength} bytes; the limit is 64 KiB`,
       )
     }
+    const bundleHeader = await readBundleHeader(bundlePath)
     const advertised = (await git(repository, ["bundle", "list-heads", bundlePath])).stdout
       .trim()
       .split(/\s+/)[1]
     if (!advertised) throw new Error(`Generated source bundle for ${headCommit} has no head`)
     const bundleBase64 = bundle.toString("base64")
     const temporaryBundle = `/tmp/source-${headCommit}.bundle`
+    let baseFetchDepth = 1
+    for (const prerequisite of bundleHeader.prerequisites) {
+      await git(repository, ["merge-base", "--is-ancestor", prerequisite, baseCommit])
+      const { stdout: count } = await git(repository, [
+        "rev-list",
+        "--ancestry-path",
+        "--count",
+        `${prerequisite}..${baseCommit}`,
+      ])
+      baseFetchDepth = Math.max(baseFetchDepth, Number.parseInt(count.trim(), 10) + 1)
+    }
 
     return `Prepare the exact source snapshot before review. The transfer contains Git source objects only.
 
@@ -671,7 +683,7 @@ Run these commands from the repository:
 find . -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
 git init
 git remote add origin '${sourceRemote}'
-git fetch --depth=1 origin ${baseCommit}
+git fetch --depth=${baseFetchDepth} origin ${baseCommit}
 printf '%s' '${bundleBase64}' | base64 --decode > '${temporaryBundle}'
 git bundle verify '${temporaryBundle}'
 git fetch '${temporaryBundle}' '${advertised}:refs/source/target'
@@ -683,7 +695,7 @@ git for-each-ref --format='delete %(refname)' | git update-ref --stdin
 git update-ref refs/source/base '${baseCommit}'
 git update-ref refs/source/target '${headCommit}'
 
-Use only this checked-out source snapshot and the pull-request context in the prompt. Do not inspect remote pull-request pages, reviews, comments, checks, issues, external documentation, or commits that are not ancestors of the exact head.`
+Use only this checked-out source snapshot and the pull-request context in the prompt. Do not inspect remote pull-request pages, reviews, comments, checks, issues, external documentation, or commits outside the exact base and head histories.`
   } finally {
     await rm(temporaryDirectory, { recursive: true, force: true })
   }
