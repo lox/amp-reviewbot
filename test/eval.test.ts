@@ -1007,7 +1007,9 @@ describe("eval scoring", () => {
     mutableSample.trace = [
       toolMessage("web_search", { objective: "Find later fixes" }),
     ]
-    assert.throws(() => evalRunSchema.parse(run), /saved evidence audit does not match/)
+    const reaudited = evalRunSchema.parse(run)
+    assert.deepEqual(reaudited.samples[0]!.evidenceBoundaryViolations, [])
+    assert.match(formatReport(reaudited, scoreRun(reaudited)), /current trace audit also detected/)
     mutableSample.trace = trace
     if (run.samples[0]!.status !== "completed") assert.fail("expected completed sample")
     run.samples[0]!.judgements[0]!.provenance.promptHash = "0".repeat(64)

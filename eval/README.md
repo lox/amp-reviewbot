@@ -85,7 +85,7 @@ Example 1 (pull request #1234): PASS (3/3 seed votes matched)
   Introduced-issue version, blocking labels: found in 3 of 3; frozen-label response matched in 3 of 3
 ```
 
-The saved file retains exact commits and context, every complete review and matching prompt, each matching response schema, the full SDK tool trace, model IDs, raw and filtered findings, conclusions, matching votes, separate review/matching timing, execution order, a diagnostic trace audit, and errors. Treat it as private and potentially sensitive.
+The saved file retains exact commits and context, every complete review and matching prompt, each matching response schema, the full SDK tool trace, model IDs, raw and filtered findings, conclusions, matching votes, separate review/matching timing, execution order, its original diagnostic trace audit, and errors. Reports apply the current audit separately without rejecting an unchanged artifact when detection rules evolve. Treat the file as private and potentially sensitive.
 
 The primary unit is the pull-request seed, not an individual version or model call. A synthetic seed vote matches only when its baseline and introduced version both match in the same repeat. Three repeated votes are enough for an iteration check, not a broad accuracy claim: 3 of 3 is a provisional pass, 2 of 3 is unstable, and 0 or 1 needs work. With five predeclared runs, require at least 4 of 5. Never add only favorable reruns.
 

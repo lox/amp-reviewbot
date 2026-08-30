@@ -1,11 +1,13 @@
 import type { EvalCase, EvalRun, EvalSample } from "./schema.js"
 import { expectedKind } from "./schema.js"
 import type { EvalScore } from "./score.js"
+import { auditEvidenceBoundary, sourcePreparationFromPrompt } from "./evidence.js"
 
 export function formatReport(run: EvalRun, score: EvalScore): string {
+  const boundaryViolations = contaminationCount(run)
   const lines = [
     "Review evaluation: DIAGNOSTIC ONLY",
-    `Recorded result: ${reportVerdict(run, score)}`,
+    `Recorded result: ${reportVerdict(score, boundaryViolations)}`,
     "Reviewer egress was not isolated at execution time, so these counts are not blind review-quality evidence.",
     "",
   ]
@@ -17,7 +19,6 @@ export function formatReport(run: EvalRun, score: EvalScore): string {
     `Each was reviewed ${run.requestedSamplesPerCase} ${run.requestedSamplesPerCase === 1 ? "time" : "times"}. ${completionSentence(run, score)}`,
     "A seed vote matches only when every version finds every frozen issue at the correct blocking threshold and raises no alert on a version with no frozen issues.",
   )
-  const boundaryViolations = contaminationCount(run)
   if (boundaryViolations > 0) {
     lines.push(
       `${boundaryViolations} review ${boundaryViolations === 1 ? "sample crossed" : "samples crossed"} the declared source-evidence boundary; treat this run as contaminated.`,
@@ -54,7 +55,7 @@ export function formatReport(run: EvalRun, score: EvalScore): string {
     }
   }
 
-  lines.push("", "Bottom line", `  ${bottomLine(run, score)}`, "")
+  lines.push("", "Bottom line", `  ${bottomLine(run, score, boundaryViolations)}`, "")
   lines.push(
     `Evidence: ${run.cases.length} code versions and ${run.samples.length} review runs.`,
     "This result covers only these examples; it is not a general quality claim.",
@@ -124,8 +125,8 @@ function caseResult(
   return `${role}, ${label}: ${foundText}; frozen-label response matched in ${rightResponse} of ${score.samples}${otherFindingsText}`
 }
 
-function reportVerdict(run: EvalRun, score: EvalScore): string {
-  if (contaminationCount(run) > 0) return "CONTAMINATED"
+function reportVerdict(score: EvalScore, boundaryViolations: number): string {
+  if (boundaryViolations > 0) return "CONTAMINATED"
   if (score.seeds.length === 0) return "INCOMPLETE"
   if (
     score.operationalCompletion < 1 ||
@@ -138,10 +139,9 @@ function reportVerdict(run: EvalRun, score: EvalScore): string {
   return "PASSED THESE EXAMPLES"
 }
 
-function bottomLine(run: EvalRun, score: EvalScore): string {
-  const contaminated = contaminationCount(run)
-  if (contaminated > 0) {
-    return `This run is diagnostic only because reviewer egress was not execution-isolated. The trace audit also detected ${contaminated} review ${contaminated === 1 ? "sample crossing" : "sample crossings"} of the declared source-evidence boundary.`
+function bottomLine(run: EvalRun, score: EvalScore, boundaryViolations: number): string {
+  if (boundaryViolations > 0) {
+    return `This run is diagnostic only because reviewer egress was not execution-isolated. A saved or current trace audit also detected ${boundaryViolations} review ${boundaryViolations === 1 ? "sample crossing" : "sample crossings"} of the declared source-evidence boundary.`
   }
   const diagnosticPrefix =
     "This run is diagnostic only because reviewer egress was not execution-isolated."
@@ -209,9 +209,14 @@ function bottomLine(run: EvalRun, score: EvalScore): string {
 }
 
 function contaminationCount(run: EvalRun): number {
-  return run.samples.filter(
-    (sample) => (sample.evidenceBoundaryViolations?.length ?? 0) > 0,
-  ).length
+  return run.samples.filter((sample) => {
+    const saved = sample.evidenceBoundaryViolations ?? []
+    const current =
+      sample.trace === undefined || sample.prompt === undefined
+        ? []
+        : auditEvidenceBoundary(sample.trace, sourcePreparationFromPrompt(sample.prompt))
+    return saved.length > 0 || current.length > 0
+  }).length
 }
 
 function rateCount(rate: number | null, total: number): number {

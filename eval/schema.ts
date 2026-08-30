@@ -2,7 +2,6 @@ import { createHash } from "node:crypto"
 import { isDeepStrictEqual } from "node:util"
 import { z } from "zod"
 import { finalizeReview, parseReviewResult, reviewResultSchema } from "../src/review.js"
-import { auditEvidenceBoundary, sourcePreparationFromPrompt } from "./evidence.js"
 
 const shaSchema = z.string().regex(/^[0-9a-f]{40}$/i, "must be a full 40-character commit SHA")
 const artifactHashSchema = z
@@ -442,20 +441,6 @@ export const evalRunSchema = z
             code: "custom",
             path: ["samples", index, "durationMs"],
             message: "sample duration must equal its review and matching phase durations",
-          })
-        }
-        if (
-          sample.trace !== undefined &&
-          sample.evidenceBoundaryViolations !== undefined &&
-          !isDeepStrictEqual(
-            sample.evidenceBoundaryViolations,
-            auditEvidenceBoundary(sample.trace, sourcePreparationFromPrompt(sample.prompt)),
-          )
-        ) {
-          context.addIssue({
-            code: "custom",
-            path: ["samples", index, "evidenceBoundaryViolations"],
-            message: "saved evidence audit does not match the full trace",
           })
         }
         if (sample.status === "completed") {

@@ -140,7 +140,7 @@ Because LLMs create and check most labels, report agreement with the labeled exa
 - Every generated review source bundle contains one target ref and no known-bug or witness data; every version receives the same neutral preparation shape.
 - The runner uses local CLI authentication by default; when a review key is supplied, the review child receives only that key and basic connection settings.
 - Production prompts are unchanged when no eval source preparation is supplied.
-- Saved runs reject altered corpus evidence, invalid finding indexes, conclusions that do not follow from raw production output, review or matching prompt/schema hash drift, evidence-audit drift from the saved trace, missing full prompts/traces, phase-timing drift, and execution-order drift.
+- Saved runs reject altered corpus evidence, invalid finding indexes, conclusions that do not follow from raw production output, review or matching prompt/schema hash drift, missing full prompts/traces, phase-timing drift, and execution-order drift. They preserve the original audit while reports apply the current audit separately, so improved detection does not make an unchanged artifact unreadable.
 - Interrupted matching can finish into a new traceable result without changing or rerunning saved reviews.
 - One finding cannot earn recall for two known issues.
 - The disabled `run` command exits before creating an artifact or making a model call.
