@@ -31,7 +31,7 @@ examples/
 This handles both benchmark groups:
 
 - a historical pre-fix revision where a non-author human review requested a concrete change and independent evidence confirms the issue; and
-- a directly checked baseline revision plus one direct child commit containing a single deliberately introduced issue, normally paired with focused evidence. Source-confirmed baseline issues are repeated unchanged in both versions; the child adds exactly one issue.
+- a directly checked baseline revision plus one direct child commit containing a single deliberately introduced issue, normally paired with focused evidence. Source-confirmed baseline issues retain the same semantic card in both versions while their exact source line may move; the child adds exactly one issue.
 
 Behavioral defects and maintainability advisories are distinct. Substantial duplicated logic can be a medium advisory when it has a concrete divergence cost. Non-idiomatic Go is low and requires official guidance or a dominant repository convention. Neither is described as a behavioral bug.
 
@@ -104,7 +104,7 @@ The main report answers:
 - was the final response appropriately urgent; and
 - were repeated runs stable?
 
-The saved JSON keeps exact commits, context, changed lines, every complete review prompt, full SDK tool traces, model IDs, raw output, filtered findings, conclusions, matching votes, code hashes, separate review/matching timing, execution order, evidence-boundary audit, and errors. Re-reading a saved report makes no model or network calls. The artifact is private and potentially sensitive.
+The saved JSON keeps exact commits, context, changed lines, every complete review and matching prompt, matching response schemas, full SDK tool traces, model IDs, raw output, filtered findings, conclusions, matching votes, code hashes, separate review/matching timing, execution order, a trace-verified evidence-boundary audit, and errors. Re-reading a saved report makes no model or network calls. The artifact is private and potentially sensitive.
 
 If matching fails after reviews finish, `npm run eval -- finish RUN.json` retries only the missing matches through the local CLI login. It writes a new file, preserves the original review evidence and timing, and records the exact hash of the source file. It does not rerun reviews or use the separate review-account key.
 
@@ -134,11 +134,11 @@ Normal `run` commands select development examples and exclude holdouts. After ch
 ## Verification
 
 - Normal typecheck, tests, and build pass without live Amp calls.
-- A local Git fixture proves source commits, bundles, changed lines, and issue anchors are checked. Synthetic issues must be introduced by one direct child commit and point to a line changed by that commit; inherited baseline cards must be identical in both versions.
+- A local Git fixture proves source commits, bundles, changed lines, and issue anchors are checked. Synthetic issues must be introduced by one direct child commit and point to a line changed by that commit; inherited baseline semantics must be identical while source lines may move.
 - Every generated review source bundle contains one target ref and no known-bug or witness data; every version receives the same neutral preparation shape.
 - The runner uses local CLI authentication by default; when a review key is supplied, the review child receives only that key and basic connection settings.
 - Production prompts are unchanged when no eval source preparation is supplied.
-- Saved runs reject altered corpus evidence, invalid finding indexes, conclusions that do not follow from raw production output, prompt-hash or phase-timing drift, missing full prompts/traces, and execution-order drift.
+- Saved runs reject altered corpus evidence, invalid finding indexes, conclusions that do not follow from raw production output, review or matching prompt/schema hash drift, evidence-audit drift from the saved trace, missing full prompts/traces, phase-timing drift, and execution-order drift.
 - Interrupted matching can finish into a new traceable result without changing or rerunning saved reviews.
 - One finding cannot earn recall for two known issues.
 - A live one-sample smoke run succeeds in the review account's source project before the full repeated run.

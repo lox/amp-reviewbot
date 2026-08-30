@@ -7,10 +7,21 @@ import { z } from "zod"
 import type { ReviewFinding } from "../src/types.js"
 import type { EvalJudgement, ExpectedIssue } from "./schema.js"
 
-const judgeVersion = "5"
+const judgeVersion = "6"
 const judgeMode = "high"
 const judgeProject = null
-const judgeSchemaHash = hash('{"matchingFindingIndices":"nonnegative integer[]"}')
+const judgeResponseSchemaDocument = `{
+  "type": "object",
+  "properties": {
+    "matchingFindingIndices": {
+      "type": "array",
+      "items": { "type": "integer", "minimum": 0 }
+    }
+  },
+  "required": ["matchingFindingIndices"],
+  "additionalProperties": false
+}`
+const judgeSchemaHash = hash(judgeResponseSchemaDocument)
 const inFlightVotes = new Map<string, Promise<void>>()
 
 type ExecuteAmp = typeof execute
@@ -62,6 +73,8 @@ export async function judgeIssue(
     mode: judgeMode,
     sdkVersion,
     project: judgeProject,
+    prompt,
+    responseSchema: judgeResponseSchemaDocument,
     promptHash: hash(prompt),
     schemaHash: judgeSchemaHash,
   }

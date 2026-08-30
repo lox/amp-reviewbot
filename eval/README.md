@@ -23,7 +23,7 @@ examples/
 
 [`example.json`](example.json) shows the format. It records the exact public pull-request context, whether the example is a pilot, human review, or synthetic change, and whether it is used during development or held back. Each version has a commit and `knownIssues`. A version with no frozen labels has an empty list. An issue records its cause, visible effect, severity, changed line, category, and how it was checked.
 
-A human-review example has one exact pre-fix version. A synthetic example has a checked baseline and one direct child commit with a single introduced issue. If source inspection finds a real issue in the baseline, both versions repeat that issue card unchanged; the child adds exactly one issue. The introduced issue's labeled line must be changed by that child commit, not merely by the original pull request. Behavioral defects and maintainability advisories are recorded separately; duplication and non-idiomatic Go are advisories rather than behavioral bugs.
+A human-review example has one exact pre-fix version. A synthetic example has a checked baseline and one direct child commit with a single introduced issue. If source inspection finds a real issue in the baseline, both versions repeat that issue's semantic card while each version records its exact source line; the child adds exactly one issue. The introduced issue's labeled line must be changed by that child commit, not merely by the original pull request. Behavioral defects and maintainability advisories are recorded separately; duplication and non-idiomatic Go are advisories rather than behavioral bugs.
 
 The runner calculates changed lines from the exact Git diff. It does not store a second hand-written copy. It also calculates the expected `success`, `neutral`, or `failure` result from issue severity at `FAIL_ON=high`.
 
@@ -87,7 +87,7 @@ npm run eval -- run /path/to/review-eval-pack \
   --concurrency 2
 ```
 
-Before the first review, this command validates any review key, fetches the public source, verifies any source bundle, checks every commit, calculates changed lines, and rejects a known issue that does not point to a changed line. For a synthetic example, it also checks that the introduced version is one commit on top of the baseline, repeats all baseline issue cards unchanged, adds exactly one issue, and changes that issue's labeled line.
+Before the first review, this command validates any review key, fetches the public source, verifies any source bundle, checks every commit, calculates changed lines, and rejects a known issue that does not point to a changed line. For a synthetic example, it also checks that the introduced version is one commit on top of the baseline, repeats every baseline issue without semantic changes, adds exactly one issue, and changes that issue's labeled line. An inherited issue's line may move with the source.
 
 Every review then uses a fresh private Amp orb and the same prompt builder, two-pass review method, JSON parser, changed-line filter, and conclusion calculation as production. Review tasks run in reproducibly shuffled blocks: every version gets run once before the next repeat block begins. The artifact records the seed and exact start order.
 
@@ -123,7 +123,7 @@ Example 1 (pull request #1234): PASS (3/3 seed votes matched)
   Introduced-issue version, blocking labels: found in 3 of 3; frozen-label response matched in 3 of 3
 ```
 
-The saved file retains exact commits and context, each complete prompt, the full SDK tool trace, model IDs, raw and filtered findings, conclusions, matching votes, separate review/matching timing, execution order, evidence-boundary audit, and errors. Treat it as private and potentially sensitive.
+The saved file retains exact commits and context, every complete review and matching prompt, each matching response schema, the full SDK tool trace, model IDs, raw and filtered findings, conclusions, matching votes, separate review/matching timing, execution order, a trace-verified evidence-boundary audit, and errors. Treat it as private and potentially sensitive.
 
 The primary unit is the pull-request seed, not an individual version or model call. A synthetic seed vote matches only when its baseline and introduced version both match in the same repeat. Three repeated votes are enough for an iteration check, not a broad accuracy claim: 3 of 3 is a provisional pass, 2 of 3 is unstable, and 0 or 1 needs work. With five predeclared runs, require at least 4 of 5. Never add only favorable reruns.
 

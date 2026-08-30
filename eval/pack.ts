@@ -160,12 +160,13 @@ export const exampleSchema = z
             : [second!, first!]
         const baselineIssues = new Map(baseline.knownIssues.map((issue) => [issue.id, issue]))
         const addedIssues = introduced.knownIssues.filter((issue) => !baselineIssues.has(issue.id))
-        const inheritedIssuesMatch = baseline.knownIssues.every((issue) =>
-          isDeepStrictEqual(
-            issue,
-            introduced.knownIssues.find((candidate) => candidate.id === issue.id),
-          ),
-        )
+        const inheritedIssuesMatch = baseline.knownIssues.every((issue) => {
+          const inherited = introduced.knownIssues.find((candidate) => candidate.id === issue.id)
+          if (!inherited) return false
+          const { line: _baselineLine, ...baselineCard } = issue
+          const { line: _introducedLine, ...introducedCard } = inherited
+          return isDeepStrictEqual(baselineCard, introducedCard)
+        })
         if (
           introduced.knownIssues.length !== baseline.knownIssues.length + 1 ||
           addedIssues.length !== 1 ||
@@ -175,7 +176,7 @@ export const exampleSchema = z
             code: "custom",
             path: ["versions"],
             message:
-              "a synthetic introduced-issue version must repeat every baseline issue unchanged and add exactly one issue",
+              "a synthetic introduced-issue version must repeat every baseline issue without semantic changes and add exactly one issue",
           })
         }
       }

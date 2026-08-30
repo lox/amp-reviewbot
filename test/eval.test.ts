@@ -112,8 +112,10 @@ describe("eval example packs", () => {
     input.versions[1]!.knownIssues.unshift(structuredClone(baselineIssue))
 
     assert.doesNotThrow(() => exampleSchema.parse(input))
+    input.versions[1]!.knownIssues[0]!.line = 81
+    assert.doesNotThrow(() => exampleSchema.parse(input))
     input.versions[1]!.knownIssues[0]!.failureBehavior = "A different claim."
-    assert.throws(() => exampleSchema.parse(input), /repeat every baseline issue unchanged/)
+    assert.throws(() => exampleSchema.parse(input), /without semantic changes/)
   })
 
   it("requires synthetic maintainability issues to identify their subtype", async () => {
@@ -744,14 +746,17 @@ describe("eval scoring", () => {
   })
 
   it("requires complete prompts and traces in new run artifacts", () => {
-    const cases = [evalCase("control", control)]
-    const oldRun = makeRun(cases, 1, [completed("control", 1, control, "success", [], [])])
+    const cases = [evalCase("blocking", blocking)]
+    const oldRun = makeRun(cases, 1, [
+      completed("blocking", 1, blocking, "failure", [highFinding], [judgement([0], false)]),
+    ])
     const prompt = "complete review prompt"
+    const trace = [{ type: "result", result: "review result" }]
     const sample = {
       ...oldRun.samples[0]!,
       prompt,
       promptHash: createHash("sha256").update(prompt).digest("hex"),
-      trace: [{ type: "result", result: "review result" }],
+      trace,
       reviewDurationMs: 10,
       matchingDurationMs: 0,
       durationMs: 10,
@@ -763,7 +768,7 @@ describe("eval scoring", () => {
       judgeTimeoutMs: 60_000,
       reviewsCompletedAt: oldRun.completedAt,
       orderSeed: "fixed-seed",
-      executionOrder: [{ caseId: "control", sample: 1 }],
+      executionOrder: [{ caseId: "blocking", sample: 1 }],
       samples: [sample],
     }
     assert.doesNotThrow(() => evalRunSchema.parse(run))
@@ -773,6 +778,18 @@ describe("eval scoring", () => {
     run.samples[0]!.durationMs = 11
     assert.throws(() => evalRunSchema.parse(run), /sample duration must equal/)
     run.samples[0]!.durationMs = 10
+    const mutableSample = run.samples[0] as { trace: unknown[] }
+    mutableSample.trace = [
+      toolMessage("web_search", { objective: "Find later fixes" }),
+    ]
+    assert.throws(() => evalRunSchema.parse(run), /saved evidence audit does not match/)
+    mutableSample.trace = trace
+    if (run.samples[0]!.status !== "completed") assert.fail("expected completed sample")
+    run.samples[0]!.judgements[0]!.provenance.promptHash = "0".repeat(64)
+    assert.throws(() => evalRunSchema.parse(run), /judgement prompt hash does not match/)
+    run.samples[0]!.judgements[0]!.provenance.promptHash = createHash("sha256")
+      .update(run.samples[0]!.judgements[0]!.provenance.prompt!)
+      .digest("hex")
     delete (run.samples[0] as { prompt?: string }).prompt
     assert.throws(() => evalRunSchema.parse(run), /full prompt, trace, phase timings/)
   })
@@ -863,6 +880,16 @@ describe("eval judging", () => {
       assert.ok(options.every((item) => !("project" in item)))
       assert.ok(options.every((item) => item.cwd === tmpdir()))
       assert.equal(result.provenance.project, null)
+      assert.match(result.provenance.prompt!, /Known issue:/)
+      assert.match(result.provenance.responseSchema!, /matchingFindingIndices/)
+      assert.equal(
+        result.provenance.promptHash,
+        createHash("sha256").update(result.provenance.prompt!).digest("hex"),
+      )
+      assert.equal(
+        result.provenance.schemaHash,
+        createHash("sha256").update(result.provenance.responseSchema!).digest("hex"),
+      )
     } finally {
       await rm(cacheDirectory, { recursive: true, force: true })
     }
@@ -1264,6 +1291,8 @@ function judgement(
   disagreement: boolean,
   issueId = "known-failure",
 ) {
+  const prompt = "saved matching prompt"
+  const responseSchema = '{"matchingFindingIndices":[0]}'
   return {
     issueId,
     matchingFindingIndices,
@@ -1277,8 +1306,10 @@ function judgement(
       mode: "high",
       sdkVersion: "test-sdk",
       project: "no-project",
-      promptHash: "prompt",
-      schemaHash: "schema",
+      prompt,
+      responseSchema,
+      promptHash: createHash("sha256").update(prompt).digest("hex"),
+      schemaHash: createHash("sha256").update(responseSchema).digest("hex"),
     },
   }
 }

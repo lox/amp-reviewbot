@@ -2,6 +2,7 @@ import { createHash } from "node:crypto"
 import { isDeepStrictEqual } from "node:util"
 import { z } from "zod"
 import { finalizeReview, parseReviewResult, reviewResultSchema } from "../src/review.js"
+import { auditEvidenceBoundary, sourcePreparationFromPrompt } from "./evidence.js"
 
 const shaSchema = z.string().regex(/^[0-9a-f]{40}$/i, "must be a full 40-character commit SHA")
 const artifactHashSchema = z
@@ -226,6 +227,8 @@ const judgementFields = {
     mode: z.string(),
     sdkVersion: z.string(),
     project: z.string().nullable(),
+    prompt: z.string().optional(),
+    responseSchema: z.string().optional(),
     promptHash: z.string(),
     schemaHash: z.string(),
   }),
@@ -439,6 +442,53 @@ export const evalRunSchema = z
             code: "custom",
             path: ["samples", index, "durationMs"],
             message: "sample duration must equal its review and matching phase durations",
+          })
+        }
+        if (
+          sample.trace !== undefined &&
+          sample.evidenceBoundaryViolations !== undefined &&
+          !isDeepStrictEqual(
+            sample.evidenceBoundaryViolations,
+            auditEvidenceBoundary(sample.trace, sourcePreparationFromPrompt(sample.prompt)),
+          )
+        ) {
+          context.addIssue({
+            code: "custom",
+            path: ["samples", index, "evidenceBoundaryViolations"],
+            message: "saved evidence audit does not match the full trace",
+          })
+        }
+        if (sample.status === "completed") {
+          sample.judgements.forEach((judgement, judgementIndex) => {
+            const provenance = judgement.provenance
+            if (provenance.prompt === undefined || provenance.responseSchema === undefined) {
+              context.addIssue({
+                code: "custom",
+                path: ["samples", index, "judgements", judgementIndex, "provenance"],
+                message: "schema version 3 requires each judgement's full prompt and response schema",
+              })
+              return
+            }
+            if (
+              provenance.promptHash !==
+              createHash("sha256").update(provenance.prompt).digest("hex")
+            ) {
+              context.addIssue({
+                code: "custom",
+                path: ["samples", index, "judgements", judgementIndex, "provenance", "promptHash"],
+                message: "judgement prompt hash does not match the saved full prompt",
+              })
+            }
+            if (
+              provenance.schemaHash !==
+              createHash("sha256").update(provenance.responseSchema).digest("hex")
+            ) {
+              context.addIssue({
+                code: "custom",
+                path: ["samples", index, "judgements", judgementIndex, "provenance", "schemaHash"],
+                message: "judgement schema hash does not match the saved response schema",
+              })
+            }
           })
         }
       }
