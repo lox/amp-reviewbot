@@ -37,6 +37,13 @@ const nameSchema = z
     /^(?!.*(?:\.\.|\.lock$))[a-z0-9](?:[a-z0-9._-]*[a-z0-9_-])?$/i,
     "must be a simple name safe for Git references",
   )
+const githubRepositorySchema = z
+  .string()
+  .max(140)
+  .regex(
+    /^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?\/[a-z0-9._-]{1,100}$/i,
+    "must be a GitHub owner/repository name",
+  )
 const relativePathSchema = z.string().min(1).max(1_000).superRefine((value, context) => {
   if (value.startsWith("/") || value.split(/[\\/]/).includes("..")) {
     context.addIssue({ code: "custom", message: "must stay inside the example directory" })
@@ -106,7 +113,7 @@ export const exampleSchema = z
     split: exampleSplitSchema.optional(),
     source: z
       .object({
-        repository: z.string().regex(/^[^/]+\/[^/]+$/),
+        repository: githubRepositorySchema,
         pullRequest: z.number().int().positive(),
         baseCommit: shaSchema,
         context: pullRequestContextSchema,
@@ -684,7 +691,7 @@ Run these commands from the repository:
 set -euo pipefail
 find . -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
 git init
-git remote add origin '${sourceRemote}'
+git remote add origin ${shellQuote(sourceRemote)}
 git fetch --depth=${baseFetchDepth} origin ${baseCommit}
 printf '%s' '${bundleBase64}' | base64 --decode > '${temporaryBundle}'
 git bundle verify '${temporaryBundle}'
@@ -704,6 +711,10 @@ Use only this checked-out source snapshot and the pull-request context in the pr
   } finally {
     await rm(temporaryDirectory, { recursive: true, force: true })
   }
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`
 }
 
 async function git(

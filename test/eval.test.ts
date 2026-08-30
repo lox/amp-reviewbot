@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { execFile, type ChildProcessWithoutNullStreams } from "node:child_process"
 import { createHash, randomBytes } from "node:crypto"
 import { EventEmitter } from "node:events"
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { PassThrough } from "node:stream"
@@ -185,6 +185,20 @@ describe("eval example packs", () => {
     }
   })
 
+  it("rejects repository names that are not safe GitHub owner/repository names", async () => {
+    const input = JSON.parse(await readFile("eval/example.json", "utf8")) as {
+      source: { repository: string }
+    }
+    for (const repository of [
+      "owner/repository/extra",
+      "owner with spaces/repository",
+      "owner/repository'; touch escaped",
+    ]) {
+      input.source.repository = repository
+      assert.throws(() => exampleSchema.parse(input), /GitHub owner\/repository name/)
+    }
+  })
+
   it("rejects a known issue outside the exact changed lines", () => {
     const invalid = evalCase("blocking", blocking)
     invalid.expected.issues[0]!.changedLine = 999
@@ -300,6 +314,27 @@ describe("eval example packs", () => {
       await assert.rejects(
         loadPack(fixture.pack, fixture.cache, () => fixture.origin),
         /must point to a line changed by the synthetic commit/,
+      )
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  it("shell-quotes custom source URLs in the preparation block", async () => {
+    const fixture = await createPackFixture()
+    const quotedOrigin = join(fixture.root, "origin'quoted.git")
+    try {
+      await rename(fixture.origin, quotedOrigin)
+      const loaded = await loadPack(fixture.pack, fixture.cache, () => quotedOrigin)
+      const preparation = loaded.sourcePreparation.get("local-example/serious-bug")!
+      assert.match(preparation, /git remote add origin '.*'"'"'.*'/)
+
+      const prepared = join(fixture.root, "prepared-quoted-origin")
+      await mkdir(prepared)
+      await runSourcePreparation(preparation, prepared)
+      assert.equal(
+        (await git(prepared, ["rev-parse", "HEAD"])).trim(),
+        loaded.corpus.cases[1]!.headSha,
       )
     } finally {
       await rm(fixture.root, { recursive: true, force: true })
@@ -721,6 +756,31 @@ Use only this checked-out source snapshot.`
         sourcePreparation,
       ),
       ["review continuation changed the isolated workspace"],
+    )
+    assert.deepEqual(
+      auditEvidenceBoundary(
+        [toolMessage("functions.Task", { prompt: "Search GitHub for later fixes" })],
+        undefined,
+      ),
+      ["used delegated tool functions.Task without an auditable nested trace"],
+    )
+    for (const command of [
+      "python -c 'import requests; requests.get(target)'",
+      "python - <<'PY'\nimport urllib.request\nurllib.request.urlopen(target)\nPY",
+      "node -e 'fetch(target)'",
+      "npm view example-package version",
+      "ssh example.com git show HEAD",
+    ]) {
+      assert.deepEqual(auditEvidenceBoundary([toolMessage("shell_command", { command })], undefined), [
+        "ran an external network command",
+      ])
+    }
+    assert.deepEqual(
+      auditEvidenceBoundary(
+        [toolMessage("shell_command", { command: "rg -n 'ssh|requests|npm view' src" })],
+        undefined,
+      ),
+      [],
     )
   })
 })

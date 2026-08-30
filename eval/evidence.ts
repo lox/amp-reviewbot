@@ -51,6 +51,13 @@ export function auditEvidenceBoundary(
       if (/web|librarian|thread|github/.test(tool)) {
         violations.add(`used external-source tool ${content.name}`)
       }
+      if (
+        /(?:^|[^a-z])(?:task|subagent|delegate|delegation|agent|oracle)(?:$|[^a-z])/.test(
+          tool,
+        )
+      ) {
+        violations.add(`used delegated tool ${content.name} without an auditable nested trace`)
+      }
       if (!("input" in content) || !content.input || typeof content.input !== "object") continue
       const input = content.input as Record<string, unknown>
       const serializedInput = JSON.stringify(input)
@@ -79,9 +86,9 @@ export function auditEvidenceBoundary(
       if (
         segments.some(
           (segment) =>
-            /\b(?:curl|wget|gh)\b|https?:\/\//i.test(segment) &&
+            isExternalNetworkCommand(segment) &&
             !isApprovedSourceCommand(segment, sourcePreparation),
-        )
+        ) || isIndirectNetworkCommand(command)
       ) {
         violations.add("ran an external network command")
       }
@@ -146,6 +153,44 @@ export function auditEvidenceBoundary(
   return [...violations]
 }
 
+function isExternalNetworkCommand(command: string): boolean {
+  const invocation = shellInvocation(command)
+  if (
+    (invocation && /^(?:amp|curl|wget|gh|ssh|scp|sftp)$/i.test(invocation.executable)) ||
+    /https?:\/\//i.test(command)
+  ) {
+    return true
+  }
+  return isIndirectNetworkCommand(command)
+}
+
+function isIndirectNetworkCommand(command: string): boolean {
+  const invocation = shellInvocation(command)
+  if (!invocation) return false
+  if (
+    /^(?:npx|bunx)$/i.test(invocation.executable) ||
+    (/^(?:npm|pnpm|yarn|bun)$/i.test(invocation.executable) &&
+      /^\s+(?:add|audit|ci|dlx|exec|fund|i|info|install|outdated|pack|ping|publish|search|update|view)\b/i.test(
+        invocation.args,
+      ))
+  ) {
+    return true
+  }
+  return (
+    /^(?:node|python\d*|ruby)$/i.test(invocation.executable) &&
+    /\b(?:fetch|http\.client|https?|net\.connect|open-uri|requests|socket|urllib)\b/i.test(command)
+  )
+}
+
+function shellInvocation(command: string): { executable: string; args: string } | undefined {
+  const match = /^(?:(?:then|do|else|command|exec|nohup)\s+|(?:env|sudo)(?:\s+-\S+)*\s+|[a-z_][a-z0-9_]*=\S+\s+)*(?:\S*\/)?([a-z0-9_.+-]+)([\s\S]*)$/i.exec(
+    command.trim(),
+  )
+  return match?.[1] && match[2] !== undefined
+    ? { executable: match[1], args: match[2] }
+    : undefined
+}
+
 export function sourcePreparationFromPrompt(prompt: string): string | undefined {
   return /<source-preparation>\n([\s\S]*?)\n<\/source-preparation>/.exec(prompt)?.[1]
 }
@@ -160,10 +205,43 @@ function isApprovedSourceCommand(command: string, sourcePreparation: string | un
 }
 
 function shellCommandSegments(command: string): string[] {
-  return command
-    .split(/\n|&&|\|\||[;|]/)
-    .map((segment) => segment.trim())
-    .filter(Boolean)
+  const segments: string[] = []
+  let start = 0
+  let quote: "'" | '"' | undefined
+  let escaped = false
+  for (let index = 0; index < command.length; index += 1) {
+    const character = command[index]!
+    if (escaped) {
+      escaped = false
+      continue
+    }
+    if (character === "\\" && quote !== "'") {
+      escaped = true
+      continue
+    }
+    if (quote) {
+      if (character === quote) quote = undefined
+      continue
+    }
+    if (character === "'" || character === '"') {
+      quote = character
+      continue
+    }
+    const width =
+      character === "\n" || character === ";" || character === "|"
+        ? command[index + 1] === character
+          ? 2
+          : 1
+        : character === "&" && command[index + 1] === "&"
+          ? 2
+          : 0
+    if (width === 0) continue
+    segments.push(command.slice(start, index).trim())
+    index += width - 1
+    start = index + 1
+  }
+  segments.push(command.slice(start).trim())
+  return segments.filter(Boolean)
 }
 
 function sourcePreparationCommand(sourcePreparation: string): string | undefined {
