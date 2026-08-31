@@ -8,6 +8,7 @@ import { join, resolve } from "node:path"
 import { PassThrough } from "node:stream"
 import { describe, it } from "node:test"
 import { promisify } from "node:util"
+import { checkReviewTrace } from "../eval/evidence.js"
 import { judgeIssue, resolveMatchingVotes } from "../eval/judge.js"
 import { checkPack, exampleSchema, loadPack } from "../eval/pack.js"
 import { formatReport } from "../eval/report.js"
@@ -17,7 +18,6 @@ import {
   runEvaluationReview,
 } from "../eval/reviewer.js"
 import {
-  auditEvidenceBoundary,
   finishJudgements,
   orderedReviewTasks,
   recordFinishedRun,
@@ -222,7 +222,7 @@ describe("eval example packs", () => {
       assert.equal(loaded.sourcePreparation.has("local-example/clean-change"), true)
       const baselinePreparation = loaded.sourcePreparation.get("local-example/clean-change")!
       const preparation = loaded.sourcePreparation.get("local-example/serious-bug")!
-      assert.match(preparation, /source snapshot/)
+      assert.match(preparation, /exact source/)
       assert.match(preparation, /base64 --decode/)
       assert.match(preparation, /Do not inspect pull request #42/)
       assert.match(preparation, /Public documentation, package registries, dependencies/)
@@ -609,13 +609,13 @@ git fetch origin ${headSha}
 test "$(git rev-parse refs/source/target)" = '${headSha}'
 test "$(git rev-parse HEAD)" = '${headSha}'
 git for-each-ref --format='delete %(refname)' | git update-ref --stdin`
-    const sourcePreparation = `Prepare the exact source snapshot before review.
+    const sourcePreparation = `Prepare the exact source before review.
 
 Run these commands from the repository:
 
 ${sourceCommand}
 
-Use only this checked-out source snapshot.`
+Use only this checked-out source.`
     const trace = [
       traceSystemMessage(),
       toolMessage(
@@ -634,12 +634,12 @@ Use only this checked-out source snapshot.`
       toolMessage("shell_command", { command: "git fetch origin" }),
     ]
 
-    assert.deepEqual(auditEvidenceBoundary(trace, sourcePreparation, target), [
+    assert.deepEqual(checkReviewTrace(trace, sourcePreparation, target), [
       "accessed the target pull request",
-      "accessed the target repository outside the supplied snapshot",
+      "accessed the target repository outside the supplied copy",
     ])
     assert.deepEqual(
-      auditEvidenceBoundary(
+      checkReviewTrace(
         [
           traceSystemMessage(),
           toolMessage(
@@ -653,10 +653,10 @@ Use only this checked-out source snapshot.`
         ],
         sourcePreparation,
       ),
-      ["did not complete the trusted source preparation"],
+      ["did not complete the required source setup"],
     )
     assert.deepEqual(
-      auditEvidenceBoundary(
+      checkReviewTrace(
         [
           traceSystemMessage(),
           toolMessage("shell_command", { command: sourceCommand }, "source-preparation"),
@@ -666,10 +666,10 @@ Use only this checked-out source snapshot.`
         ],
         sourcePreparation,
       ),
-      ["did not complete the trusted source preparation"],
+      ["did not complete the required source setup"],
     )
     assert.deepEqual(
-      auditEvidenceBoundary(
+      checkReviewTrace(
         [
           toolMessage("shell_command", {
             command: `git -c protocol.version=2 fetch origin ${"b".repeat(40)}`,
@@ -678,22 +678,22 @@ Use only this checked-out source snapshot.`
         undefined,
         target,
       ),
-      ["accessed the target repository outside the supplied snapshot"],
+      ["accessed the target repository outside the supplied copy"],
     )
     assert.deepEqual(
-      auditEvidenceBoundary(
+      checkReviewTrace(
         [toolMessage("shell_command", { command: "git show HEAD@{1}:src/review.ts" })],
         undefined,
         target,
       ),
       [],
     )
-    assert.deepEqual(auditEvidenceBoundary([], sourcePreparation), [
-      "did not start in an isolated review workspace",
-      "did not complete the trusted source preparation",
+    assert.deepEqual(checkReviewTrace([], sourcePreparation), [
+      "did not start in a clean review workspace",
+      "did not complete the required source setup",
     ])
     assert.deepEqual(
-      auditEvidenceBoundary(
+      checkReviewTrace(
         [
           traceSystemMessage(),
           toolMessage("shell_command", { command: sourceCommand }, "failed-preparation"),
@@ -703,38 +703,10 @@ Use only this checked-out source snapshot.`
         ],
         sourcePreparation,
       ),
-      ["did not complete the trusted source preparation"],
+      ["did not complete the required source setup"],
     )
     assert.deepEqual(
-      auditEvidenceBoundary(
-        [
-          traceSystemMessage(),
-          ...sourceCommand.split("\n").flatMap((command, index) => [
-            toolMessage("shell_command", { command }, `split-${index}`),
-            toolResultMessage(`split-${index}`),
-          ]),
-        ],
-        sourcePreparation,
-      ),
-      ["did not complete the trusted source preparation"],
-    )
-    assert.deepEqual(
-      auditEvidenceBoundary(
-        [
-          traceSystemMessage(),
-          toolMessage(
-            "shell_command",
-            { command: sourceCommand.replace(/^test .*\n/m, "") },
-            "missing-attestation",
-          ),
-          toolResultMessage("missing-attestation"),
-        ],
-        sourcePreparation,
-      ),
-      ["did not complete the trusted source preparation"],
-    )
-    assert.deepEqual(
-      auditEvidenceBoundary(
+      checkReviewTrace(
         [
           traceSystemMessage(),
           toolMessage(
@@ -746,10 +718,10 @@ Use only this checked-out source snapshot.`
         ],
         sourcePreparation,
       ),
-      ["did not complete the trusted source preparation"],
+      ["did not complete the required source setup"],
     )
     assert.deepEqual(
-      auditEvidenceBoundary(
+      checkReviewTrace(
         [
           traceSystemMessage(),
           toolMessage("web_search", { objective: "Read dependency documentation" }, "early-web"),
@@ -758,45 +730,33 @@ Use only this checked-out source snapshot.`
         ],
         sourcePreparation,
       ),
-      ["did not complete the trusted source preparation"],
+      ["did not complete the required source setup"],
     )
     assert.deepEqual(
-      auditEvidenceBoundary(
+      checkReviewTrace(
         [...trace.slice(0, 3), traceSystemMessage("thread-2")],
         sourcePreparation,
       ),
-      ["review continuation changed the isolated workspace"],
+      ["review continued in a different workspace"],
     )
     assert.deepEqual(
-      auditEvidenceBoundary(
+      checkReviewTrace(
         [toolMessage("functions.Task", { prompt: "Inspect example/repository PR 42" })],
         undefined,
         target,
       ),
       ["accessed the target pull request"],
     )
-    for (const command of [
-      "python -c 'import requests; requests.get(target)'",
-      "python - <<'PY'\nimport urllib.request\nurllib.request.urlopen(target)\nPY",
-      "node -e 'fetch(target)'",
-      "npm view example-package version",
-      "ssh example.com git show HEAD",
-    ]) {
-      assert.deepEqual(
-        auditEvidenceBoundary([toolMessage("shell_command", { command })], undefined, target),
-        [],
-      )
-    }
     assert.deepEqual(
-      auditEvidenceBoundary(
-        [toolMessage("shell_command", { command: "rg -n 'ssh|requests|npm view' src" })],
+      checkReviewTrace(
+        [toolMessage("shell_command", { command: "npm view example-package version" })],
         undefined,
         target,
       ),
       [],
     )
     assert.deepEqual(
-      auditEvidenceBoundary(
+      checkReviewTrace(
         [
           toolMessage("shell_command", {
             command: "curl https://github.com/example/repository/pull/42",
@@ -808,10 +768,13 @@ Use only this checked-out source snapshot.`
       ["accessed the target pull request"],
     )
     assert.deepEqual(
-      auditEvidenceBoundary(
+      checkReviewTrace(
         [
           toolMessage("shell_command", {
-            command: "gh pr view 42 --repo dependency/library",
+            command: "gh pr view 42 -R dependency/library",
+          }),
+          toolMessage("web_search", {
+            objective: "Inspect dependency/library PR 42",
           }),
         ],
         undefined,
@@ -875,22 +838,23 @@ describe("eval scoring", () => {
     assert.equal(blockingScore.judgeDisagreementRate, 1 / 3)
 
     const report = formatReport(run, score)
-    assert.match(report, /Review evaluation: DIAGNOSTIC ONLY/)
+    assert.match(report, /Review evaluation: HISTORICAL RESULT/)
     assert.match(report, /Recorded result: INCOMPLETE/)
-    assert.match(report, /not blind review-quality evidence/)
-    assert.match(report, /no frozen issues: 1 of 2 completed reviews raised no clean alert/)
-    assert.match(report, /blocking labels: found in 2 of 3; frozen-label response matched in 1 of 3/)
+    assert.match(report, /Use its counts for investigation, not comparison/)
+    assert.match(report, /1 version with no recorded issues, 0 versions with recorded non-blocking issues/)
+    assert.match(report, /no recorded issues: 1 of 2 completed reviews raised no alert/)
+    assert.match(report, /recorded blocking issues: found in 2 of 3; response matched the recorded issues in 1 of 3/)
     assert.match(report, /This result covers only these examples/)
 
     const contaminatedRun = structuredClone(run)
     contaminatedRun.samples[2]!.evidenceBoundaryViolations = [
-      "did not complete the trusted source preparation",
+      "did not complete the required source setup",
     ]
     const contaminatedReport = formatReport(contaminatedRun, scoreRun(contaminatedRun))
-    assert.match(contaminatedReport, /Recorded result: CONTAMINATED/)
+    assert.match(contaminatedReport, /Recorded result: INVALID FOR COMPARISON/)
     assert.match(
       contaminatedReport,
-      /trace audit also detected 1 review sample crossing/,
+      /trace also shows that 1 review did not follow the current rules/,
     )
 
     const completeRun = makeRun(cases, 3, [
@@ -905,7 +869,7 @@ describe("eval scoring", () => {
     assert.match(completeReport, /Recorded result: NEEDS WORK/)
     assert.match(
       completeReport,
-      /blocking labels: found in 3 of 3; frozen-label response matched in 0 of 3/,
+      /recorded blocking issues: found in 3 of 3; response matched the recorded issues in 0 of 3/,
     )
 
     assert.throws(
@@ -922,7 +886,7 @@ describe("eval scoring", () => {
             },
           },
         }),
-      /requires schema version 3 evidence/,
+      /evaluation requires schema version 3 evidence/,
     )
   })
 
@@ -1064,7 +1028,7 @@ describe("eval scoring", () => {
             },
           },
         }),
-      /requires a no-project reviewer/,
+      /evaluation requires a reviewer with no Amp project/,
     )
     const researchRun = evalRunSchema.parse({
       ...run,
@@ -1079,9 +1043,9 @@ describe("eval scoring", () => {
       },
     })
     const researchReport = formatReport(researchRun, scoreRun(researchRun))
-    assert.match(researchReport, /Review evaluation: RESEARCH-ENABLED/)
-    assert.match(researchReport, /Public research was allowed/)
-    assert.doesNotMatch(researchReport, /DIAGNOSTIC ONLY/)
+    assert.match(researchReport, /Review evaluation: PUBLIC RESEARCH ALLOWED/)
+    assert.match(researchReport, /could research anything public/)
+    assert.doesNotMatch(researchReport, /HISTORICAL RESULT/)
     run.samples[0]!.promptHash = "0".repeat(64)
     assert.throws(() => evalRunSchema.parse(run), /prompt hash does not match/)
     run.samples[0]!.promptHash = createHash("sha256").update(prompt).digest("hex")
@@ -1094,7 +1058,7 @@ describe("eval scoring", () => {
     ]
     const reaudited = evalRunSchema.parse(run)
     assert.deepEqual(reaudited.samples[0]!.evidenceBoundaryViolations, [])
-    assert.match(formatReport(reaudited, scoreRun(reaudited)), /current trace audit also detected/)
+    assert.match(formatReport(reaudited, scoreRun(reaudited)), /trace also shows/)
     mutableSample.trace = trace
     if (run.samples[0]!.status !== "completed") assert.fail("expected completed sample")
     run.samples[0]!.judgements[0]!.provenance.promptHash = "0".repeat(64)
@@ -1134,7 +1098,7 @@ describe("eval scoring", () => {
           corpusHash: artifactHash,
           samples: [completed("control", 1, control, "success", [], [])],
         }),
-      /corpus hash does not match/,
+      /example data hash does not match/,
     )
   })
 

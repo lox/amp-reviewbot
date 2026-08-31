@@ -350,14 +350,14 @@ export const evalRunSchema = z
         context.addIssue({
           code: "custom",
           path: ["schemaVersion"],
-          message: "the research-enabled protocol requires schema version 3 evidence",
+          message: "this evaluation requires schema version 3 evidence",
         })
       }
       if (run.reviewer.project !== null) {
         context.addIssue({
           code: "custom",
           path: ["reviewer", "project"],
-          message: "the research-enabled protocol requires a no-project reviewer",
+          message: "this evaluation requires a reviewer with no Amp project",
         })
       }
       if (
@@ -367,7 +367,7 @@ export const evalRunSchema = z
         context.addIssue({
           code: "custom",
           path: ["reviewer", "account"],
-          message: "the research-enabled protocol requires a separate reviewer API key",
+          message: "this evaluation requires a separate reviewer API key",
         })
       }
     }
@@ -409,7 +409,7 @@ export const evalRunSchema = z
       context.addIssue({
         code: "custom",
         path: ["corpusHash"],
-        message: "corpus hash does not match the embedded cases",
+        message: "example data hash does not match the embedded cases",
       })
     }
 
@@ -430,7 +430,7 @@ export const evalRunSchema = z
         context.addIssue({
           code: "custom",
           path: ["samples", index, "expected"],
-          message: "sample expectation does not match its corpus case",
+          message: "sample expectation does not match its example",
         })
       }
       if (sample.status === "completed") {
@@ -447,7 +447,7 @@ export const evalRunSchema = z
         context.addIssue({
           code: "custom",
           path: ["samples", index],
-          message: "schema version 3 requires the full prompt, trace, phase timings, and evidence audit",
+          message: "schema version 3 requires the full prompt, trace, phase timings, and trace check",
         })
       }
       if (run.schemaVersion === 3 && sample.prompt !== undefined) {

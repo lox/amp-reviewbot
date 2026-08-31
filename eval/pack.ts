@@ -688,7 +688,7 @@ async function createSourcePreparation(
       baseFetchDepth = Math.max(baseFetchDepth, Number.parseInt(count.trim(), 10) + 1)
     }
 
-    return `Prepare the exact source snapshot before review. The transfer contains Git source objects only. Run the complete fail-fast block below as one shell command.
+    return `Prepare the exact source before review. The transfer contains Git source objects only. Run the complete setup block below as one shell command; stop if any command fails.
 
 Run these commands from the repository:
 
@@ -711,7 +711,7 @@ test "$(git rev-parse HEAD)" = '${headCommit}'
 test "$(git rev-parse refs/source/base)" = '${baseCommit}'
 test "$(git rev-parse refs/source/target)" = '${headCommit}'
 
-Use only this checked-out source snapshot for ${targetRepository}. Do not inspect pull request #${pullNumber} through GitHub pages, APIs, reviews, comments, or checks. Do not clone, fetch, or inspect another copy of ${targetRepository}; the supplied repository is frozen at the review point. Public documentation, package registries, dependencies, and repositories other than ${targetRepository} are allowed. Apply the same restriction to any delegated research.`
+Use only this checked-out source for ${targetRepository}. Do not inspect pull request #${pullNumber} through GitHub pages, APIs, reviews, comments, or checks. Do not clone, fetch, or inspect another copy of ${targetRepository}; the supplied repository contains the code as it was at the review point. Public documentation, package registries, dependencies, and repositories other than ${targetRepository} are allowed. Apply the same restriction to any delegated research.`
   } finally {
     await rm(temporaryDirectory, { recursive: true, force: true })
   }

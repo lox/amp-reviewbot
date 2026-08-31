@@ -8,7 +8,7 @@ import { z } from "zod"
 import { buildReviewPrompt, finalizeReview, parseReviewResult, reviewThreadTitle } from "../src/review.js"
 import type { ReviewFinding, ReviewJob } from "../src/types.js"
 import { reviewMode } from "../src/worker.js"
-import { auditEvidenceBoundary } from "./evidence.js"
+import { checkReviewTrace } from "./evidence.js"
 import { judgeIssue } from "./judge.js"
 import { checkPack, describePack, loadPack } from "./pack.js"
 import { formatReport } from "./report.js"
@@ -200,7 +200,7 @@ async function runEvaluation(
     samples,
   })
   await onReviewsCompleted(reviewedRun)
-  console.log("Checking retained findings against the frozen labels...")
+  console.log("Checking review findings against the recorded issues...")
   const { run: judgedRun } = await finishJudgements(
     reviewedRun,
     {
@@ -342,6 +342,12 @@ async function runReviewSample(
   const job = evalJob(evalCase, sample)
   const prompt = buildReviewPrompt(job, sourcePreparation)
   const promptHash = hash(prompt)
+  const target = {
+    repository: evalCase.repositoryFullName,
+    pullNumber: evalCase.pullNumber,
+    baseSha: evalCase.baseSha,
+    headSha: evalCase.headSha,
+  }
 
   try {
     const review = await runEvaluationReview({
@@ -355,12 +361,7 @@ async function runReviewSample(
     trace = review.trace
     models = [...new Set([...review.models, ...modelsFromTrace(trace)])]
     const reviewDurationMs = Date.now() - startedAt
-    const evidenceBoundaryViolations = auditEvidenceBoundary(trace, sourcePreparation, {
-      repository: evalCase.repositoryFullName,
-      pullNumber: evalCase.pullNumber,
-      baseSha: evalCase.baseSha,
-      headSha: evalCase.headSha,
-    })
+    const evidenceBoundaryViolations = checkReviewTrace(trace, sourcePreparation, target)
     if (review.status === "error") {
       return {
         caseId: evalCase.id,
@@ -418,12 +419,7 @@ async function runReviewSample(
       reviewDurationMs,
       matchingDurationMs: 0,
       trace,
-      evidenceBoundaryViolations: auditEvidenceBoundary(trace, sourcePreparation, {
-        repository: evalCase.repositoryFullName,
-        pullNumber: evalCase.pullNumber,
-        baseSha: evalCase.baseSha,
-        headSha: evalCase.headSha,
-      }),
+      evidenceBoundaryViolations: checkReviewTrace(trace, sourcePreparation, target),
       status: "error",
       error: errorMessage(error),
     }
@@ -518,11 +514,11 @@ async function mapConcurrent<Input, Output>(
 function runOptions(args: string[]): RunOptions {
   const packPath = requiredInput(args, "--corpus")
   if (flag(args, "--project")) {
-    throw new Error("Remove --project; evaluation reviews now use clean no-project orbs")
+    throw new Error("Remove --project; evaluation reviews now run without an Amp project")
   }
   if (process.env.AMP_API_KEY) {
     throw new Error(
-      "Unset AMP_API_KEY; evaluation uses the authenticated local Amp CLI. Set AMP_EVAL_REVIEWER_API_KEY only to override review-orb authentication.",
+      "Unset AMP_API_KEY; the evaluation uses the authenticated local Amp CLI to compare findings. Set AMP_EVAL_REVIEWER_API_KEY for the separate reviewer account.",
     )
   }
   const reviewerApiKey = process.env.AMP_EVAL_REVIEWER_API_KEY
@@ -627,8 +623,6 @@ function modelsFromTrace(trace: unknown[]): string[] {
   return [...models]
 }
 
-export { auditEvidenceBoundary } from "./evidence.js"
-
 function artifactHash(value: Buffer): string {
   return `sha256:${createHash("sha256").update(value).digest("hex")}`
 }
@@ -692,8 +686,8 @@ async function installedSdkVersion(): Promise<string> {
 
 function kindLabel(evalCase: EvalCase): string {
   const kind = expectedKind(evalCase.expected)
-  if (kind === "control") return "no frozen issues"
-  return kind === "advisory" ? "advisory labels" : "blocking labels"
+  if (kind === "control") return "no recorded issues"
+  return kind === "advisory" ? "recorded non-blocking issues" : "recorded blocking issues"
 }
 
 function formatDuration(milliseconds: number): string {
@@ -709,7 +703,7 @@ function printHelp(): void {
   npm run eval -- finish RUN.json [--concurrency 2]
   npm run eval -- report RUN.json
 
-Run research-enabled reviews against a frozen target repository, validate a pack, finish interrupted comparisons, or read a saved report. Running reviews requires AMP_EVAL_REVIEWER_API_KEY for a separate account that cannot access the example pack.`)
+Run reviews with public research against a fixed copy of the target repository, validate an example pack, finish interrupted comparisons, or read a saved report. Running reviews requires AMP_EVAL_REVIEWER_API_KEY for a separate account that cannot access the example pack.`)
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {

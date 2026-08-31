@@ -1,35 +1,35 @@
 import type { EvalCase, EvalRun, EvalSample } from "./schema.js"
 import { expectedKind } from "./schema.js"
 import type { EvalScore } from "./score.js"
-import { auditEvidenceBoundary, sourcePreparationFromPrompt } from "./evidence.js"
+import { checkReviewTrace, sourcePreparationFromPrompt } from "./evidence.js"
 
 export function formatReport(run: EvalRun, score: EvalScore): string {
-  const boundaryViolations = contaminationCount(run)
-  const researchEnabled = run.reviewer.protocol === "research-enabled-target-frozen"
-  const lines = researchEnabled
+  const traceProblems = traceProblemCount(run)
+  const usesCurrentRules = run.reviewer.protocol === "research-enabled-target-frozen"
+  const lines = usesCurrentRules
     ? [
-        "Review evaluation: RESEARCH-ENABLED",
-        `Recorded result: ${reportVerdict(score, boundaryViolations)}`,
-        "Public research was allowed, but the reviewer was required to use only the supplied snapshot for the target repository and not inspect the target pull request.",
+        "Review evaluation: PUBLIC RESEARCH ALLOWED",
+        `Recorded result: ${reportVerdict(score, traceProblems)}`,
+        "The reviewer could research anything public except this pull request and another copy or later version of the target repository.",
         "",
       ]
     : [
-        "Review evaluation: DIAGNOSTIC ONLY",
-        `Recorded result: ${reportVerdict(score, boundaryViolations)}`,
-        "Reviewer egress was not isolated at execution time, so these counts are not blind review-quality evidence.",
+        "Review evaluation: HISTORICAL RESULT",
+        `Recorded result: ${reportVerdict(score, traceProblems)}`,
+        "This older run allowed access to the target pull request and repository history. Use its counts for investigation, not comparison.",
         "",
       ]
   const counts = countKinds(run.cases)
   const seedCounts = countSeedOutcomes(score)
   lines.push(
-    `${countLabel(score.seeds.length, "pull-request seed")}: ${seedCounts.pass} pass, ${seedCounts.unstable} unstable, ${seedCounts.fail} fail.`,
-    `${countLabel(counts.control, "version with no frozen issue")}, ${countLabel(counts.advisory, "version with advisory label")}, and ${countLabel(counts.blocking, "version with blocking label")}.`,
+    `${countLabel(score.seeds.length, "pull-request example")}: ${seedCounts.pass} pass, ${seedCounts.unstable} unstable, ${seedCounts.fail} fail.`,
+    `${versionCount(counts.control, "with no recorded issues")}, ${versionCount(counts.advisory, "with recorded non-blocking issues")}, and ${versionCount(counts.blocking, "with recorded blocking issues")}.`,
     `Each was reviewed ${run.requestedSamplesPerCase} ${run.requestedSamplesPerCase === 1 ? "time" : "times"}. ${completionSentence(run, score)}`,
-    "A seed vote matches only when every version finds every frozen issue at the correct blocking threshold and raises no alert on a version with no frozen issues.",
+    "One repeat passes only when every version finds every recorded issue with the right urgency and raises no alert on a version with no recorded issues.",
   )
-  if (boundaryViolations > 0) {
+  if (traceProblems > 0) {
     lines.push(
-      `${boundaryViolations} review ${boundaryViolations === 1 ? "sample crossed" : "samples crossed"} the declared target-source boundary; treat this run as contaminated.`,
+      `${traceProblems} review ${traceProblems === 1 ? "did" : "runs did"} not follow the source setup or target repository rules. This run is not valid for comparison.`,
     )
   }
 
@@ -54,7 +54,7 @@ export function formatReport(run: EvalRun, score: EvalScore): string {
     const seed = seedScores.get(cases[0]!.seedId)!
     lines.push(
       "",
-      `Example ${exampleNumber} (pull request #${cases[0]!.pullNumber}): ${seed.outcome.toUpperCase()} (${seed.passedSamples}/${seed.samples} seed votes matched)`,
+      `Example ${exampleNumber} (pull request #${cases[0]!.pullNumber}): ${seed.outcome.toUpperCase()} (${seed.passedSamples}/${seed.samples} repeats passed)`,
     )
     for (const evalCase of cases) {
       const caseScore = scores.get(evalCase.id)
@@ -66,7 +66,7 @@ export function formatReport(run: EvalRun, score: EvalScore): string {
   lines.push(
     "",
     "Bottom line",
-    `  ${bottomLine(run, score, boundaryViolations, researchEnabled)}`,
+    `  ${bottomLine(run, score, traceProblems, usesCurrentRules)}`,
     "",
   )
   lines.push(
@@ -92,6 +92,10 @@ function countLabel(count: number, singular: string): string {
   return `${count} ${singular}${count === 1 ? "" : "s"}`
 }
 
+function versionCount(count: number, description: string): string {
+  return `${count} ${count === 1 ? "version" : "versions"} ${description}`
+}
+
 function completionSentence(run: EvalRun, score: EvalScore): string {
   const completed = rateCount(score.operationalCompletion, run.samples.length)
   return completed === run.samples.length
@@ -113,14 +117,15 @@ function caseResult(
         : "Version"
   const completed = rateCount(score.operationalCompletion, score.samples)
   if (kind === "control") {
-    if (completed === 0) return `${role}, no frozen issues: no reviews completed`
+    if (completed === 0) return `${role}, no recorded issues: no reviews completed`
     const cleanAlerts = rateCount(score.cleanAlertRate, completed)
-    return `${role}, no frozen issues: ${completed - cleanAlerts} of ${completed} completed reviews raised no clean alert`
+    return `${role}, no recorded issues: ${completed - cleanAlerts} of ${completed} completed reviews raised no alert`
   }
   const opportunities = score.samples * score.knownIssues
   const found = rateCount(score.issueDetectionRate, opportunities)
   const rightResponse = rateCount(score.groundedConclusionAgreement, score.samples)
-  const label = kind === "advisory" ? "advisory labels" : "blocking labels"
+  const label =
+    kind === "advisory" ? "recorded non-blocking issues" : "recorded blocking issues"
   const retainedFindings = samples.reduce(
     (total, sample) =>
       total + (sample.status === "completed" ? sample.retainedResult.findings.length : 0),
@@ -135,11 +140,11 @@ function caseResult(
     score.knownIssues === 1
       ? `found in ${found} of ${score.samples}`
       : `${found} of ${opportunities} known issues found`
-  return `${role}, ${label}: ${foundText}; frozen-label response matched in ${rightResponse} of ${score.samples}${otherFindingsText}`
+  return `${role}, ${label}: ${foundText}; response matched the recorded issues in ${rightResponse} of ${score.samples}${otherFindingsText}`
 }
 
-function reportVerdict(score: EvalScore, boundaryViolations: number): string {
-  if (boundaryViolations > 0) return "CONTAMINATED"
+function reportVerdict(score: EvalScore, traceProblems: number): string {
+  if (traceProblems > 0) return "INVALID FOR COMPARISON"
   if (score.seeds.length === 0) return "INCOMPLETE"
   if (
     score.operationalCompletion < 1 ||
@@ -155,17 +160,17 @@ function reportVerdict(score: EvalScore, boundaryViolations: number): string {
 function bottomLine(
   run: EvalRun,
   score: EvalScore,
-  boundaryViolations: number,
-  researchEnabled: boolean,
+  traceProblems: number,
+  usesCurrentRules: boolean,
 ): string {
-  if (boundaryViolations > 0) {
-    return researchEnabled
-      ? `This run is contaminated because a saved or current trace audit detected ${boundaryViolations} review ${boundaryViolations === 1 ? "sample crossing" : "sample crossings"} of the target-source boundary.`
-      : `This run is diagnostic only because reviewer egress was not execution-isolated. A saved or current trace audit also detected ${boundaryViolations} review ${boundaryViolations === 1 ? "sample crossing" : "sample crossings"} of the declared source-evidence boundary.`
+  if (traceProblems > 0) {
+    return usesCurrentRules
+      ? `${traceProblems} review ${traceProblems === 1 ? "did" : "runs did"} not follow the source setup or target repository rules, so this run cannot be compared with other runs.`
+      : `This historical run is for investigation only. Its trace also shows that ${traceProblems} review ${traceProblems === 1 ? "did" : "runs did"} not follow the current rules.`
   }
-  const scopePrefix = researchEnabled
-    ? "Within the research-enabled target-frozen protocol,"
-    : "Because reviewer egress was not execution-isolated, this historical run is diagnostic only;"
+  const scopePrefix = usesCurrentRules
+    ? "Under these review rules,"
+    : "For investigation only;"
   if (score.operationalCompletion < 1) {
     return `${scopePrefix} some reviews did not finish, so the recorded counts are incomplete.`
   }
@@ -207,7 +212,7 @@ function bottomLine(
   const observations: string[] = []
   if (cleanAlerts > 0) {
     observations.push(
-      `The reviewer raised ${cleanAlerts} ${cleanAlerts === 1 ? "alert" : "alerts"} on versions with no frozen issues; these require source checking before they can be called unsupported.`,
+      `The reviewer raised ${cleanAlerts} ${cleanAlerts === 1 ? "alert" : "alerts"} on versions with no recorded issues; check the source before deciding whether those alerts were wrong.`,
     )
   }
   if (unmatchedFindings > 0) {
@@ -217,7 +222,7 @@ function bottomLine(
   }
   if (bugsFound < bugReviews) {
     observations.push(
-      `The reviewer did not match the frozen issue in ${bugReviews - bugsFound} of ${bugReviews} labeled-issue reviews.`,
+      `The reviewer missed a recorded issue in ${bugReviews - bugsFound} of ${bugReviews} reviews of versions with issues.`,
     )
   } else if (rightResponses < bugVersionReviews) {
     observations.push(
@@ -229,7 +234,7 @@ function bottomLine(
     : `${scopePrefix} the reviewer handled every recorded example correctly.`
 }
 
-function contaminationCount(run: EvalRun): number {
+function traceProblemCount(run: EvalRun): number {
   const cases = new Map(run.cases.map((evalCase) => [evalCase.id, evalCase]))
   return run.samples.filter((sample) => {
     const saved = sample.evidenceBoundaryViolations ?? []
@@ -237,7 +242,7 @@ function contaminationCount(run: EvalRun): number {
     const current =
       sample.trace === undefined || sample.prompt === undefined
         ? []
-        : auditEvidenceBoundary(sample.trace, sourcePreparationFromPrompt(sample.prompt), {
+        : checkReviewTrace(sample.trace, sourcePreparationFromPrompt(sample.prompt), {
             repository: evalCase.repositoryFullName,
             pullNumber: evalCase.pullNumber,
             baseSha: evalCase.baseSha,
