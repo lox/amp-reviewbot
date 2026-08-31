@@ -908,21 +908,6 @@ describe("eval scoring", () => {
       /blocking labels: found in 3 of 3; frozen-label response matched in 0 of 3/,
     )
 
-    const researchRun = evalRunSchema.parse({
-      ...completeRun,
-      reviewer: {
-        ...completeRun.reviewer,
-        protocol: "research-enabled-target-frozen",
-        account: {
-          authentication: "reviewer-api-key",
-          reviewerIdHash: artifactHash,
-        },
-      },
-    })
-    const researchReport = formatReport(researchRun, scoreRun(researchRun))
-    assert.match(researchReport, /Review evaluation: RESEARCH-ENABLED/)
-    assert.match(researchReport, /Public research was allowed/)
-    assert.doesNotMatch(researchReport, /DIAGNOSTIC ONLY/)
     assert.throws(
       () =>
         evalRunSchema.parse({
@@ -930,9 +915,14 @@ describe("eval scoring", () => {
           reviewer: {
             ...completeRun.reviewer,
             protocol: "research-enabled-target-frozen",
+            project: null,
+            account: {
+              authentication: "reviewer-api-key",
+              reviewerIdHash: artifactHash,
+            },
           },
         }),
-      /requires a separate reviewer API key/,
+      /requires schema version 3 evidence/,
     )
   })
 
@@ -1061,6 +1051,37 @@ describe("eval scoring", () => {
       samples: [sample],
     }
     assert.doesNotThrow(() => evalRunSchema.parse(run))
+    assert.throws(
+      () =>
+        evalRunSchema.parse({
+          ...run,
+          reviewer: {
+            ...run.reviewer,
+            protocol: "research-enabled-target-frozen",
+            account: {
+              authentication: "reviewer-api-key",
+              reviewerIdHash: artifactHash,
+            },
+          },
+        }),
+      /requires a no-project reviewer/,
+    )
+    const researchRun = evalRunSchema.parse({
+      ...run,
+      reviewer: {
+        ...run.reviewer,
+        project: null,
+        protocol: "research-enabled-target-frozen",
+        account: {
+          authentication: "reviewer-api-key",
+          reviewerIdHash: artifactHash,
+        },
+      },
+    })
+    const researchReport = formatReport(researchRun, scoreRun(researchRun))
+    assert.match(researchReport, /Review evaluation: RESEARCH-ENABLED/)
+    assert.match(researchReport, /Public research was allowed/)
+    assert.doesNotMatch(researchReport, /DIAGNOSTIC ONLY/)
     run.samples[0]!.promptHash = "0".repeat(64)
     assert.throws(() => evalRunSchema.parse(run), /prompt hash does not match/)
     run.samples[0]!.promptHash = createHash("sha256").update(prompt).digest("hex")

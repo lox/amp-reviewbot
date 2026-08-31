@@ -345,16 +345,31 @@ export const evalRunSchema = z
   })
   .strict()
   .superRefine((run, context) => {
-    if (
-      run.reviewer.protocol === "research-enabled-target-frozen" &&
-      (!("authentication" in run.reviewer.account) ||
-        run.reviewer.account.authentication !== "reviewer-api-key")
-    ) {
-      context.addIssue({
-        code: "custom",
-        path: ["reviewer", "account"],
-        message: "the research-enabled protocol requires a separate reviewer API key",
-      })
+    if (run.reviewer.protocol === "research-enabled-target-frozen") {
+      if (run.schemaVersion !== 3) {
+        context.addIssue({
+          code: "custom",
+          path: ["schemaVersion"],
+          message: "the research-enabled protocol requires schema version 3 evidence",
+        })
+      }
+      if (run.reviewer.project !== null) {
+        context.addIssue({
+          code: "custom",
+          path: ["reviewer", "project"],
+          message: "the research-enabled protocol requires a no-project reviewer",
+        })
+      }
+      if (
+        !("authentication" in run.reviewer.account) ||
+        run.reviewer.account.authentication !== "reviewer-api-key"
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["reviewer", "account"],
+          message: "the research-enabled protocol requires a separate reviewer API key",
+        })
+      }
     }
     if (run.schemaVersion === 3) {
       for (const field of ["judgeTimeoutMs", "reviewsCompletedAt", "orderSeed", "executionOrder"] as const) {
