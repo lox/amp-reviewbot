@@ -14,7 +14,7 @@ import { checkPack, describePack, loadPack } from "./pack.js"
 import { formatReport } from "./report.js"
 import {
   reviewAuthentication,
-  runBlindReview,
+  runEvaluationReview,
   type ReviewAuthentication,
 } from "./reviewer.js"
 import {
@@ -30,12 +30,10 @@ import { scoreRun, type EvalScore } from "./score.js"
 
 const execFileAsync = promisify(execFile)
 const failOn = "high" as const
-const blindRunUnavailable =
-  "Blind evaluation runs are disabled: the current Amp orb executor cannot enforce the required external-evidence boundary. Use `eval check` to validate a pack or `eval report` to inspect an existing diagnostic artifact."
 
 type RunOptions = {
   packPath: string
-  reviewerApiKey?: string
+  reviewerApiKey: string
   outputPath: string
   judgeCache: string
   sourceCache: string
@@ -66,7 +64,6 @@ async function main(): Promise<void> {
     return
   }
   if (command === "run") {
-    requireBlindExecutor()
     const options = runOptions(process.argv.slice(3))
     await mkdir(dirname(options.outputPath), { recursive: true })
     const output = await createRunArtifact(options.outputPath)
@@ -131,19 +128,11 @@ async function main(): Promise<void> {
   if (command && command !== "help" && command !== "--help") process.exitCode = 1
 }
 
-function requireBlindExecutor(): void {
-  throw new Error(blindRunUnavailable)
-}
-
 async function runEvaluation(
   options: RunOptions,
   onReviewsCompleted: (run: EvalRun) => Promise<void>,
 ): Promise<{ run: EvalRun; score: EvalScore }> {
-  console.log(
-    options.reviewerApiKey
-      ? "Checking the review account key..."
-      : "Using the authenticated local Amp CLI for reviews and matching...",
-  )
+  console.log("Checking the separate review account key...")
   const account = await reviewAuthentication(options.reviewerApiKey)
   console.log("Checking source commits and changed lines...")
   const loaded = await loadPack(options.packPath, options.sourceCache)
@@ -355,18 +344,23 @@ async function runReviewSample(
   const promptHash = hash(prompt)
 
   try {
-    const review = await runBlindReview({
+    const review = await runEvaluationReview({
       prompt,
       title: reviewThreadTitle(job),
       timeoutMs: options.timeoutMs,
       signal: controller.signal,
-      ...(options.reviewerApiKey ? { apiKey: options.reviewerApiKey } : {}),
+      apiKey: options.reviewerApiKey,
     })
     threadId = review.threadId
     trace = review.trace
     models = [...new Set([...review.models, ...modelsFromTrace(trace)])]
     const reviewDurationMs = Date.now() - startedAt
-    const evidenceBoundaryViolations = auditEvidenceBoundary(trace, sourcePreparation)
+    const evidenceBoundaryViolations = auditEvidenceBoundary(trace, sourcePreparation, {
+      repository: evalCase.repositoryFullName,
+      pullNumber: evalCase.pullNumber,
+      baseSha: evalCase.baseSha,
+      headSha: evalCase.headSha,
+    })
     if (review.status === "error") {
       return {
         caseId: evalCase.id,
@@ -424,7 +418,12 @@ async function runReviewSample(
       reviewDurationMs,
       matchingDurationMs: 0,
       trace,
-      evidenceBoundaryViolations: auditEvidenceBoundary(trace, sourcePreparation),
+      evidenceBoundaryViolations: auditEvidenceBoundary(trace, sourcePreparation, {
+        repository: evalCase.repositoryFullName,
+        pullNumber: evalCase.pullNumber,
+        baseSha: evalCase.baseSha,
+        headSha: evalCase.headSha,
+      }),
       status: "error",
       error: errorMessage(error),
     }
@@ -492,6 +491,7 @@ async function reviewerProvenance(account: ReviewAuthentication): Promise<EvalRu
     ),
     methodologyHash: hash(methodology),
     project: null,
+    protocol: "research-enabled-target-frozen",
     account,
   }
 }
@@ -527,6 +527,11 @@ function runOptions(args: string[]): RunOptions {
   }
   const reviewerApiKey = process.env.AMP_EVAL_REVIEWER_API_KEY
   delete process.env.AMP_EVAL_REVIEWER_API_KEY
+  if (!reviewerApiKey) {
+    throw new Error(
+      "Set AMP_EVAL_REVIEWER_API_KEY to a separate account that cannot access the example pack",
+    )
+  }
 
   const samplesPerCase = positiveInteger(flag(args, "--samples") ?? "3", "--samples", 20)
   const concurrency = positiveInteger(flag(args, "--concurrency") ?? "2", "--concurrency", 10)
@@ -548,7 +553,7 @@ function runOptions(args: string[]): RunOptions {
   }
   return {
     packPath,
-    ...(reviewerApiKey ? { reviewerApiKey } : {}),
+    reviewerApiKey,
     outputPath: flag(args, "--output") ?? resolve(".eval-runs", `${stamp}.json`),
     judgeCache: resolve(cacheRoot, "judge"),
     sourceCache: resolve(cacheRoot, "source"),
@@ -700,10 +705,11 @@ function formatDuration(milliseconds: number): string {
 function printHelp(): void {
   console.log(`Usage:
   npm run eval -- check PACK
+  npm run eval -- run PACK [--samples 3] [--concurrency 2] [--split development|holdout]
   npm run eval -- finish RUN.json [--concurrency 2]
   npm run eval -- report RUN.json
 
-Check an example pack, finish interrupted comparisons in an existing diagnostic artifact, or read a saved report. New review runs are disabled until the reviewer executor can enforce the external-evidence boundary.`)
+Run research-enabled reviews against a frozen target repository, validate a pack, finish interrupted comparisons, or read a saved report. Running reviews requires AMP_EVAL_REVIEWER_API_KEY for a separate account that cannot access the example pack.`)
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {

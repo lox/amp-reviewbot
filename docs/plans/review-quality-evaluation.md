@@ -4,7 +4,7 @@
 
 Give us a fast, credible way to improve amp-reviewbot without pretending an LLM is deterministic or comparing review prose.
 
-**Status:** pack validation and diagnostic artifact reporting are implemented. New review runs are disabled because the current Amp orb executor does not enforce reviewer egress or per-run tool restrictions. A trace audit cannot substitute for that execution boundary.
+**Status:** pack validation, research-enabled review runs, evidence retention, scoring, and offline reporting are implemented. The reviewer gets production-like public research access but must use only the supplied frozen snapshot for the target repository and must not inspect the target pull request. This is an instructed and audited protocol, not an adversarial security boundary.
 
 For each exact code version, measure:
 
@@ -41,7 +41,7 @@ Approval, merge, draft status, and silence are never labels. A baseline must be 
 
 ## Run path
 
-This path is a blocked target design, not an enabled command:
+The enabled run path is:
 
 ```text
 private example pack on the trusted machine
@@ -61,31 +61,29 @@ Production and evaluation share:
 - retry and JSON parsing behavior; and
 - changed-line filtering and conclusion calculation.
 
-The target design does not call GitHub, publish Checks, use production queueing, or give corpus credentials to a review orb.
+The runner does not publish Checks, use production queueing, or give corpus credentials to a review orb.
 
 The trusted runner verifies any delivered Git bundle, then makes a fresh source-only bundle for every target, public or private. Every review starts in a clean no-project orb with an empty workspace and receives the same neutral preparation block and reference names. The preparation creates a repository containing only the exact public base and target history, checks out the exact head, and removes the Git remote. Project setup, repository instructions, prior refs, reflogs, and future objects are never loaded. Known issues and focused tests do not enter the transfer.
 
-The reviewer would be instructed to run the complete fail-fast preparation block as one shell command, then use only that snapshot and the frozen pull-request context. Full traces can diagnose skipped or altered preparation and obvious boundary crossings, but shell wrappers and arbitrary child processes make a blacklist incomplete. Therefore `run` exits before credentials, pack loading, artifact creation, or model execution until the boundary is enforced by the executor.
+The reviewer runs the complete fail-fast preparation block as its first successful tool call, then uses only that snapshot for the target repository. It is explicitly prohibited from inspecting the target pull request through GitHub pages or APIs, or from cloning, fetching, or inspecting another copy of the target repository. Public documentation, package registries, dependencies, other repositories, and delegated research that preserves this restriction are allowed.
 
-Re-enabling requires trusted pre-review source materialization, default-deny egress for every reviewer-controlled process, disabled external and delegation tools, a clean no-project filesystem, a separate account unable to access labels, and adversarial denial tests covering direct clients, wrappers, interpreters, Git, package managers, background processes, and delegation. Only then can the result be described as a protocol-blind estimate on the frozen corpus.
+Full traces diagnose skipped or altered preparation and observable target-source lookups. A violation marks the run contaminated. This audit cannot detect every concealed lookup through arbitrary child processes. We accept that possibility as a deliberate trade-off for parity with the research-capable environment available to a real reviewbot run. The benchmark measures a cooperative research-enabled reviewer, not resistance to deliberate benchmark cheating, and must not be described as adversarially blind.
 
 The runner rejects a generated source-only transfer over 64 KiB. This keeps repeated reviews bounded and makes an oversized synthetic example a clear pack error instead of an unexpectedly slow or expensive run.
 
 ## Account boundary
 
-In the blocked target design, the example pack stays with the trusted account. The trusted process and matching orbs use the authenticated local Amp CLI.
-
-When runs are re-enabled, review orbs can use that same CLI login for diagnostics, but this does not prove that the reviewer is isolated from the answers. Blind evidence also requires a separate review identity:
+The example pack stays with the trusted account. The trusted process and matching orbs use the authenticated local Amp CLI. Reviews require a separate identity:
 
 - `AMP_EVAL_REVIEWER_API_KEY`: separate review account, used only by the review child process.
 
-The runner can validate that key and store only a hash of its Amp user ID. The review child can get a new empty home directory and an allowlisted environment while matching continues through the local login. This account separation is necessary but not sufficient without enforced egress and tool isolation.
+The runner validates that key and stores only a hash of its Amp user ID. The review child gets a new empty home directory and an allowlisted environment while matching continues through the local login. Before a run, the operator must confirm that the review identity cannot access the private example pack.
 
-When runs are re-enabled, `AMP_API_KEY` must remain rejected so it cannot silently replace the local CLI login. Two projects owned by the same account are not an isolation boundary.
+`AMP_API_KEY` is rejected so it cannot silently replace the local CLI login. Two projects owned by the same account are not an account boundary.
 
 ## Repeated runs
 
-Once an enforced executor exists, run each version independently three times in reproducibly shuffled repeat blocks. Each block contains every selected version once, and the artifact records the random seed and exact start order. Do not average review text. Score each run as facts such as “issue found” and “right final result,” then aggregate at the pull-request seed.
+Run each version independently three times in reproducibly shuffled repeat blocks. Each block contains every selected version once, and the artifact records the random seed and exact start order. Do not average review text. Score each run as facts such as “issue found” and “right final result,” then aggregate at the pull-request seed.
 
 Use a rule chosen before seeing results:
 
@@ -110,7 +108,7 @@ The main report answers:
 - was the final response appropriately urgent; and
 - were repeated runs stable?
 
-Existing saved JSON keeps exact commits, context, changed lines, every complete review and matching prompt, matching response schemas, full SDK tool traces, model IDs, raw output, filtered findings, conclusions, matching votes, code hashes, separate review/matching timing, execution order, a diagnostic trace audit, and errors. Re-reading a saved report makes no model or network calls. Reports label these artifacts `DIAGNOSTIC ONLY` because reviewer egress was not execution-isolated. The artifact is private and potentially sensitive.
+Saved JSON keeps exact commits, context, changed lines, every complete review and matching prompt, matching response schemas, full SDK tool traces, model IDs, raw output, filtered findings, conclusions, matching votes, code hashes, separate review/matching timing, execution order, the protocol identifier, a target-source audit, and errors. Re-reading a saved report makes no model or network calls. New runs report `RESEARCH-ENABLED`; a target-source violation makes their recorded result `CONTAMINATED`. Historical artifacts without the new protocol identifier remain `DIAGNOSTIC ONLY`. The artifact is private and potentially sensitive.
 
 If matching fails after reviews finish, `npm run eval -- finish RUN.json` retries only the missing matches through the local CLI login. It writes a new file, preserves the original review evidence and timing, and records the exact hash of the source file. It does not rerun reviews or use the separate review-account key.
 
@@ -124,14 +122,12 @@ The pilot remains separate because its outcomes have already been observed. The 
 
 Because LLMs create and check most labels, report agreement with the labeled examples, not “true accuracy.” Audit every unmatched finding before classifying it. If a review finds a real bug missing from the pack, repair the baseline label (and repeat it in both synthetic versions) rather than count the finding as a false alarm. Keep this later source adjudication separate from the frozen metrics.
 
-## Before enabling the first run
+## Before a run
 
-1. Add an executor that enforces the network, tool, filesystem, and account boundaries listed above.
-2. Prove the enforcement with adversarial canary commands and retain the denial evidence.
-3. Materialize the exact source before any model-controlled action.
-4. Keep the example pack private and confirm the reviewer identity cannot access it.
-5. Freeze the corpus, split, prompts, mode, repeat count, and matching rules before running a development sample.
-6. Ask for explicit confirmation before any smoke, development, or holdout run.
+1. Keep the example pack private and confirm the separate reviewer identity cannot access it.
+2. Validate that each supplied snapshot has only the permitted base and target histories and no remote.
+3. Freeze the corpus, split, prompts, mode, repeat count, and matching rules before running a development sample.
+4. Ask for explicit confirmation before any smoke, development, or holdout run.
 
 ## Verification
 
@@ -143,5 +139,5 @@ Because LLMs create and check most labels, report agreement with the labeled exa
 - Saved runs reject altered corpus evidence, invalid finding indexes, conclusions that do not follow from raw production output, review or matching prompt/schema hash drift, missing full prompts/traces, phase-timing drift, and execution-order drift. They preserve the original audit while reports apply the current audit separately, so improved detection does not make an unchanged artifact unreadable.
 - Interrupted matching can finish into a new traceable result without changing or rerunning saved reviews.
 - One finding cannot earn recall for two known issues.
-- The disabled `run` command exits before creating an artifact or making a model call.
-- Before re-enabling `run`, adversarial canaries prove that reviewer-controlled processes cannot access external evidence.
+- A run requires a separate review-account key and records the research-enabled target-frozen protocol.
+- Public dependency and documentation research is allowed, while observable access to the target PR or an external copy of the target repository is marked contaminated.

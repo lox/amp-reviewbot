@@ -318,6 +318,7 @@ export const evalRunSchema = z
       reviewSourceHash: z.string(),
       methodologyHash: z.string(),
       project: z.string().min(1).nullable(),
+      protocol: z.literal("research-enabled-target-frozen").optional(),
       account: z.union([
         z
           .object({
@@ -344,6 +345,17 @@ export const evalRunSchema = z
   })
   .strict()
   .superRefine((run, context) => {
+    if (
+      run.reviewer.protocol === "research-enabled-target-frozen" &&
+      (!("authentication" in run.reviewer.account) ||
+        run.reviewer.account.authentication !== "reviewer-api-key")
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["reviewer", "account"],
+        message: "the research-enabled protocol requires a separate reviewer API key",
+      })
+    }
     if (run.schemaVersion === 3) {
       for (const field of ["judgeTimeoutMs", "reviewsCompletedAt", "orderSeed", "executionOrder"] as const) {
         if (run[field] === undefined) {

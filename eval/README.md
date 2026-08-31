@@ -27,21 +27,17 @@ A human-review example has one exact pre-fix version. A synthetic example has a 
 
 The runner calculates changed lines from the exact Git diff. It does not store a second hand-written copy. It also calculates the expected `success`, `neutral`, or `failure` result from issue severity at `FAIL_ON=high`.
 
-## Blind execution is currently unavailable
+## Research-enabled execution
 
-`npm run eval -- run` deliberately exits before reading credentials, loading a pack, creating an artifact, or starting a model. The current Amp orb executor gives reviewer-controlled processes outbound network access and ignores per-run SDK permissions and tool restrictions. A tool trace can reveal many boundary crossings, but it cannot prove that external evidence was inaccessible.
+The evaluation deliberately gives the reviewer the same research-capable environment as a production review. It can consult public documentation, package registries, dependencies, and other repositories. This improves production parity but means the protocol is not adversarially blind.
 
-Existing artifacts remain readable, but reports label them `DIAGNOSTIC ONLY`. An empty `evidenceBoundaryViolations` list means only that the retained trace audit detected no crossing; it is not blind review-quality evidence.
+The narrower rule is that the reviewer must use only the supplied snapshot for the target repository. It must not inspect the target pull request through GitHub pages or APIs, and must not clone, fetch, or inspect another copy of the target repository. The supplied Git repository contains only the exact base and reviewed commit histories, with no remote, later commits, other branches, or evaluation labels.
 
-Blind runs can be enabled only when a reviewer executor provides all of these controls:
+The full trace is audited for observable violations of that rule. A violation marks the run contaminated. The instruction and audit are not a security boundary: a sufficiently determined reviewer could conceal a lookup through an arbitrary child process. We accept that risk as a trade-off for evaluating the reviewer in an environment that matches real reviews. Results therefore measure a cooperative, research-enabled reviewer, not resistance to deliberate benchmark cheating.
 
-- trusted source materialization before model-controlled execution;
-- execution-time default-deny egress for reviewer tools and every child process, while preserving only required Amp control-plane traffic;
-- disabled external-source and delegation tools;
-- a fresh no-project filesystem and separate reviewer identity that cannot access the pack; and
-- adversarial verification that direct clients, shell wrappers, interpreters, Git, package managers, background processes, and delegated tools are denied.
+The example pack, issue cards, witnesses, paired version, and previous results remain private. Review calls require `AMP_EVAL_REVIEWER_API_KEY` from a separate identity that cannot access the pack. The review child receives only that key, an empty home directory, one prepared source snapshot, frozen pull-request context, and the production review instructions. Trusted matching continues through the local CLI login.
 
-The source preparation and trace audit remain in the code as diagnostic evidence and as inputs to a future enforced executor. They do not establish isolation by themselves.
+Historical artifacts created under the earlier unrestricted diagnostic protocol remain readable and continue to report `DIAGNOSTIC ONLY`.
 
 ## Commands
 
@@ -51,9 +47,27 @@ Check the pack's files without starting reviews:
 npm run eval -- check /path/to/review-eval-pack
 ```
 
-New review runs are disabled until the execution boundary above is enforceable. The command fails without creating an output artifact.
+Run development versions three times, with at most two reviews running at once. Holdout examples are excluded by default:
 
-Read an existing diagnostic result without making network or model calls:
+```sh
+export AMP_EVAL_REVIEWER_API_KEY="separate-review-account-key"
+npm run eval -- run /path/to/review-eval-pack \
+  --samples 3 \
+  --concurrency 2
+```
+
+After choosing a candidate reviewer, run only the frozen holdout explicitly:
+
+```sh
+npm run eval -- run /path/to/review-eval-pack \
+  --split holdout \
+  --samples 3 \
+  --concurrency 2
+```
+
+Do not set `AMP_API_KEY`; evaluation uses the authenticated local CLI for trusted matching and rejects an ambient API key. Confirm that the separate review identity cannot access the example pack before running either split.
+
+Read a saved result without making network or model calls:
 
 ```sh
 npm run eval -- report .eval-runs/RUN.json
@@ -69,12 +83,12 @@ This uses the local CLI login and does not use `AMP_EVAL_REVIEWER_API_KEY`. It w
 
 ## Reading the result
 
-A report makes the limitation explicit:
+A new report makes the protocol explicit:
 
 ```text
-Review evaluation: DIAGNOSTIC ONLY
+Review evaluation: RESEARCH-ENABLED
 Recorded result: NEEDS WORK
-Reviewer egress was not isolated at execution time, so these counts are not blind review-quality evidence.
+Public research was allowed, but the reviewer was required to use only the supplied snapshot for the target repository and not inspect the target pull request.
 
 2 pull-request seeds: 1 pass, 1 unstable, 0 fail.
 1 version with no frozen issue, 1 version with an advisory label, and 1 version with a blocking label.
@@ -85,7 +99,7 @@ Example 1 (pull request #1234): PASS (3/3 seed votes matched)
   Introduced-issue version, blocking labels: found in 3 of 3; frozen-label response matched in 3 of 3
 ```
 
-The saved file retains exact commits and context, every complete review and matching prompt, each matching response schema, the full SDK tool trace, model IDs, raw and filtered findings, conclusions, matching votes, separate review/matching timing, execution order, its original diagnostic trace audit, and errors. Reports apply the current audit separately without rejecting an unchanged artifact when detection rules evolve. Treat the file as private and potentially sensitive.
+The saved file retains exact commits and context, every complete review and matching prompt, each matching response schema, the full SDK tool trace, model IDs, raw and filtered findings, conclusions, matching votes, separate review/matching timing, execution order, its original trace audit, and errors. Reports apply the current audit separately without rejecting an unchanged artifact when detection rules evolve. Treat the file as private and potentially sensitive.
 
 The primary unit is the pull-request seed, not an individual version or model call. A synthetic seed vote matches only when its baseline and introduced version both match in the same repeat. Three repeated votes are enough for an iteration check, not a broad accuracy claim: 3 of 3 is a provisional pass, 2 of 3 is unstable, and 0 or 1 needs work. With five predeclared runs, require at least 4 of 5. Never add only favorable reruns.
 

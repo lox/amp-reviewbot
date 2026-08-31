@@ -18,11 +18,11 @@ const inputSchema = z.object({
 async function main(): Promise<void> {
   const input = inputSchema.parse(JSON.parse(await readStdin()))
   const controller = new AbortController()
-  const abort = () => controller.abort(new Error("Blind review was cancelled"))
+  const abort = () => controller.abort(new Error("Evaluation review was cancelled"))
   process.once("SIGTERM", abort)
   process.once("SIGINT", abort)
   const timeout = setTimeout(
-    () => controller.abort(new Error("Blind review timed out")),
+    () => controller.abort(new Error("Evaluation review timed out")),
     input.timeoutMs,
   )
   const models = new Set<string>()
@@ -79,7 +79,7 @@ async function archiveThread(threadId: string): Promise<void> {
       { timeout: 30_000 },
     )
   } catch {
-    process.stderr.write("Warning: a blind review thread could not be archived.\n")
+    process.stderr.write("Warning: an evaluation review thread could not be archived.\n")
   }
 }
 

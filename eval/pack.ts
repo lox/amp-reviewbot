@@ -494,6 +494,8 @@ async function resolveExample(
         version.commit,
         example.source.baseCommit,
         sourceRemote,
+        example.source.repository,
+        example.source.pullRequest,
       ),
     )
   }
@@ -646,6 +648,8 @@ async function createSourcePreparation(
   headCommit: string,
   baseCommit: string,
   sourceRemote: string,
+  targetRepository: string,
+  pullNumber: number,
 ): Promise<string> {
   const temporaryDirectory = await mkdtemp(join(repository, ".git", "source-transfer-"))
   const bundlePath = join(temporaryDirectory, "commit.bundle")
@@ -707,7 +711,7 @@ test "$(git rev-parse HEAD)" = '${headCommit}'
 test "$(git rev-parse refs/source/base)" = '${baseCommit}'
 test "$(git rev-parse refs/source/target)" = '${headCommit}'
 
-Use only this checked-out source snapshot and the pull-request context in the prompt. Do not inspect remote pull-request pages, reviews, comments, checks, issues, external documentation, or commits outside the exact base and head histories.`
+Use only this checked-out source snapshot for ${targetRepository}. Do not inspect pull request #${pullNumber} through GitHub pages, APIs, reviews, comments, or checks. Do not clone, fetch, or inspect another copy of ${targetRepository}; the supplied repository is frozen at the review point. Public documentation, package registries, dependencies, and repositories other than ${targetRepository} are allowed. Apply the same restriction to any delegated research.`
   } finally {
     await rm(temporaryDirectory, { recursive: true, force: true })
   }

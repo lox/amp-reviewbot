@@ -1,10 +1,21 @@
 import { posix } from "node:path"
 
+export type EvidenceTarget = {
+  repository: string
+  pullNumber: number
+  baseSha: string
+  headSha: string
+}
+
 export function auditEvidenceBoundary(
   trace: unknown[],
   sourcePreparation: string | undefined,
+  target?: EvidenceTarget,
 ): string[] {
   const violations = new Set<string>()
+  const requiredPreparation =
+    sourcePreparation === undefined ? undefined : sourcePreparationCommand(sourcePreparation)
+  const initial = systemInit(trace[0])
   const toolUses: Array<{
     id: string
     tool: string
@@ -48,22 +59,9 @@ export function auditEvidenceBoundary(
         continue
       }
       const tool = content.name.toLowerCase()
-      if (/web|librarian|thread|github/.test(tool)) {
-        violations.add(`used external-source tool ${content.name}`)
-      }
-      if (
-        /(?:^|[^a-z])(?:task|subagent|delegate|delegation|agent|oracle)(?:$|[^a-z])/.test(
-          tool,
-        )
-      ) {
-        violations.add(`used delegated tool ${content.name} without an auditable nested trace`)
-      }
       if (!("input" in content) || !content.input || typeof content.input !== "object") continue
       const input = content.input as Record<string, unknown>
       const serializedInput = JSON.stringify(input)
-      if (/AGENTS\.md|SKILL\.md|\.agents\//i.test(serializedInput)) {
-        violations.add("loaded repository or project instructions outside the embedded methodology")
-      }
       const command =
         typeof input.command === "string"
           ? input.command
@@ -81,36 +79,23 @@ export function auditEvidenceBoundary(
             : { workdir: input.workdir ?? input.cwd }),
         })
       }
-      if (!command) continue
-      const segments = shellCommandSegments(command)
-      if (
-        segments.some(
-          (segment) =>
-            isExternalNetworkCommand(segment) &&
-            !isApprovedSourceCommand(segment, sourcePreparation),
-        ) || isIndirectNetworkCommand(command)
+      if (!target || (requiredPreparation !== undefined && command === requiredPreparation)) continue
+      const canAccessExternalEvidence =
+        isExternalSourceTool(tool) || (command !== undefined && isExternalNetworkCommand(command))
+      if (canAccessExternalEvidence && refersToTargetPullRequest(serializedInput, target)) {
+        violations.add("accessed the target pull request")
+      } else if (canAccessExternalEvidence && refersToTargetRepository(serializedInput, target)) {
+        violations.add("accessed the target repository outside the supplied snapshot")
+      } else if (
+        command !== undefined &&
+        accessesPreparedRepositoryNetwork(command) &&
+        isInitialWorkdir(input.workdir ?? input.cwd, initial?.cwd)
       ) {
-        violations.add("ran an external network command")
-      }
-      const unapprovedGitNetwork = segments
-        .filter((segment) => /\bgit\b.*?\b(?:clone|fetch|pull|ls-remote)\b/.test(segment))
-        .some((segment) => !isApprovedSourceCommand(segment, sourcePreparation))
-      if (unapprovedGitNetwork) violations.add("ran an unapproved Git network command")
-      const unapprovedHistoryInspection = segments
-        .filter((segment) =>
-          /(?:\bgit\b.*?\b(?:branch\s+-a|for-each-ref|fsck|reflog|show-ref)\b|\bgit\b.*?\b(?:log|rev-list)\b.*?(?:--all|\bmain\b|\borigin\/)|HEAD@\{)/.test(
-            segment,
-          ),
-        )
-        .some((segment) => !isApprovedSourceCommand(segment, sourcePreparation))
-      if (unapprovedHistoryInspection) {
-        violations.add("inspected source outside the exact review history")
+        violations.add("accessed the target repository outside the supplied snapshot")
       }
     }
   }
   if (sourcePreparation !== undefined) {
-    const required = sourcePreparationCommand(sourcePreparation)
-    const initial = systemInit(trace[0])
     const systems = trace.flatMap((message) => {
       const system = systemInit(message)
       return system ? [system] : []
@@ -136,11 +121,11 @@ export function auditEvidenceBoundary(
       .slice(firstUseIndex + 1, firstResultIndex < 0 ? undefined : firstResultIndex)
       .some(({ type }) => type === "use")
     if (
-      required === undefined ||
+      requiredPreparation === undefined ||
       !initial ||
       !firstTool ||
       !isShellTool(firstTool.tool) ||
-      firstTool.command !== required ||
+      firstTool.command !== requiredPreparation ||
       !isInitialWorkdir(firstTool.workdir, initial.cwd) ||
       firstResultIndex <= firstUseIndex ||
       firstResult?.type !== "result" ||
@@ -153,15 +138,58 @@ export function auditEvidenceBoundary(
   return [...violations]
 }
 
+function isExternalSourceTool(tool: string): boolean {
+  return /web|librarian|thread|github|oracle|task|subagent|delegate|agent/.test(tool)
+}
+
+function refersToTargetPullRequest(value: string, target: EvidenceTarget): boolean {
+  const normalized = value.toLowerCase()
+  const repository = target.repository.toLowerCase()
+  const pull = target.pullNumber.toString()
+  return (
+    normalized.includes(`github.com/${repository}/pull/${pull}`) ||
+    normalized.includes(`${repository}#${pull}`) ||
+    (!namesDifferentRepository(value, repository) &&
+      new RegExp(`(?:pull(?:\\s+request)?|pr)\\s*#?${pull}(?:\\D|$)`, "i").test(value))
+  )
+}
+
+function namesDifferentRepository(value: string, targetRepository: string): boolean {
+  const repositories = [
+    ...value.matchAll(/github\.com[/:]([a-z0-9_.-]+\/[a-z0-9_.-]+)/gi),
+    ...value.matchAll(/--repo(?:sitory)?(?:=|\s+)([a-z0-9_.-]+\/[a-z0-9_.-]+)/gi),
+    ...value.matchAll(/"repository"\s*:\s*"([a-z0-9_.-]+\/[a-z0-9_.-]+)"/gi),
+  ].flatMap((match) => (match[1] ? [match[1].toLowerCase()] : []))
+  return repositories.length > 0 && repositories.every((name) => name !== targetRepository)
+}
+
+function refersToTargetRepository(value: string, target: EvidenceTarget): boolean {
+  const normalized = value.toLowerCase()
+  return (
+    normalized.includes(target.repository.toLowerCase()) ||
+    normalized.includes(target.baseSha.toLowerCase()) ||
+    normalized.includes(target.headSha.toLowerCase())
+  )
+}
+
 function isExternalNetworkCommand(command: string): boolean {
   const invocation = shellInvocation(command)
   if (
     (invocation && /^(?:amp|curl|wget|gh|ssh|scp|sftp)$/i.test(invocation.executable)) ||
+    (invocation &&
+      /^git$/i.test(invocation.executable) &&
+      /\b(?:clone|fetch|pull|ls-remote)\b/i.test(invocation.args)) ||
     /https?:\/\//i.test(command)
   ) {
     return true
   }
   return isIndirectNetworkCommand(command)
+}
+
+function accessesPreparedRepositoryNetwork(command: string): boolean {
+  return shellCommandSegments(command).some((segment) =>
+    /\bgit\b.*?\b(?:fetch|pull)\b/i.test(segment),
+  )
 }
 
 function isIndirectNetworkCommand(command: string): boolean {
@@ -193,15 +221,6 @@ function shellInvocation(command: string): { executable: string; args: string } 
 
 export function sourcePreparationFromPrompt(prompt: string): string | undefined {
   return /<source-preparation>\n([\s\S]*?)\n<\/source-preparation>/.exec(prompt)?.[1]
-}
-
-function isApprovedSourceCommand(command: string, sourcePreparation: string | undefined): boolean {
-  return (
-    sourcePreparation !== undefined &&
-    shellCommandSegments(sourcePreparation)
-      .filter((line) => line.startsWith("git "))
-      .some((approved) => command === approved)
-  )
 }
 
 function shellCommandSegments(command: string): string[] {
@@ -268,10 +287,12 @@ function systemInit(message: unknown): { sessionId: string; cwd: string } | unde
   return { sessionId: message.session_id, cwd: message.cwd }
 }
 
-function isInitialWorkdir(workdir: unknown, initialCwd: string): boolean {
+function isInitialWorkdir(workdir: unknown, initialCwd: string | undefined): boolean {
   return (
-    workdir === undefined ||
-    (typeof workdir === "string" && posix.resolve(initialCwd, workdir) === posix.normalize(initialCwd))
+    initialCwd !== undefined &&
+    (workdir === undefined ||
+      (typeof workdir === "string" &&
+        posix.resolve(initialCwd, workdir) === posix.normalize(initialCwd)))
   )
 }
 

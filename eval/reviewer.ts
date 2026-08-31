@@ -16,7 +16,7 @@ const outputSchema = z.discriminatedUnion("status", [
   z.object({ ...outputFields, status: z.literal("error"), error: z.string() }).strict(),
 ])
 
-export type BlindReviewInput = {
+export type EvaluationReviewInput = {
   prompt: string
   title: string
   timeoutMs: number
@@ -51,8 +51,8 @@ export async function reviewAuthentication(
   }
 }
 
-export async function runBlindReview(
-  input: BlindReviewInput,
+export async function runEvaluationReview(
+  input: EvaluationReviewInput,
   spawnReviewer: SpawnReviewer = spawn,
 ): Promise<z.infer<typeof outputSchema>> {
   input.signal.throwIfAborted()
@@ -87,7 +87,7 @@ export async function runBlindReview(
         childError = error
       })
       child.stdin.once("error", (error) => {
-        inputError = new Error("Could not send review input to the blind reviewer", { cause: error })
+        inputError = new Error("Could not send evaluation review input", { cause: error })
         stopChild()
       })
       child.once("close", (code) => {
@@ -104,7 +104,7 @@ export async function runBlindReview(
                     error:
                       input.signal.reason instanceof Error
                         ? input.signal.reason.message
-                        : String(input.signal.reason ?? "Blind review was cancelled"),
+                        : String(input.signal.reason ?? "Evaluation review was cancelled"),
                     threadId: parsed.threadId,
                     models: parsed.models,
                     trace: parsed.trace,
@@ -118,7 +118,9 @@ export async function runBlindReview(
               return
             }
             if (code === 0) {
-              rejectReview(new Error("Blind reviewer returned an invalid result", { cause: parseError }))
+              rejectReview(
+                new Error("Evaluation reviewer returned an invalid result", { cause: parseError }),
+              )
               return
             }
           }
@@ -136,10 +138,10 @@ export async function runBlindReview(
           return
         }
         if (code !== 0) {
-          rejectReview(new Error(errorMessage || `Blind reviewer exited with status ${code}`))
+          rejectReview(new Error(errorMessage || `Evaluation reviewer exited with status ${code}`))
           return
         }
-        rejectReview(new Error("Blind reviewer returned no result"))
+        rejectReview(new Error("Evaluation reviewer returned no result"))
       })
       child.stdin.end(
         JSON.stringify({

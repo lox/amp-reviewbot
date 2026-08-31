@@ -14,7 +14,7 @@ import { formatReport } from "../eval/report.js"
 import {
   reviewAuthentication,
   reviewerEnvironment,
-  runBlindReview,
+  runEvaluationReview,
 } from "../eval/reviewer.js"
 import {
   auditEvidenceBoundary,
@@ -224,6 +224,8 @@ describe("eval example packs", () => {
       const preparation = loaded.sourcePreparation.get("local-example/serious-bug")!
       assert.match(preparation, /source snapshot/)
       assert.match(preparation, /base64 --decode/)
+      assert.match(preparation, /Do not inspect pull request #42/)
+      assert.match(preparation, /Public documentation, package registries, dependencies/)
       assert.doesNotMatch(
         preparation.replace(/^git remote add origin .*$/m, ""),
         /eval|reviewbot|expected answers|focused tests/i,
@@ -454,7 +456,7 @@ describe("eval example packs", () => {
         return true
       },
     }) as unknown as ChildProcessWithoutNullStreams
-    const review = runBlindReview(
+    const review = runEvaluationReview(
       {
         prompt: "Review this change.",
         title: "Test review",
@@ -487,7 +489,7 @@ describe("eval example packs", () => {
     assert.deepEqual(signals, ["SIGTERM", "SIGKILL"])
 
     child.emit("close", 1, null)
-    await assert.rejects(review, /Could not send review input/)
+    await assert.rejects(review, /Could not send evaluation review input/)
   })
 
   it("returns the complete reviewer trace and model evidence", async () => {
@@ -511,7 +513,7 @@ describe("eval example packs", () => {
         message: { model: "test-model", content: [] },
       },
     ]
-    const review = runBlindReview(
+    const review = runEvaluationReview(
       {
         prompt: "Review this change.",
         title: "Test review",
@@ -593,13 +595,19 @@ describe("eval example packs", () => {
     }
   })
 
-  it("flags external evidence while allowing the exact source setup", () => {
-    const target = "a".repeat(40)
+  it("allows public research but flags access to the target source", () => {
+    const headSha = "a".repeat(40)
+    const target = {
+      repository: "example/repository",
+      pullNumber: 42,
+      baseSha: "b".repeat(40),
+      headSha,
+    }
     const sourceCommand = `set -euo pipefail
 git remote add origin 'https://github.com/example/repository.git'
-git fetch origin ${"a".repeat(40)}
-test "$(git rev-parse refs/source/target)" = '${target}'
-test "$(git rev-parse HEAD)" = '${target}'
+git fetch origin ${headSha}
+test "$(git rev-parse refs/source/target)" = '${headSha}'
+test "$(git rev-parse HEAD)" = '${headSha}'
 git for-each-ref --format='delete %(refname)' | git update-ref --stdin`
     const sourcePreparation = `Prepare the exact source snapshot before review.
 
@@ -619,13 +627,16 @@ Use only this checked-out source snapshot.`
         "source-preparation",
       ),
       toolResultMessage("source-preparation"),
-      toolMessage("web_search", { objective: "Find later fixes" }),
+      toolMessage("web_search", { objective: "Read the dependency API documentation" }),
+      toolMessage("shell_command", { command: "npm view example-package version" }),
+      toolMessage("web_search", { objective: "Inspect example/repository PR 42" }),
       toolMessage("shell_command", { command: "gh pr view 42 --comments" }),
+      toolMessage("shell_command", { command: "git fetch origin" }),
     ]
 
-    assert.deepEqual(auditEvidenceBoundary(trace, sourcePreparation), [
-      "used external-source tool web_search",
-      "ran an external network command",
+    assert.deepEqual(auditEvidenceBoundary(trace, sourcePreparation, target), [
+      "accessed the target pull request",
+      "accessed the target repository outside the supplied snapshot",
     ])
     assert.deepEqual(
       auditEvidenceBoundary(
@@ -665,15 +676,17 @@ Use only this checked-out source snapshot.`
           }),
         ],
         undefined,
+        target,
       ),
-      ["ran an unapproved Git network command"],
+      ["accessed the target repository outside the supplied snapshot"],
     )
     assert.deepEqual(
       auditEvidenceBoundary(
         [toolMessage("shell_command", { command: "git show HEAD@{1}:src/review.ts" })],
         undefined,
+        target,
       ),
-      ["inspected source outside the exact review history"],
+      [],
     )
     assert.deepEqual(auditEvidenceBoundary([], sourcePreparation), [
       "did not start in an isolated review workspace",
@@ -739,16 +752,13 @@ Use only this checked-out source snapshot.`
       auditEvidenceBoundary(
         [
           traceSystemMessage(),
-          toolMessage("web_search", { objective: "Inspect the source" }, "early-web"),
+          toolMessage("web_search", { objective: "Read dependency documentation" }, "early-web"),
           toolMessage("shell_command", { command: sourceCommand }, "source-preparation"),
           toolResultMessage("source-preparation"),
         ],
         sourcePreparation,
       ),
-      [
-        "used external-source tool web_search",
-        "did not complete the trusted source preparation",
-      ],
+      ["did not complete the trusted source preparation"],
     )
     assert.deepEqual(
       auditEvidenceBoundary(
@@ -759,10 +769,11 @@ Use only this checked-out source snapshot.`
     )
     assert.deepEqual(
       auditEvidenceBoundary(
-        [toolMessage("functions.Task", { prompt: "Search GitHub for later fixes" })],
+        [toolMessage("functions.Task", { prompt: "Inspect example/repository PR 42" })],
         undefined,
+        target,
       ),
-      ["used delegated tool functions.Task without an auditable nested trace"],
+      ["accessed the target pull request"],
     )
     for (const command of [
       "python -c 'import requests; requests.get(target)'",
@@ -771,21 +782,47 @@ Use only this checked-out source snapshot.`
       "npm view example-package version",
       "ssh example.com git show HEAD",
     ]) {
-      assert.deepEqual(auditEvidenceBoundary([toolMessage("shell_command", { command })], undefined), [
-        "ran an external network command",
-      ])
+      assert.deepEqual(
+        auditEvidenceBoundary([toolMessage("shell_command", { command })], undefined, target),
+        [],
+      )
     }
     assert.deepEqual(
       auditEvidenceBoundary(
         [toolMessage("shell_command", { command: "rg -n 'ssh|requests|npm view' src" })],
         undefined,
+        target,
+      ),
+      [],
+    )
+    assert.deepEqual(
+      auditEvidenceBoundary(
+        [
+          toolMessage("shell_command", {
+            command: "curl https://github.com/example/repository/pull/42",
+          }),
+        ],
+        undefined,
+        target,
+      ),
+      ["accessed the target pull request"],
+    )
+    assert.deepEqual(
+      auditEvidenceBoundary(
+        [
+          toolMessage("shell_command", {
+            command: "gh pr view 42 --repo dependency/library",
+          }),
+        ],
+        undefined,
+        target,
       ),
       [],
     )
   })
 
-  it("refuses a review run before creating an artifact", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "amp-reviewbot-disabled-eval-"))
+  it("requires a separate review account before creating an artifact", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "amp-reviewbot-eval-auth-"))
     const output = join(directory, "run.json")
     try {
       await assert.rejects(
@@ -796,12 +833,12 @@ Use only this checked-out source snapshot.`
             cwd: resolve("."),
             env: {
               ...process.env,
-              AMP_API_KEY: "must-not-be-read",
-              AMP_EVAL_REVIEWER_API_KEY: "must-not-be-read",
+              AMP_API_KEY: "",
+              AMP_EVAL_REVIEWER_API_KEY: "",
             },
           },
         ),
-        /current Amp orb executor cannot enforce the required external-evidence boundary/,
+        /Set AMP_EVAL_REVIEWER_API_KEY to a separate account/,
       )
       assert.equal(await stat(output).catch(() => null), null)
     } finally {
@@ -869,6 +906,33 @@ describe("eval scoring", () => {
     assert.match(
       completeReport,
       /blocking labels: found in 3 of 3; frozen-label response matched in 0 of 3/,
+    )
+
+    const researchRun = evalRunSchema.parse({
+      ...completeRun,
+      reviewer: {
+        ...completeRun.reviewer,
+        protocol: "research-enabled-target-frozen",
+        account: {
+          authentication: "reviewer-api-key",
+          reviewerIdHash: artifactHash,
+        },
+      },
+    })
+    const researchReport = formatReport(researchRun, scoreRun(researchRun))
+    assert.match(researchReport, /Review evaluation: RESEARCH-ENABLED/)
+    assert.match(researchReport, /Public research was allowed/)
+    assert.doesNotMatch(researchReport, /DIAGNOSTIC ONLY/)
+    assert.throws(
+      () =>
+        evalRunSchema.parse({
+          ...completeRun,
+          reviewer: {
+            ...completeRun.reviewer,
+            protocol: "research-enabled-target-frozen",
+          },
+        }),
+      /requires a separate reviewer API key/,
     )
   })
 
@@ -1005,7 +1069,7 @@ describe("eval scoring", () => {
     run.samples[0]!.durationMs = 10
     const mutableSample = run.samples[0] as { trace: unknown[] }
     mutableSample.trace = [
-      toolMessage("web_search", { objective: "Find later fixes" }),
+      toolMessage("web_search", { objective: "Inspect lox/example PR 42" }),
     ]
     const reaudited = evalRunSchema.parse(run)
     assert.deepEqual(reaudited.samples[0]!.evidenceBoundaryViolations, [])
