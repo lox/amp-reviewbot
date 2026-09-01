@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process"
-import { createHash } from "node:crypto"
-import { mkdir, open, readFile, unlink } from "node:fs/promises"
+import { createHash, randomBytes } from "node:crypto"
+import { mkdir, open, readFile, rename, unlink } from "node:fs/promises"
 import { dirname, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
@@ -8,12 +8,13 @@ import { z } from "zod"
 import { buildReviewPrompt, finalizeReview, parseReviewResult, reviewThreadTitle } from "../src/review.js"
 import type { ReviewFinding, ReviewJob } from "../src/types.js"
 import { reviewMode } from "../src/worker.js"
+import { checkReviewTrace } from "./evidence.js"
 import { judgeIssue } from "./judge.js"
 import { checkPack, describePack, loadPack } from "./pack.js"
 import { formatReport } from "./report.js"
 import {
   reviewAuthentication,
-  runBlindReview,
+  runEvaluationReview,
   type ReviewAuthentication,
 } from "./reviewer.js"
 import {
@@ -32,14 +33,15 @@ const failOn = "high" as const
 
 type RunOptions = {
   packPath: string
-  project: string
-  reviewerApiKey?: string
+  reviewerApiKey: string
   outputPath: string
   judgeCache: string
   sourceCache: string
   samplesPerCase: number
   concurrency: number
   timeoutMs: number
+  judgeTimeoutMs: number
+  orderSeed: string
   split: NonNullable<EvalCase["split"]>
 }
 
@@ -66,15 +68,20 @@ async function main(): Promise<void> {
     await mkdir(dirname(options.outputPath), { recursive: true })
     const output = await createRunArtifact(options.outputPath)
     let complete = false
+    let checkpointed = false
     try {
-      const { run, score } = await runEvaluation(options)
-      await output.writeFile(`${JSON.stringify(run, null, 2)}\n`)
+      const { run, score } = await runEvaluation(options, async (reviewedRun) => {
+        await writeRunArtifact(output, reviewedRun)
+        checkpointed = true
+        console.log(`Review checkpoint: ${options.outputPath}`)
+      })
+      await replaceRunArtifact(options.outputPath, run)
       complete = true
       console.log(`\n${formatReport(run, score)}`)
       console.log(`\nFull results: ${options.outputPath}`)
     } finally {
       await output.close()
-      if (!complete) await unlink(options.outputPath).catch(() => {})
+      if (!complete && !checkpointed) await unlink(options.outputPath).catch(() => {})
     }
     return
   }
@@ -121,12 +128,11 @@ async function main(): Promise<void> {
   if (command && command !== "help" && command !== "--help") process.exitCode = 1
 }
 
-async function runEvaluation(options: RunOptions): Promise<{ run: EvalRun; score: EvalScore }> {
-  console.log(
-    options.reviewerApiKey
-      ? "Checking the review account key..."
-      : "Using the authenticated local Amp CLI for reviews and matching...",
-  )
+async function runEvaluation(
+  options: RunOptions,
+  onReviewsCompleted: (run: EvalRun) => Promise<void>,
+): Promise<{ run: EvalRun; score: EvalScore }> {
+  console.log("Checking the separate review account key...")
   const account = await reviewAuthentication(options.reviewerApiKey)
   console.log("Checking source commits and changed lines...")
   const loaded = await loadPack(options.packPath, options.sourceCache)
@@ -138,13 +144,13 @@ async function runEvaluation(options: RunOptions): Promise<{ run: EvalRun; score
   })
   const sourcePreparation = loaded.sourcePreparation
   const startedAt = new Date().toISOString()
-  const reviewer = await reviewerProvenance(options.project, account)
-  const tasks = corpus.cases.flatMap((evalCase) =>
-    Array.from({ length: options.samplesPerCase }, (_, index) => ({
+  const reviewer = await reviewerProvenance(account)
+  const tasks = orderedReviewTasks(corpus.cases, options.samplesPerCase, options.orderSeed).map(
+    ({ evalCase, sample }) => ({
       evalCase,
       sourcePreparation: sourcePreparation.get(evalCase.id),
-      sample: index + 1,
-    })),
+      sample,
+    }),
   )
   const exampleNumbers = new Map<string, number>()
   for (const evalCase of corpus.cases) {
@@ -155,34 +161,79 @@ async function runEvaluation(options: RunOptions): Promise<{ run: EvalRun; score
   let finished = 0
   console.log(`Running ${tasks.length} reviews, up to ${options.concurrency} at a time...`)
 
-  const samples = await mapConcurrent(
-    tasks,
-    options.concurrency,
-    async ({ evalCase, sourcePreparation: preparation, sample }) => {
-      const result = await runSample(evalCase, preparation, sample, options, reviewer.sdkVersion)
-      finished += 1
-      const outcome = result.status === "completed" ? "completed" : "did not complete"
-      console.log(
-        `[${finished}/${tasks.length}] Example ${exampleNumbers.get(evalCase.seedId)}, ${kindLabel(evalCase)}, run ${sample} of ${options.samplesPerCase}: ${outcome} (${formatDuration(result.durationMs)})`,
-      )
-      return result
-    },
-  )
+  const samples: EvalSample[] = []
+  for (let sampleNumber = 1; sampleNumber <= options.samplesPerCase; sampleNumber += 1) {
+    const block = tasks.filter((task) => task.sample === sampleNumber)
+    samples.push(
+      ...(await mapConcurrent(
+        block,
+        options.concurrency,
+        async ({ evalCase, sourcePreparation: preparation, sample }) => {
+          const result = await runReviewSample(evalCase, preparation, sample, options)
+          finished += 1
+          const outcome = result.status === "completed" ? "completed" : "did not complete"
+          console.log(
+            `[${finished}/${tasks.length}] Example ${exampleNumbers.get(evalCase.seedId)}, ${kindLabel(evalCase)}, run ${sample} of ${options.samplesPerCase}: ${outcome} (${formatDuration(result.durationMs)})`,
+          )
+          return result
+        },
+      )),
+    )
+  }
 
-  const run = evalRunSchema.parse({
-    schemaVersion: 2,
+  const reviewsCompletedAt = new Date().toISOString()
+  const reviewedRun = evalRunSchema.parse({
+    schemaVersion: 3,
     corpusVersion: corpus.version,
     corpusHash: corpusContentHash(corpus),
     startedAt,
-    completedAt: new Date().toISOString(),
+    reviewsCompletedAt,
+    completedAt: reviewsCompletedAt,
     requestedSamplesPerCase: options.samplesPerCase,
     concurrency: options.concurrency,
     timeoutMs: options.timeoutMs,
+    judgeTimeoutMs: options.judgeTimeoutMs,
+    orderSeed: options.orderSeed,
+    executionOrder: tasks.map(({ evalCase, sample }) => ({ caseId: evalCase.id, sample })),
     reviewer,
     cases: corpus.cases,
     samples,
   })
+  await onReviewsCompleted(reviewedRun)
+  console.log("Checking review findings against the recorded issues...")
+  const { run: judgedRun } = await finishJudgements(
+    reviewedRun,
+    {
+      judgeCache: options.judgeCache,
+      concurrency: options.concurrency,
+      timeoutMs: options.judgeTimeoutMs,
+    },
+    reviewer.sdkVersion,
+    judgeIssue,
+    (matched, total, succeeded) => {
+      console.log(
+        `[${matched}/${total}] Finding comparison ${succeeded ? "completed" : "did not complete"}`,
+      )
+    },
+  )
+  const run = evalRunSchema.parse({ ...judgedRun, completedAt: new Date().toISOString() })
   return { run, score: scoreRun(run) }
+}
+
+export function orderedReviewTasks(
+  cases: EvalCase[],
+  samplesPerCase: number,
+  orderSeed: string,
+): Array<{ evalCase: EvalCase; sample: number }> {
+  return Array.from({ length: samplesPerCase }, (_, index) => index + 1).flatMap((sample) =>
+    [...cases]
+      .sort((left, right) => {
+        const leftKey = hash(`${orderSeed}\0${sample}\0${left.id}`)
+        const rightKey = hash(`${orderSeed}\0${sample}\0${right.id}`)
+        return leftKey.localeCompare(rightKey)
+      })
+      .map((evalCase) => ({ evalCase, sample })),
+  )
 }
 
 export function selectCases(
@@ -211,6 +262,7 @@ export async function finishJudgements(
   })
   let finished = 0
   const results = await mapConcurrent(tasks, options.concurrency, async (task) => {
+    const startedAt = Date.now()
     const sample = samples[task.sampleIndex]!
     if (sample.status !== "completed") throw new Error("Expected a completed review sample")
     const findings: ReviewFinding[] = sample.retainedResult.findings.map(
@@ -230,11 +282,11 @@ export async function finishJudgements(
       )
       finished += 1
       onProgress?.(finished, tasks.length, true)
-      return { ...task, judgement }
+      return { ...task, judgement, durationMs: Date.now() - startedAt }
     } catch (error) {
       finished += 1
       onProgress?.(finished, tasks.length, false)
-      return { ...task, error: errorMessage(error) }
+      return { ...task, error: errorMessage(error), durationMs: Date.now() - startedAt }
     }
   })
 
@@ -244,6 +296,10 @@ export async function finishJudgements(
     sample.judgementErrors = sample.judgementErrors.filter(
       (error) => error.issueId !== result.issue.id,
     )
+    if (sourceRun.schemaVersion === 3) {
+      sample.matchingDurationMs = (sample.matchingDurationMs ?? 0) + result.durationMs
+      sample.durationMs += result.durationMs
+    }
     if ("judgement" in result) sample.judgements.push(result.judgement)
     else sample.judgementErrors.push({ issueId: result.issue.id, error: result.error })
   }
@@ -268,12 +324,11 @@ export function recordFinishedRun(
   })
 }
 
-async function runSample(
+async function runReviewSample(
   evalCase: EvalCase,
   sourcePreparation: string | undefined,
   sample: number,
   options: RunOptions,
-  sdkVersion: string,
 ): Promise<EvalSample> {
   const startedAt = Date.now()
   const controller = new AbortController()
@@ -283,72 +338,88 @@ async function runSample(
   )
   let threadId: string | null = null
   let models: string[] = []
-  const job = evalJob(evalCase, sample, options.project)
+  let trace: unknown[] = []
+  const job = evalJob(evalCase, sample)
   const prompt = buildReviewPrompt(job, sourcePreparation)
   const promptHash = hash(prompt)
+  const target = {
+    repository: evalCase.repositoryFullName,
+    pullNumber: evalCase.pullNumber,
+    baseSha: evalCase.baseSha,
+    headSha: evalCase.headSha,
+  }
 
   try {
-    const review = await runBlindReview({
+    const review = await runEvaluationReview({
       prompt,
       title: reviewThreadTitle(job),
-      project: options.project,
       timeoutMs: options.timeoutMs,
       signal: controller.signal,
-      ...(options.reviewerApiKey ? { apiKey: options.reviewerApiKey } : {}),
+      apiKey: options.reviewerApiKey,
     })
     threadId = review.threadId
-    models = review.models
-    const parsedResult = parseReviewResult(review.rawResult)
-    const finalized = finalizeReview(parsedResult, changedLineMap(evalCase), failOn)
-    const judgements = []
-    const judgementErrors = []
-
-    if (finalized.result.findings.length > 0) {
-      for (const issue of evalCase.expected.issues) {
-        try {
-          judgements.push(
-            await judgeIssue(
-              evalCase.id,
-              issue,
-              finalized.result.findings,
-              options.judgeCache,
-              sdkVersion,
-              controller.signal,
-            ),
-          )
-        } catch (error) {
-          controller.signal.throwIfAborted()
-          judgementErrors.push({ issueId: issue.id, error: errorMessage(error) })
-        }
+    trace = review.trace
+    models = [...new Set([...review.models, ...modelsFromTrace(trace)])]
+    const reviewDurationMs = Date.now() - startedAt
+    const evidenceBoundaryViolations = checkReviewTrace(trace, sourcePreparation, target)
+    if (review.status === "error") {
+      return {
+        caseId: evalCase.id,
+        sample,
+        expected: evalCase.expected,
+        promptHash,
+        prompt,
+        threadId,
+        models,
+        durationMs: reviewDurationMs,
+        reviewDurationMs,
+        matchingDurationMs: 0,
+        trace,
+        evidenceBoundaryViolations,
+        status: "error",
+        error: review.error,
       }
     }
+    const parsedResult = parseReviewResult(review.rawResult)
+    const finalized = finalizeReview(parsedResult, changedLineMap(evalCase), failOn)
 
     return {
       caseId: evalCase.id,
       sample,
       expected: evalCase.expected,
       promptHash,
+      prompt,
       threadId,
       models,
-      durationMs: Date.now() - startedAt,
+      durationMs: reviewDurationMs,
+      reviewDurationMs,
+      matchingDurationMs: 0,
+      trace,
+      evidenceBoundaryViolations,
       status: "completed",
       rawResult: review.rawResult,
       parsedResult,
       retainedResult: finalized.result,
       omitted: finalized.omitted,
       conclusion: finalized.conclusion,
-      judgements,
-      judgementErrors,
+      judgements: [],
+      judgementErrors: [],
     }
   } catch (error) {
+    const reviewDurationMs = Date.now() - startedAt
     return {
       caseId: evalCase.id,
       sample,
       expected: evalCase.expected,
       promptHash,
+      prompt,
       threadId,
       models,
-      durationMs: Date.now() - startedAt,
+      durationMs: reviewDurationMs,
+      reviewDurationMs,
+      matchingDurationMs: 0,
+      trace,
+      evidenceBoundaryViolations: checkReviewTrace(trace, sourcePreparation, target),
       status: "error",
       error: errorMessage(error),
     }
@@ -357,7 +428,7 @@ async function runSample(
   }
 }
 
-function evalJob(evalCase: EvalCase, sample: number, project: string): ReviewJob {
+function evalJob(evalCase: EvalCase, sample: number): ReviewJob {
   return {
     id: `eval-${evalCase.id}-${sample}`,
     sourceDeliveryId: `eval-${evalCase.id}-${sample}`,
@@ -368,7 +439,7 @@ function evalJob(evalCase: EvalCase, sample: number, project: string): ReviewJob
     pullNumber: evalCase.pullNumber,
     baseSha: evalCase.baseSha,
     headSha: evalCase.headSha,
-    ampProject: project,
+    ampProject: "no-project",
     pullRequestContext: evalCase.context,
     checkRunId: null,
     ampThreadId: null,
@@ -383,10 +454,7 @@ function changedLineMap(evalCase: EvalCase): Map<string, Set<number>> {
   )
 }
 
-async function reviewerProvenance(
-  project: string,
-  account: ReviewAuthentication,
-): Promise<EvalRun["reviewer"]> {
+async function reviewerProvenance(account: ReviewAuthentication): Promise<EvalRun["reviewer"]> {
   const [
     { stdout: gitCommit },
     { stdout: status },
@@ -418,7 +486,8 @@ async function reviewerProvenance(
       `${reviewSource}\n${workerSource}\n${reviewerSource}\n${reviewerChildSource}`,
     ),
     methodologyHash: hash(methodology),
-    project,
+    project: null,
+    protocol: "research-enabled-target-frozen",
     account,
   }
 }
@@ -444,21 +513,32 @@ async function mapConcurrent<Input, Output>(
 
 function runOptions(args: string[]): RunOptions {
   const packPath = requiredInput(args, "--corpus")
-  const project = flag(args, "--project")
-  if (!project) throw new Error("Missing --project")
+  if (flag(args, "--project")) {
+    throw new Error("Remove --project; evaluation reviews now run without an Amp project")
+  }
   if (process.env.AMP_API_KEY) {
     throw new Error(
-      "Unset AMP_API_KEY; evaluation uses the authenticated local Amp CLI. Set AMP_EVAL_REVIEWER_API_KEY only to override review-orb authentication.",
+      "Unset AMP_API_KEY; the evaluation uses the authenticated local Amp CLI to compare findings. Set AMP_EVAL_REVIEWER_API_KEY for the separate reviewer account.",
     )
   }
   const reviewerApiKey = process.env.AMP_EVAL_REVIEWER_API_KEY
   delete process.env.AMP_EVAL_REVIEWER_API_KEY
+  if (!reviewerApiKey) {
+    throw new Error(
+      "Set AMP_EVAL_REVIEWER_API_KEY to a separate account that cannot access the example pack",
+    )
+  }
 
   const samplesPerCase = positiveInteger(flag(args, "--samples") ?? "3", "--samples", 20)
   const concurrency = positiveInteger(flag(args, "--concurrency") ?? "2", "--concurrency", 10)
   const timeoutMinutes = positiveInteger(
     flag(args, "--timeout-minutes") ?? "30",
     "--timeout-minutes",
+    120,
+  )
+  const judgeTimeoutMinutes = positiveInteger(
+    flag(args, "--judge-timeout-minutes") ?? "30",
+    "--judge-timeout-minutes",
     120,
   )
   const stamp = new Date().toISOString().replaceAll(/[:.]/g, "-")
@@ -469,14 +549,15 @@ function runOptions(args: string[]): RunOptions {
   }
   return {
     packPath,
-    project,
-    ...(reviewerApiKey ? { reviewerApiKey } : {}),
+    reviewerApiKey,
     outputPath: flag(args, "--output") ?? resolve(".eval-runs", `${stamp}.json`),
     judgeCache: resolve(cacheRoot, "judge"),
     sourceCache: resolve(cacheRoot, "source"),
     samplesPerCase,
     concurrency,
     timeoutMs: timeoutMinutes * 60_000,
+    judgeTimeoutMs: judgeTimeoutMinutes * 60_000,
+    orderSeed: flag(args, "--order-seed") ?? randomBytes(16).toString("hex"),
     split,
   }
 }
@@ -530,6 +611,18 @@ function hash(value: string): string {
   return createHash("sha256").update(value).digest("hex")
 }
 
+function modelsFromTrace(trace: unknown[]): string[] {
+  const models = new Set<string>()
+  for (const message of trace) {
+    if (!message || typeof message !== "object" || !("message" in message)) continue
+    const body = message.message
+    if (body && typeof body === "object" && "model" in body && typeof body.model === "string") {
+      models.add(body.model)
+    }
+  }
+  return [...models]
+}
+
 function artifactHash(value: Buffer): string {
   return `sha256:${createHash("sha256").update(value).digest("hex")}`
 }
@@ -549,6 +642,41 @@ async function createRunArtifact(path: string) {
   }
 }
 
+async function writeRunArtifact(
+  output: Awaited<ReturnType<typeof open>>,
+  run: EvalRun,
+): Promise<void> {
+  const contents = Buffer.from(`${JSON.stringify(run, null, 2)}\n`)
+  await output.truncate(0)
+  let offset = 0
+  while (offset < contents.length) {
+    const { bytesWritten } = await output.write(
+      contents,
+      offset,
+      contents.length - offset,
+      offset,
+    )
+    if (bytesWritten === 0) throw new Error("Could not write the run artifact")
+    offset += bytesWritten
+  }
+  await output.truncate(contents.length)
+  await output.sync()
+}
+
+async function replaceRunArtifact(path: string, run: EvalRun): Promise<void> {
+  const temporaryPath = `${path}.${process.pid}-${randomBytes(6).toString("hex")}.tmp`
+  const temporary = await open(temporaryPath, "wx", 0o600)
+  try {
+    await writeRunArtifact(temporary, run)
+    await temporary.close()
+    await rename(temporaryPath, path)
+  } catch (error) {
+    await temporary.close().catch(() => {})
+    await unlink(temporaryPath).catch(() => {})
+    throw error
+  }
+}
+
 async function installedSdkVersion(): Promise<string> {
   const packageJson: unknown = JSON.parse(
     await readFile(resolve("node_modules", "@ampcode", "sdk", "package.json"), "utf8"),
@@ -558,8 +686,8 @@ async function installedSdkVersion(): Promise<string> {
 
 function kindLabel(evalCase: EvalCase): string {
   const kind = expectedKind(evalCase.expected)
-  if (kind === "control") return "clean change"
-  return kind === "advisory" ? "smaller issue" : "serious issue"
+  if (kind === "control") return "no recorded issues"
+  return kind === "advisory" ? "recorded non-blocking issues" : "recorded blocking issues"
 }
 
 function formatDuration(milliseconds: number): string {
@@ -571,11 +699,11 @@ function formatDuration(milliseconds: number): string {
 function printHelp(): void {
   console.log(`Usage:
   npm run eval -- check PACK
-  npm run eval -- run PACK --project PROJECT [--split development|holdout] [--samples 3] [--concurrency 2]
+  npm run eval -- run PACK [--samples 3] [--concurrency 2] [--split development|holdout]
   npm run eval -- finish RUN.json [--concurrency 2]
   npm run eval -- report RUN.json
 
-Check an example pack, run development reviews by default, finish interrupted finding comparisons, or read a saved report. Reviews and matching use the authenticated local Amp CLI. Set AMP_EVAL_REVIEWER_API_KEY only when review orbs should use another account.`)
+Run reviews with public research against a fixed copy of the target repository, validate an example pack, finish interrupted comparisons, or read a saved report. Running reviews requires AMP_EVAL_REVIEWER_API_KEY for a separate account that cannot access the example pack.`)
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {

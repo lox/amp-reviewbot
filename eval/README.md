@@ -2,7 +2,7 @@
 
 This evaluation answers four questions:
 
-1. Does the reviewer leave a clean change alone?
+1. Does the reviewer leave a version with no recorded issues alone?
 2. Does it find each known issue?
 3. Does it use the right urgency?
 4. Does it give the same answer across repeated reviews?
@@ -21,43 +21,29 @@ examples/
     witnesses/              # focused tests; optional
 ```
 
-[`example.json`](example.json) shows the format. It records the exact public pull-request context, whether the example is a pilot, human review, or synthetic change, and whether it is used during development or held back. Each version has a commit and `knownIssues`. A clean version has an empty list. An issue records its cause, visible effect, severity, changed line, category, and how it was checked.
+[`example.json`](example.json) shows the format. It records the exact public pull-request context, whether the example comes from a human review or a deliberately broken change, and whether it is available during development or held back. Each version has a commit and a `knownIssues` list. That list is empty when no issue has been recorded. Each issue includes its cause, visible effect, severity, changed line, category, and verification evidence.
 
-A human-review example has one exact pre-fix version. A synthetic example has one clean version and one direct child commit with a single introduced issue. The labeled line must be changed by that child commit, not merely by the original pull request. Behavioral defects and maintainability advisories are recorded separately; duplication and non-idiomatic Go are advisories rather than behavioral bugs.
+A human-review example has one exact version from before the fix. A synthetic example has a directly checked baseline and one child commit that adds exactly one issue. Any issue already present in the baseline is recorded for both versions; the child adds one more. The new issue must point to a line changed by the child commit. Behavioral bugs and maintainability advice stay separate: duplication and non-idiomatic Go are advice, not broken behavior.
 
 The runner calculates changed lines from the exact Git diff. It does not store a second hand-written copy. It also calculates the expected `success`, `neutral`, or `failure` result from issue severity at `FAIL_ON=high`.
 
-## Keep reviews blind
+## What the reviewer can access
 
-The command uses the account from your authenticated local Amp CLI for trusted matching. By default it also uses that account for review orbs:
+The reviewer gets the same public research tools as a real review. It may read public documentation, package registries, dependency source, and unrelated repositories.
 
-```sh
-amp login
-npm run eval -- run /path/to/review-eval-pack --project REVIEW_PROJECT
-```
+There is one restriction: for the repository being reviewed, it must use only the copy we provide. It must not look up the target pull request through GitHub, nor clone, fetch, or inspect another copy of that repository. The supplied copy contains only the history needed for the exact base and reviewed commits. It has no remote, later commits, other branches, or evaluation labels.
 
-For account-isolated reviews, provide a key from a separate account that can access the source project but cannot access the example pack:
+The saved trace is checked for three things: the source setup ran first and completed in the original workspace; research tools did not name the target pull request or repository; and the prepared repository did not run `git fetch` or `git pull`. If one of these checks fails, the report says the run is invalid for comparison.
 
-```sh
-export AMP_EVAL_REVIEWER_API_KEY="separate-review-account-key"
-```
+This is a rule plus a trace check, not a secure sandbox. A reviewer trying to cheat could hide a lookup in another process. Preventing all public access would make the test unlike a real review, so we accept that risk. The results measure a reviewer following the instructions in a realistic environment; they do not prove resistance to deliberate cheating.
 
-`AMP_EVAL_REVIEWER_API_KEY` is passed only to a child process with an empty home directory. The trusted process and matching orbs continue to use the local CLI login. The runner validates the review key and stores only a hash of its Amp user ID, but cannot compare it with the CLI's stored login. Confirm that they are different accounts before relying on the run as blind evidence.
+The example data, recorded issues, focused tests, paired versions, and previous results remain private. Review calls require `AMP_EVAL_REVIEWER_API_KEY` from a separate identity that cannot access them. The review process receives only that key, an empty home directory, one prepared source copy, the pull-request context captured before the run, and the normal review instructions. A trusted local login is used later to compare findings with the recorded issues.
 
-Do not set `AMP_API_KEY`; the command rejects it so the trusted side cannot silently override the local CLI login. The project is selected by `--project`. Without the optional review key, the run records that both roles used the local CLI and does not claim an account boundary.
-
-The reviewer receives only:
-
-- the exact base and head commits;
-- the public pull-request title, description, and branch names;
-- the production review instructions; and
-- source-only Git bytes for a deliberately changed commit when needed.
-
-It never receives `knownIssues`, focused tests, or the path to the pack. The trusted process checks the bundle and commit IDs before any reviews start.
-
-Source-only transfers over 64 KiB are rejected so one deliberately changed commit cannot make every repeated review unexpectedly large or expensive. Keep each synthetic change focused.
+Older result files remain readable, but their reports clearly say that they are historical results and should not be compared with runs using the current rules.
 
 ## Commands
+
+The `run` and `finish` commands start model calls. Get explicit confirmation before using either one.
 
 Check the pack's files without starting reviews:
 
@@ -65,30 +51,27 @@ Check the pack's files without starting reviews:
 npm run eval -- check /path/to/review-eval-pack
 ```
 
-Run development code versions three times, with at most two reviews running at once. Holdout examples are excluded by default:
+Run development versions three times, with at most two reviews running at once. Held-back (`holdout`) examples are excluded by default:
 
 ```sh
+export AMP_EVAL_REVIEWER_API_KEY="separate-review-account-key"
 npm run eval -- run /path/to/review-eval-pack \
-  --project REVIEW_PROJECT \
   --samples 3 \
   --concurrency 2
 ```
 
-After choosing a candidate reviewer, run only the held-back examples explicitly:
+After choosing a candidate reviewer, run the held-back examples explicitly:
 
 ```sh
 npm run eval -- run /path/to/review-eval-pack \
-  --project REVIEW_PROJECT \
   --split holdout \
   --samples 3 \
   --concurrency 2
 ```
 
-Before the first review, this command validates any review key, fetches the public source, verifies any source bundle, checks every commit, calculates changed lines, and rejects a known issue that does not point to a changed line. For a synthetic example, it also checks that the issue version is one commit on top of the clean version and that the labeled line changed in that commit.
+Do not set `AMP_API_KEY`; the evaluation uses the authenticated local CLI to compare findings with recorded issues and rejects an `AMP_API_KEY` inherited from the shell. Confirm that the separate review identity cannot access the example pack before running either group.
 
-Every review then uses a fresh private Amp orb and the same prompt builder, two-pass review method, JSON parser, changed-line filter, and conclusion calculation as production. The trusted account uses two independent high-mode checks to decide whether a finding describes a known issue; it uses a third only when they disagree.
-
-The command prints progress and saves complete results under `.eval-runs/`. Read a saved result without making network or model calls:
+Read a saved result without making network or model calls:
 
 ```sh
 npm run eval -- report .eval-runs/RUN.json
@@ -102,24 +85,28 @@ npm run eval -- finish .eval-runs/RUN.json
 
 This uses the local CLI login and does not use `AMP_EVAL_REVIEWER_API_KEY`. It writes a new result, keeps the original unchanged, and records the original file's hash so the two can be compared exactly.
 
-## Reading the result
+## Reading a result
 
-A normal report stays plain:
+A report starts by saying what access was allowed and explains each repeat in plain terms:
 
 ```text
-Review evaluation: NEEDS WORK
+Review evaluation: PUBLIC RESEARCH ALLOWED
+Recorded result: NEEDS WORK
+The reviewer could research anything public except this pull request and another copy or later version of the target repository.
 
-1 clean change, 1 smaller issue, and 1 serious issue.
+2 pull-request examples: 1 pass, 1 unstable, 0 fail.
+1 version with no recorded issues, 1 version with recorded non-blocking issues, and 1 version with recorded blocking issues.
 Each was reviewed 3 times. All 9 reviews completed.
 
-Example 1 (pull request #1234)
-  Clean change: 3 of 3 completed reviews had no false alarms
-  Smaller issue: found in 3 of 3; right response in 2 of 3
-  Serious issue: found in 3 of 3; right response in 0 of 3
+Example 1 (pull request #1234): PASS (3/3 repeats passed)
+  Baseline, no recorded issues: 3 of 3 completed reviews raised no alert
+  Introduced-issue version, recorded blocking issues: found in 3 of 3; response matched the recorded issues in 3 of 3
 ```
 
-The saved file retains exact commits and context, prompt and code hashes, model IDs when available, raw and filtered findings, conclusions, matching votes, timing, and errors.
+The saved file keeps enough detail to reproduce and inspect the counts: exact commits and context, prompts, full tool traces, model IDs, raw and filtered findings, matching decisions, timing, execution order, source checks, and errors. A report also applies the latest trace checks without changing the original file. Treat the file as private and potentially sensitive.
 
-Three repeated reviews are enough for an iteration check, not a broad accuracy claim. Decide the rule before running: 3 of 3 is a provisional pass; 2 of 3 means run both the old and new reviewer five times; 0 or 1 means the reviewer needs work on that example. With five runs, require at least 4 of 5. Never add only favorable reruns.
+Each source pull request is one example. For a synthetic before-and-after pair, one repeat passes only when the reviewer gets both versions right. Three repeats support a development check, not a broad accuracy claim: 3 of 3 is a provisional pass, 2 of 3 is unstable, and 0 or 1 needs work. If five repeats were chosen before the run, require at least 4 of 5. Never add only favorable reruns.
 
-An open example pack is a regression set. It is not a hidden benchmark, a population false-alarm rate, or proof of general review quality.
+An alert on a version with no recorded issues is not automatically a false positive: the recorded list may be incomplete. A finding that does not match a recorded issue is also not automatically wrong. Check the source before classifying either. Keep those later source checks separate from the original counts. Do not call the percentage of findings that matched recorded issues “precision,” because the remaining findings have not yet been proven wrong.
+
+An open example pack helps catch the reviewer getting worse on known cases. It is not a hidden test, a representative estimate of all pull requests, or proof of general review quality.

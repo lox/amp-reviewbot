@@ -24,6 +24,51 @@ describe("executeReviewWithRetries", () => {
     assert.equal(fake.calls[0]?.options?.continue, undefined)
   })
 
+  it("starts evaluation reviews from an explicit no-project directory", async () => {
+    const fake = fakeExecute([[systemMessage(), successMessage(validResult)]])
+
+    await executeReviewWithRetries({
+      prompt: "Review this pull request",
+      title: "Review lox/example#42",
+      cwd: "/tmp/empty-review-workspace",
+      visibility: "private",
+      signal: new AbortController().signal,
+      logger: pino({ level: "silent" }),
+      onThread: async () => {},
+      beforeRetry: async () => {},
+      executeAmp: fake.execute,
+      retryDelaysMs: [0, 0],
+    })
+
+    assert.equal(fake.calls[0]?.options?.executor, "orb")
+    assert.equal(fake.calls[0]?.options?.cwd, "/tmp/empty-review-workspace")
+    assert.equal(fake.calls[0]?.options?.project, undefined)
+  })
+
+  it("keeps no-project continuation commands outside the local repository", async () => {
+    const fake = fakeExecute([
+      [systemMessage(), errorMessage("OpenAI WebSocket closed: 1011")],
+      [systemMessage(), successMessage(validResult)],
+    ])
+
+    await executeReviewWithRetries({
+      prompt: "Review this pull request",
+      title: "Review lox/example#42",
+      cwd: "/tmp/empty-review-workspace",
+      visibility: "private",
+      signal: new AbortController().signal,
+      logger: pino({ level: "silent" }),
+      onThread: async () => {},
+      beforeRetry: async () => {},
+      executeAmp: fake.execute,
+      retryDelaysMs: [0, 0],
+    })
+
+    assert.equal(fake.calls[1]?.options?.continue, threadId)
+    assert.equal(fake.calls[1]?.options?.cwd, "/tmp/empty-review-workspace")
+    assert.equal(fake.calls[1]?.options?.project, undefined)
+  })
+
   it("uses a valid final assistant response when the result stream fails", async () => {
     const fake = fakeExecute([
       [systemMessage(), assistantMessage(validResult), errorMessage("OpenAI WebSocket closed: 1006")],

@@ -2,6 +2,7 @@ import { execFile } from "node:child_process"
 import { resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
+import type { StreamMessage } from "@ampcode/sdk"
 import pino from "pino"
 import { z } from "zod"
 import { executeReviewWithRetries } from "../src/worker.js"
@@ -10,42 +11,52 @@ const execFileAsync = promisify(execFile)
 const inputSchema = z.object({
   prompt: z.string().min(1),
   title: z.string().min(1),
-  project: z.string().min(1),
+  cwd: z.string().min(1),
   timeoutMs: z.number().int().positive(),
 })
 
 async function main(): Promise<void> {
   const input = inputSchema.parse(JSON.parse(await readStdin()))
   const controller = new AbortController()
-  const abort = () => controller.abort(new Error("Blind review was cancelled"))
+  const abort = () => controller.abort(new Error("Evaluation review was cancelled"))
   process.once("SIGTERM", abort)
   process.once("SIGINT", abort)
   const timeout = setTimeout(
-    () => controller.abort(new Error("Blind review timed out")),
+    () => controller.abort(new Error("Evaluation review timed out")),
     input.timeoutMs,
   )
   const models = new Set<string>()
+  const trace: StreamMessage[] = []
   let threadId: string | null = null
 
   try {
-    const rawResult = await executeReviewWithRetries({
-      prompt: input.prompt,
-      title: input.title,
-      project: input.project,
-      visibility: "private",
-      signal: controller.signal,
-      logger: pino({ level: "silent" }),
-      onThread: async (id) => {
-        threadId = id
-      },
-      beforeRetry: async () => {},
-      onMessage: (message) => {
-        if (message.type === "assistant" && typeof message.message.model === "string") {
-          models.add(message.message.model)
-        }
-      },
-    })
-    process.stdout.write(`${JSON.stringify({ rawResult, threadId, models: [...models] })}\n`)
+    try {
+      const rawResult = await executeReviewWithRetries({
+        prompt: input.prompt,
+        title: input.title,
+        cwd: input.cwd,
+        visibility: "private",
+        signal: controller.signal,
+        logger: pino({ level: "silent" }),
+        onThread: async (id) => {
+          threadId = id
+        },
+        beforeRetry: async () => {},
+        onMessage: (message) => {
+          trace.push(message)
+          if (message.type === "assistant" && typeof message.message.model === "string") {
+            models.add(message.message.model)
+          }
+        },
+      })
+      process.stdout.write(
+        `${JSON.stringify({ status: "completed", rawResult, threadId, models: [...models], trace })}\n`,
+      )
+    } catch (error) {
+      process.stdout.write(
+        `${JSON.stringify({ status: "error", error: errorMessage(error), threadId, models: [...models], trace })}\n`,
+      )
+    }
   } finally {
     clearTimeout(timeout)
     process.removeListener("SIGTERM", abort)
@@ -68,7 +79,7 @@ async function archiveThread(threadId: string): Promise<void> {
       { timeout: 30_000 },
     )
   } catch {
-    process.stderr.write("Warning: a blind review thread could not be archived.\n")
+    process.stderr.write("Warning: an evaluation review thread could not be archived.\n")
   }
 }
 

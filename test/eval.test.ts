@@ -2,21 +2,27 @@ import assert from "node:assert/strict"
 import { execFile, type ChildProcessWithoutNullStreams } from "node:child_process"
 import { createHash, randomBytes } from "node:crypto"
 import { EventEmitter } from "node:events"
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
 import { PassThrough } from "node:stream"
 import { describe, it } from "node:test"
 import { promisify } from "node:util"
+import { checkReviewTrace } from "../eval/evidence.js"
 import { judgeIssue, resolveMatchingVotes } from "../eval/judge.js"
 import { checkPack, exampleSchema, loadPack } from "../eval/pack.js"
 import { formatReport } from "../eval/report.js"
 import {
   reviewAuthentication,
   reviewerEnvironment,
-  runBlindReview,
+  runEvaluationReview,
 } from "../eval/reviewer.js"
-import { finishJudgements, recordFinishedRun, selectCases } from "../eval/run.js"
+import {
+  finishJudgements,
+  orderedReviewTasks,
+  recordFinishedRun,
+  selectCases,
+} from "../eval/run.js"
 import {
   corpusContentHash,
   evalCaseSchema,
@@ -88,6 +94,30 @@ describe("eval example packs", () => {
     assert.throws(() => exampleSchema.parse(input), /maintainability advisory cannot be blocking/)
   })
 
+  it("allows source-confirmed baseline issues when the introduced version repeats them", async () => {
+    const input = JSON.parse(await readFile("eval/example.json", "utf8")) as {
+      versions: Array<{ knownIssues: Array<Record<string, unknown>> }>
+    }
+    const introducedIssue = input.versions[1]!.knownIssues[0]!
+    const baselineIssue = {
+      ...introducedIssue,
+      id: "inherited-defect",
+      severity: "medium",
+      rootCause: "The baseline change already mishandles an interrupted response.",
+      failureBehavior: "An interrupted response leaves completed work unrecorded.",
+      line: 80,
+      verification: "Source inspection and a focused regression establish the baseline defect.",
+    }
+    input.versions[0]!.knownIssues.push(baselineIssue)
+    input.versions[1]!.knownIssues.unshift(structuredClone(baselineIssue))
+
+    assert.doesNotThrow(() => exampleSchema.parse(input))
+    input.versions[1]!.knownIssues[0]!.line = 81
+    assert.doesNotThrow(() => exampleSchema.parse(input))
+    input.versions[1]!.knownIssues[0]!.failureBehavior = "A different claim."
+    assert.throws(() => exampleSchema.parse(input), /without semantic changes/)
+  })
+
   it("requires synthetic maintainability issues to identify their subtype", async () => {
     const input = JSON.parse(await readFile("eval/example.json", "utf8")) as {
       versions: Array<{
@@ -155,6 +185,20 @@ describe("eval example packs", () => {
     }
   })
 
+  it("rejects repository names that are not safe GitHub owner/repository names", async () => {
+    const input = JSON.parse(await readFile("eval/example.json", "utf8")) as {
+      source: { repository: string }
+    }
+    for (const repository of [
+      "owner/repository/extra",
+      "owner with spaces/repository",
+      "owner/repository'; touch escaped",
+    ]) {
+      input.source.repository = repository
+      assert.throws(() => exampleSchema.parse(input), /GitHub owner\/repository name/)
+    }
+  })
+
   it("rejects a known issue outside the exact changed lines", () => {
     const invalid = evalCase("blocking", blocking)
     invalid.expected.issues[0]!.changedLine = 999
@@ -171,10 +215,27 @@ describe("eval example packs", () => {
         [{ "code.txt": [2, 3] }, { "code.txt": [2, 3] }],
       )
       assert.equal(expectedConclusion(loaded.corpus.cases[1]!.expected), "failure")
-      assert.equal(loaded.sourcePreparation.has("local-example/clean-change"), false)
+      assert.deepEqual(
+        loaded.corpus.cases.map((item) => item.versionRole),
+        ["baseline", "introduced-issue"],
+      )
+      assert.equal(loaded.sourcePreparation.has("local-example/clean-change"), true)
+      const baselinePreparation = loaded.sourcePreparation.get("local-example/clean-change")!
       const preparation = loaded.sourcePreparation.get("local-example/serious-bug")!
-      assert.match(preparation, /source history/)
+      assert.match(preparation, /exact source/)
       assert.match(preparation, /base64 --decode/)
+      assert.match(preparation, /Do not inspect pull request #42/)
+      assert.match(preparation, /Public documentation, package registries, dependencies/)
+      assert.doesNotMatch(
+        preparation.replace(/^git remote add origin .*$/m, ""),
+        /eval|reviewbot|expected answers|focused tests/i,
+      )
+      assert.doesNotMatch(
+        baselinePreparation.replace(/^git remote add origin .*$/m, ""),
+        /eval|reviewbot|expected answers|focused tests/i,
+      )
+      assert.match(baselinePreparation, new RegExp(`git fetch --depth=1 origin ${fixture.base}`))
+      assert.match(preparation, new RegExp(`git fetch --depth=1 origin ${fixture.base}`))
       assert.doesNotMatch(preparation, /known-bug|Loses the useful result|witnesses\//)
       const encodedBundle = /printf '%s' '([^']+)' \| base64 --decode/.exec(preparation)?.[1]
       assert.ok(encodedBundle)
@@ -186,12 +247,32 @@ describe("eval example packs", () => {
       assert.equal(heads.length, 1)
       assert.match(heads[0]!, new RegExp(`^${loaded.corpus.cases[1]!.headSha} `))
 
+      await writeFile(join(fixture.source, "future.txt"), "not part of the review\n")
+      await git(fixture.source, ["add", "future.txt"])
+      await git(fixture.source, ["commit", "-m", "future change"])
+      const future = (await git(fixture.source, ["rev-parse", "HEAD"])).trim()
+      await git(fixture.source, ["push", fixture.origin, `${future}:refs/heads/main`])
+      const prepared = join(fixture.root, "prepared")
+      await execFileAsync("git", ["clone", fixture.origin, prepared])
+      await runSourcePreparation(preparation, prepared)
+      assert.equal((await git(prepared, ["rev-parse", "HEAD"])).trim(), loaded.corpus.cases[1]!.headSha)
+      assert.equal((await git(prepared, ["remote"])).trim(), "")
+      assert.deepEqual(
+        (await git(prepared, ["for-each-ref", "--format=%(refname)"])).trim().split("\n"),
+        ["refs/source/base", "refs/source/target"],
+      )
+      assert.doesNotMatch(
+        await git(prepared, ["reflog", "show", "--all", "--format=%H"]),
+        new RegExp(future),
+      )
+      await assert.rejects(git(prepared, ["cat-file", "-e", `${future}^{commit}`]))
+
       await git(fixture.origin, ["tag", "public-clean", fixture.clean])
       await git(fixture.origin, ["update-ref", "refs/heads/main", fixture.base])
       const reloaded = await loadPack(fixture.pack, fixture.cache, () => fixture.origin)
-      assert.equal(
-        reloaded.sourcePreparation.get("local-example/serious-bug"),
-        preparation,
+      assert.match(
+        reloaded.sourcePreparation.get("local-example/serious-bug")!,
+        new RegExp(`refs/source/target.*${loaded.corpus.cases[1]!.headSha}`, "s"),
       )
 
       await git(fixture.origin, ["tag", "--delete", "public-clean"])
@@ -241,6 +322,27 @@ describe("eval example packs", () => {
     }
   })
 
+  it("shell-quotes custom source URLs in the preparation block", async () => {
+    const fixture = await createPackFixture()
+    const quotedOrigin = join(fixture.root, "origin'quoted.git")
+    try {
+      await rename(fixture.origin, quotedOrigin)
+      const loaded = await loadPack(fixture.pack, fixture.cache, () => quotedOrigin)
+      const preparation = loaded.sourcePreparation.get("local-example/serious-bug")!
+      assert.match(preparation, /git remote add origin '.*'"'"'.*'/)
+
+      const prepared = join(fixture.root, "prepared-quoted-origin")
+      await mkdir(prepared)
+      await runSourcePreparation(preparation, prepared)
+      assert.equal(
+        (await git(prepared, ["rev-parse", "HEAD"])).trim(),
+        loaded.corpus.cases[1]!.headSha,
+      )
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true })
+    }
+  })
+
   it("canonicalizes uppercase commit SHAs before Git comparisons", async () => {
     const fixture = await createPackFixture()
     const examplePath = join(fixture.pack, "examples", "local-example", "example.json")
@@ -282,7 +384,17 @@ describe("eval example packs", () => {
       const encodedBundle = /printf '%s' '([^']+)' \| base64 --decode/.exec(preparation)?.[1]
       assert.ok(encodedBundle)
       const header = Buffer.from(encodedBundle, "base64").subarray(0, 1_024).toString("utf8")
-      assert.match(header, new RegExp(`-${fixture.clean} `))
+      assert.match(header, new RegExp(`-${fixture.base} `))
+      assert.match(preparation, new RegExp(`git fetch --depth=2 origin ${fixture.alternate}`))
+
+      const prepared = join(fixture.root, "prepared-historical")
+      await mkdir(prepared)
+      await runSourcePreparation(preparation, prepared)
+      assert.equal((await git(prepared, ["rev-parse", "HEAD"])).trim(), loaded.corpus.cases[0]!.headSha)
+      assert.equal(
+        (await git(prepared, ["merge-base", fixture.alternate, loaded.corpus.cases[0]!.headSha])).trim(),
+        fixture.base,
+      )
     } finally {
       await rm(fixture.root, { recursive: true, force: true })
     }
@@ -344,11 +456,10 @@ describe("eval example packs", () => {
         return true
       },
     }) as unknown as ChildProcessWithoutNullStreams
-    const review = runBlindReview(
+    const review = runEvaluationReview(
       {
         prompt: "Review this change.",
         title: "Test review",
-        project: "test-project",
         timeoutMs: 1_000,
         apiKey: "test-key",
         signal: new AbortController().signal,
@@ -378,7 +489,66 @@ describe("eval example packs", () => {
     assert.deepEqual(signals, ["SIGTERM", "SIGKILL"])
 
     child.emit("close", 1, null)
-    await assert.rejects(review, /Could not send review input/)
+    await assert.rejects(review, /Could not send evaluation review input/)
+  })
+
+  it("returns the complete reviewer trace and model evidence", async () => {
+    const spawned = deferred<void>()
+    const childInput = deferred<{ cwd: string; [key: string]: unknown }>()
+    const stdout = new PassThrough()
+    const stdin = new PassThrough()
+    stdin.on("data", (chunk: Buffer) => {
+      childInput.resolve(JSON.parse(chunk.toString("utf8")))
+    })
+    const child = Object.assign(new EventEmitter(), {
+      stdin,
+      stdout,
+      stderr: new PassThrough(),
+      kill: () => true,
+    }) as unknown as ChildProcessWithoutNullStreams
+    const trace = [
+      {
+        type: "assistant",
+        session_id: "thread-1",
+        message: { model: "test-model", content: [] },
+      },
+    ]
+    const review = runEvaluationReview(
+      {
+        prompt: "Review this change.",
+        title: "Test review",
+        timeoutMs: 1_000,
+        signal: new AbortController().signal,
+      },
+      () => {
+        spawned.resolve()
+        return child
+      },
+    )
+    await spawned.promise
+    const submitted = await childInput.promise
+    assert.equal("project" in submitted, false)
+    await stat(submitted.cwd)
+    await assert.rejects(stat(join(submitted.cwd, ".git")))
+    stdout.write(
+      JSON.stringify({
+        status: "completed",
+        rawResult: '{"summary":"Done","findings":[]}',
+        threadId: "thread-1",
+        models: ["test-model"],
+        trace,
+      }),
+    )
+    child.emit("close", 0, null)
+
+    assert.deepEqual(await review, {
+      status: "completed",
+      rawResult: '{"summary":"Done","findings":[]}',
+      threadId: "thread-1",
+      models: ["test-model"],
+      trace,
+    })
+    await assert.rejects(stat(submitted.cwd))
   })
 
   it("records whether reviews use the local CLI or a dedicated key", async () => {
@@ -406,6 +576,238 @@ describe("eval example packs", () => {
       ["holdout"],
     )
   })
+
+  it("randomizes each complete sample block reproducibly", () => {
+    const cases = [evalCase("one", control), evalCase("two", control), evalCase("three", control)]
+    const first = orderedReviewTasks(cases, 3, "fixed-seed")
+    const second = orderedReviewTasks(cases, 3, "fixed-seed")
+
+    assert.deepEqual(
+      first.map(({ evalCase: item, sample }) => [item.id, sample]),
+      second.map(({ evalCase: item, sample }) => [item.id, sample]),
+    )
+    for (const sample of [1, 2, 3]) {
+      const block = first.filter((task) => task.sample === sample)
+      assert.deepEqual(
+        new Set(block.map((task) => task.evalCase.id)),
+        new Set(cases.map((item) => item.id)),
+      )
+    }
+  })
+
+  it("allows public research but flags access to the target source", () => {
+    const headSha = "a".repeat(40)
+    const target = {
+      repository: "example/repository",
+      pullNumber: 42,
+      baseSha: "b".repeat(40),
+      headSha,
+    }
+    const sourceCommand = `set -euo pipefail
+git remote add origin 'https://github.com/example/repository.git'
+git fetch origin ${headSha}
+test "$(git rev-parse refs/source/target)" = '${headSha}'
+test "$(git rev-parse HEAD)" = '${headSha}'
+git for-each-ref --format='delete %(refname)' | git update-ref --stdin`
+    const sourcePreparation = `Prepare the exact source before review.
+
+Run these commands from the repository:
+
+${sourceCommand}
+
+Use only this checked-out source.`
+    const trace = [
+      traceSystemMessage(),
+      toolMessage(
+        "shell_command",
+        {
+          command: sourceCommand,
+          workdir: "/workspace",
+        },
+        "source-preparation",
+      ),
+      toolResultMessage("source-preparation"),
+      toolMessage("web_search", { objective: "Read the dependency API documentation" }),
+      toolMessage("shell_command", { command: "npm view example-package version" }),
+      toolMessage("web_search", { objective: "Inspect example/repository PR 42" }),
+      toolMessage("shell_command", { command: "gh pr view 42 --comments" }),
+      toolMessage("shell_command", { command: "git fetch origin" }),
+    ]
+
+    assert.deepEqual(checkReviewTrace(trace, sourcePreparation, target), [
+      "accessed the target pull request",
+      "accessed the target repository outside the supplied copy",
+    ])
+    assert.deepEqual(
+      checkReviewTrace(
+        [
+          traceSystemMessage(),
+          toolMessage(
+            "shell_command",
+            {
+              command: sourceCommand.replaceAll("\n", " && "),
+            },
+            "altered-preparation",
+          ),
+          toolResultMessage("altered-preparation"),
+        ],
+        sourcePreparation,
+      ),
+      ["did not complete the required source setup"],
+    )
+    assert.deepEqual(
+      checkReviewTrace(
+        [
+          traceSystemMessage(),
+          toolMessage("shell_command", { command: sourceCommand }, "source-preparation"),
+          toolMessage("shell_command", { command: "git status" }, "early-inspection"),
+          toolResultMessage("source-preparation"),
+          toolResultMessage("early-inspection"),
+        ],
+        sourcePreparation,
+      ),
+      ["did not complete the required source setup"],
+    )
+    assert.deepEqual(
+      checkReviewTrace(
+        [
+          toolMessage("shell_command", {
+            command: `git -c protocol.version=2 fetch origin ${"b".repeat(40)}`,
+          }),
+        ],
+        undefined,
+        target,
+      ),
+      ["accessed the target repository outside the supplied copy"],
+    )
+    assert.deepEqual(
+      checkReviewTrace(
+        [toolMessage("shell_command", { command: "git show HEAD@{1}:src/review.ts" })],
+        undefined,
+        target,
+      ),
+      [],
+    )
+    assert.deepEqual(checkReviewTrace([], sourcePreparation), [
+      "did not start in a clean review workspace",
+      "did not complete the required source setup",
+    ])
+    assert.deepEqual(
+      checkReviewTrace(
+        [
+          traceSystemMessage(),
+          toolMessage("shell_command", { command: sourceCommand }, "failed-preparation"),
+          toolResultMessage("failed-preparation", true),
+          toolMessage("shell_command", { command: sourceCommand }, "successful-retry"),
+          toolResultMessage("successful-retry"),
+        ],
+        sourcePreparation,
+      ),
+      ["did not complete the required source setup"],
+    )
+    assert.deepEqual(
+      checkReviewTrace(
+        [
+          traceSystemMessage(),
+          toolMessage(
+            "shell_command",
+            { command: sourceCommand, workdir: "/tmp/other" },
+            "wrong-workdir",
+          ),
+          toolResultMessage("wrong-workdir"),
+        ],
+        sourcePreparation,
+      ),
+      ["did not complete the required source setup"],
+    )
+    assert.deepEqual(
+      checkReviewTrace(
+        [
+          traceSystemMessage(),
+          toolMessage("web_search", { objective: "Read dependency documentation" }, "early-web"),
+          toolMessage("shell_command", { command: sourceCommand }, "source-preparation"),
+          toolResultMessage("source-preparation"),
+        ],
+        sourcePreparation,
+      ),
+      ["did not complete the required source setup"],
+    )
+    assert.deepEqual(
+      checkReviewTrace(
+        [...trace.slice(0, 3), traceSystemMessage("thread-2")],
+        sourcePreparation,
+      ),
+      ["review continued in a different workspace"],
+    )
+    assert.deepEqual(
+      checkReviewTrace(
+        [toolMessage("functions.Task", { prompt: "Inspect example/repository PR 42" })],
+        undefined,
+        target,
+      ),
+      ["accessed the target pull request"],
+    )
+    assert.deepEqual(
+      checkReviewTrace(
+        [toolMessage("shell_command", { command: "npm view example-package version" })],
+        undefined,
+        target,
+      ),
+      [],
+    )
+    assert.deepEqual(
+      checkReviewTrace(
+        [
+          toolMessage("shell_command", {
+            command: "curl https://github.com/example/repository/pull/42",
+          }),
+        ],
+        undefined,
+        target,
+      ),
+      ["accessed the target pull request"],
+    )
+    assert.deepEqual(
+      checkReviewTrace(
+        [
+          toolMessage("shell_command", {
+            command: "gh pr view 42 -R dependency/library",
+          }),
+          toolMessage("web_search", {
+            objective: "Inspect dependency/library PR 42",
+          }),
+        ],
+        undefined,
+        target,
+      ),
+      [],
+    )
+  })
+
+  it("requires a separate review account before creating an artifact", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "amp-reviewbot-eval-auth-"))
+    const output = join(directory, "run.json")
+    try {
+      await assert.rejects(
+        execFileAsync(
+          process.execPath,
+          ["--import", "tsx", "eval/run.ts", "run", "missing-pack", "--output", output],
+          {
+            cwd: resolve("."),
+            env: {
+              ...process.env,
+              AMP_API_KEY: "",
+              AMP_EVAL_REVIEWER_API_KEY: "",
+            },
+          },
+        ),
+        /Set AMP_EVAL_REVIEWER_API_KEY to a separate account/,
+      )
+      assert.equal(await stat(output).catch(() => null), null)
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
 })
 
 describe("eval scoring", () => {
@@ -429,17 +831,31 @@ describe("eval scoring", () => {
     assert.equal(score.groundedConclusionAgreement, 1 / 3)
     assert.equal(controlScore.cleanAlertRate, 1 / 2)
     assert.equal(blockingScore.issueDetectionRate, 2 / 3)
-    assert.equal(blockingScore.findingPrecision, 2 / 3)
+    assert.equal(blockingScore.frozenLabelMatchFraction, 2 / 3)
     assert.equal(blockingScore.severityAgreement, 1 / 2)
     assert.equal(blockingScore.severityThresholdAgreement, 1 / 2)
     assert.equal(blockingScore.judgeCoverage, 1)
     assert.equal(blockingScore.judgeDisagreementRate, 1 / 3)
 
     const report = formatReport(run, score)
-    assert.match(report, /Review evaluation: INCOMPLETE/)
-    assert.match(report, /Clean change: 1 of 2 completed reviews had no false alarms/)
-    assert.match(report, /Serious issue: found in 2 of 3; right response in 1 of 3/)
+    assert.match(report, /Review evaluation: HISTORICAL RESULT/)
+    assert.match(report, /Recorded result: INCOMPLETE/)
+    assert.match(report, /Use its counts for investigation, not comparison/)
+    assert.match(report, /1 version with no recorded issues, 0 versions with recorded non-blocking issues/)
+    assert.match(report, /no recorded issues: 1 of 2 completed reviews raised no alert/)
+    assert.match(report, /recorded blocking issues: found in 2 of 3; response matched the recorded issues in 1 of 3/)
     assert.match(report, /This result covers only these examples/)
+
+    const contaminatedRun = structuredClone(run)
+    contaminatedRun.samples[2]!.evidenceBoundaryViolations = [
+      "did not complete the required source setup",
+    ]
+    const contaminatedReport = formatReport(contaminatedRun, scoreRun(contaminatedRun))
+    assert.match(contaminatedReport, /Recorded result: INVALID FOR COMPARISON/)
+    assert.match(
+      contaminatedReport,
+      /trace also shows that 1 review did not follow the current rules/,
+    )
 
     const completeRun = makeRun(cases, 3, [
       completed("control", 1, control, "success", [], []),
@@ -450,8 +866,28 @@ describe("eval scoring", () => {
       completed("blocking", 3, blocking, "neutral", [mediumFinding], [judgement([0], false)]),
     ])
     const completeReport = formatReport(completeRun, scoreRun(completeRun))
-    assert.match(completeReport, /Review evaluation: NEEDS WORK/)
-    assert.match(completeReport, /Serious issue: found in 3 of 3; right response in 0 of 3/)
+    assert.match(completeReport, /Recorded result: NEEDS WORK/)
+    assert.match(
+      completeReport,
+      /recorded blocking issues: found in 3 of 3; response matched the recorded issues in 0 of 3/,
+    )
+
+    assert.throws(
+      () =>
+        evalRunSchema.parse({
+          ...completeRun,
+          reviewer: {
+            ...completeRun.reviewer,
+            protocol: "research-enabled-target-frozen",
+            project: null,
+            account: {
+              authentication: "reviewer-api-key",
+              reviewerIdHash: artifactHash,
+            },
+          },
+        }),
+      /evaluation requires schema version 3 evidence/,
+    )
   })
 
   it("does not let one finding count as two known issues", () => {
@@ -470,7 +906,7 @@ describe("eval scoring", () => {
     ])
     const score = scoreRun(run).cases[0]!
     assert.equal(score.issueDetectionRate, 1 / 2)
-    assert.equal(score.findingPrecision, 1)
+    assert.equal(score.frozenLabelMatchFraction, 1)
     assert.equal(score.groundedConclusionAgreement, 0)
   })
 
@@ -509,13 +945,129 @@ describe("eval scoring", () => {
     ])
 
     const score = scoreRun(run)
-    assert.equal(score.cases[0]!.findingPrecision, 1 / 2)
-    assert.match(formatReport(run, score), /1 other finding needs checking/)
+    assert.equal(score.cases[0]!.frozenLabelMatchFraction, 1 / 2)
+    assert.match(formatReport(run, score), /1 unmatched finding needs source checking/)
   })
 
   it("does not report failed clean reviews as clean", () => {
     const cases = [evalCase("control", control)]
     assert.equal(scoreRun(makeRun(cases, 1, [failed("control", 1, control)])).cleanAlertRate, null)
+  })
+
+  it("scores a synthetic seed only when both paired versions match", () => {
+    const baseline = {
+      ...evalCase("paired-baseline", control),
+      seedId: "paired",
+      origin: "synthetic" as const,
+      versionRole: "baseline" as const,
+      headSha: "b".repeat(40),
+    }
+    const introduced = {
+      ...evalCase("paired-introduced", blocking),
+      seedId: "paired",
+      origin: "synthetic" as const,
+      versionRole: "introduced-issue" as const,
+      headSha: "c".repeat(40),
+    }
+    const run = makeRun([baseline, introduced], 3, [
+      completed(baseline.id, 1, control, "success", [], []),
+      completed(introduced.id, 1, blocking, "failure", [highFinding], [judgement([0], false)]),
+      completed(baseline.id, 2, control, "success", [], []),
+      completed(introduced.id, 2, blocking, "failure", [highFinding], [judgement([0], false)]),
+      completed(baseline.id, 3, control, "neutral", [lowFinding], []),
+      completed(introduced.id, 3, blocking, "failure", [highFinding], [judgement([0], false)]),
+    ])
+
+    assert.deepEqual(scoreRun(run).seeds[0], {
+      seedId: "paired",
+      pullNumber: 42,
+      origin: "synthetic",
+      samples: 3,
+      passedSamples: 2,
+      outcome: "unstable",
+    })
+  })
+
+  it("requires complete prompts and traces in new run artifacts", () => {
+    const cases = [evalCase("blocking", blocking)]
+    const oldRun = makeRun(cases, 1, [
+      completed("blocking", 1, blocking, "failure", [highFinding], [judgement([0], false)]),
+    ])
+    const prompt = "complete review prompt"
+    const trace = [{ type: "result", result: "review result" }]
+    const sample = {
+      ...oldRun.samples[0]!,
+      prompt,
+      promptHash: createHash("sha256").update(prompt).digest("hex"),
+      trace,
+      reviewDurationMs: 10,
+      matchingDurationMs: 0,
+      durationMs: 10,
+      evidenceBoundaryViolations: [],
+    }
+    const run = {
+      ...oldRun,
+      schemaVersion: 3,
+      judgeTimeoutMs: 60_000,
+      reviewsCompletedAt: oldRun.completedAt,
+      orderSeed: "fixed-seed",
+      executionOrder: [{ caseId: "blocking", sample: 1 }],
+      samples: [sample],
+    }
+    assert.doesNotThrow(() => evalRunSchema.parse(run))
+    assert.throws(
+      () =>
+        evalRunSchema.parse({
+          ...run,
+          reviewer: {
+            ...run.reviewer,
+            protocol: "research-enabled-target-frozen",
+            account: {
+              authentication: "reviewer-api-key",
+              reviewerIdHash: artifactHash,
+            },
+          },
+        }),
+      /evaluation requires a reviewer with no Amp project/,
+    )
+    const researchRun = evalRunSchema.parse({
+      ...run,
+      reviewer: {
+        ...run.reviewer,
+        project: null,
+        protocol: "research-enabled-target-frozen",
+        account: {
+          authentication: "reviewer-api-key",
+          reviewerIdHash: artifactHash,
+        },
+      },
+    })
+    const researchReport = formatReport(researchRun, scoreRun(researchRun))
+    assert.match(researchReport, /Review evaluation: PUBLIC RESEARCH ALLOWED/)
+    assert.match(researchReport, /could research anything public/)
+    assert.doesNotMatch(researchReport, /HISTORICAL RESULT/)
+    run.samples[0]!.promptHash = "0".repeat(64)
+    assert.throws(() => evalRunSchema.parse(run), /prompt hash does not match/)
+    run.samples[0]!.promptHash = createHash("sha256").update(prompt).digest("hex")
+    run.samples[0]!.durationMs = 11
+    assert.throws(() => evalRunSchema.parse(run), /sample duration must equal/)
+    run.samples[0]!.durationMs = 10
+    const mutableSample = run.samples[0] as { trace: unknown[] }
+    mutableSample.trace = [
+      toolMessage("web_search", { objective: "Inspect lox/example PR 42" }),
+    ]
+    const reaudited = evalRunSchema.parse(run)
+    assert.deepEqual(reaudited.samples[0]!.evidenceBoundaryViolations, [])
+    assert.match(formatReport(reaudited, scoreRun(reaudited)), /trace also shows/)
+    mutableSample.trace = trace
+    if (run.samples[0]!.status !== "completed") assert.fail("expected completed sample")
+    run.samples[0]!.judgements[0]!.provenance.promptHash = "0".repeat(64)
+    assert.throws(() => evalRunSchema.parse(run), /judgement prompt hash does not match/)
+    run.samples[0]!.judgements[0]!.provenance.promptHash = createHash("sha256")
+      .update(run.samples[0]!.judgements[0]!.provenance.prompt!)
+      .digest("hex")
+    delete (run.samples[0] as { prompt?: string }).prompt
+    assert.throws(() => evalRunSchema.parse(run), /full prompt, trace, phase timings/)
   })
 
   it("keeps older two-key run evidence readable", () => {
@@ -546,7 +1098,7 @@ describe("eval scoring", () => {
           corpusHash: artifactHash,
           samples: [completed("control", 1, control, "success", [], [])],
         }),
-      /corpus hash does not match/,
+      /example data hash does not match/,
     )
   })
 
@@ -604,6 +1156,16 @@ describe("eval judging", () => {
       assert.ok(options.every((item) => !("project" in item)))
       assert.ok(options.every((item) => item.cwd === tmpdir()))
       assert.equal(result.provenance.project, null)
+      assert.match(result.provenance.prompt!, /Known issue:/)
+      assert.match(result.provenance.responseSchema!, /matchingFindingIndices/)
+      assert.equal(
+        result.provenance.promptHash,
+        createHash("sha256").update(result.provenance.prompt!).digest("hex"),
+      )
+      assert.equal(
+        result.provenance.schemaHash,
+        createHash("sha256").update(result.provenance.responseSchema!).digest("hex"),
+      )
     } finally {
       await rm(cacheDirectory, { recursive: true, force: true })
     }
@@ -621,6 +1183,7 @@ describe("eval judging", () => {
     let calls = 0
     const judge = (async () => {
       calls += 1
+      await new Promise((resolve) => setTimeout(resolve, 5))
       return judgement([0], false)
     }) as typeof judgeIssue
 
@@ -637,6 +1200,7 @@ describe("eval judging", () => {
     if (sourceRun.samples[0]!.status !== "completed") assert.fail("expected completed source")
     assert.equal(run.samples[0]!.rawResult, sourceRun.samples[0]!.rawResult)
     assert.equal(run.samples[0]!.durationMs, sourceRun.samples[0]!.durationMs)
+    assert.equal(run.samples[0]!.matchingDurationMs, undefined)
     assert.deepEqual(run.samples[0]!.judgementErrors, [])
     assert.equal(run.samples[0]!.judgements.length, 1)
 
@@ -787,6 +1351,7 @@ describe("eval judging", () => {
 
 async function createPackFixture(largeSourceTransfer = false): Promise<{
   root: string
+  source: string
   pack: string
   cache: string
   origin: string
@@ -882,7 +1447,15 @@ async function createPackFixture(largeSourceTransfer = false): Promise<{
       2,
     )}\n`,
   )
-  return { root, pack, cache: join(root, "cache"), origin, base, clean, alternate }
+  return { root, source, pack, cache: join(root, "cache"), origin, base, clean, alternate }
+}
+
+async function runSourcePreparation(preparation: string, cwd: string): Promise<void> {
+  const commands = /Run these commands from the repository:\n\n([\s\S]+?)\n\nUse only/.exec(
+    preparation,
+  )?.[1]
+  assert.ok(commands)
+  await execFileAsync("bash", ["-c", commands], { cwd })
 }
 
 async function git(cwd: string, args: string[]): Promise<string> {
@@ -992,6 +1565,8 @@ function judgement(
   disagreement: boolean,
   issueId = "known-failure",
 ) {
+  const prompt = "saved matching prompt"
+  const responseSchema = '{"matchingFindingIndices":[0]}'
   return {
     issueId,
     matchingFindingIndices,
@@ -1005,8 +1580,10 @@ function judgement(
       mode: "high",
       sdkVersion: "test-sdk",
       project: "no-project",
-      promptHash: "prompt",
-      schemaHash: "schema",
+      prompt,
+      responseSchema,
+      promptHash: createHash("sha256").update(prompt).digest("hex"),
+      schemaHash: createHash("sha256").update(responseSchema).digest("hex"),
     },
   }
 }
@@ -1026,6 +1603,42 @@ function judgeResult() {
     type: "result",
     is_error: false,
     result: '{"matchingFindingIndices":[0]}',
+  }
+}
+
+function traceSystemMessage(sessionId = "thread-1", cwd = "/workspace") {
+  return {
+    type: "system",
+    subtype: "init",
+    session_id: sessionId,
+    cwd,
+    tools: [],
+    mcp_servers: [],
+  }
+}
+
+function toolMessage(name: string, input: Record<string, unknown>, id = "tool") {
+  return {
+    type: "assistant",
+    message: {
+      content: [{ type: "tool_use", id, name, input }],
+    },
+  }
+}
+
+function toolResultMessage(toolUseId: string, isError = false) {
+  return {
+    type: "user",
+    message: {
+      content: [
+        {
+          type: "tool_result",
+          tool_use_id: toolUseId,
+          content: "command completed",
+          is_error: isError,
+        },
+      ],
+    },
   }
 }
 

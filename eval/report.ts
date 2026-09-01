@@ -1,15 +1,37 @@
 import type { EvalCase, EvalRun, EvalSample } from "./schema.js"
 import { expectedKind } from "./schema.js"
 import type { EvalScore } from "./score.js"
+import { checkReviewTrace, sourcePreparationFromPrompt } from "./evidence.js"
 
 export function formatReport(run: EvalRun, score: EvalScore): string {
-  const lines = [`Review evaluation: ${reportVerdict(score)}`, ""]
+  const traceProblems = traceProblemCount(run)
+  const usesCurrentRules = run.reviewer.protocol === "research-enabled-target-frozen"
+  const lines = usesCurrentRules
+    ? [
+        "Review evaluation: PUBLIC RESEARCH ALLOWED",
+        `Recorded result: ${reportVerdict(score, traceProblems)}`,
+        "The reviewer could research anything public except this pull request and another copy or later version of the target repository.",
+        "",
+      ]
+    : [
+        "Review evaluation: HISTORICAL RESULT",
+        `Recorded result: ${reportVerdict(score, traceProblems)}`,
+        "This older run allowed access to the target pull request and repository history. Use its counts for investigation, not comparison.",
+        "",
+      ]
   const counts = countKinds(run.cases)
+  const seedCounts = countSeedOutcomes(score)
   lines.push(
-    `${countLabel(counts.control, "clean change")}, ${countLabel(counts.advisory, "smaller issue")}, and ${countLabel(counts.blocking, "serious issue")}.`,
+    `${countLabel(score.seeds.length, "pull-request example")}: ${seedCounts.pass} pass, ${seedCounts.unstable} unstable, ${seedCounts.fail} fail.`,
+    `${versionCount(counts.control, "with no recorded issues")}, ${versionCount(counts.advisory, "with recorded non-blocking issues")}, and ${versionCount(counts.blocking, "with recorded blocking issues")}.`,
     `Each was reviewed ${run.requestedSamplesPerCase} ${run.requestedSamplesPerCase === 1 ? "time" : "times"}. ${completionSentence(run, score)}`,
-    "A right response reports a smaller issue without blocking, and blocks a serious issue.",
+    "One repeat passes only when every version finds every recorded issue with the right urgency and raises no alert on a version with no recorded issues.",
   )
+  if (traceProblems > 0) {
+    lines.push(
+      `${traceProblems} review ${traceProblems === 1 ? "did" : "runs did"} not follow the source setup or target repository rules. This run is not valid for comparison.`,
+    )
+  }
 
   const scores = new Map(score.cases.map((caseScore) => [caseScore.caseId, caseScore]))
   const samples = new Map<string, EvalSample[]>()
@@ -26,9 +48,14 @@ export function formatReport(run: EvalRun, score: EvalScore): string {
   }
 
   let exampleNumber = 0
+  const seedScores = new Map(score.seeds.map((seed) => [seed.seedId, seed]))
   for (const cases of examples.values()) {
     exampleNumber += 1
-    lines.push("", `Example ${exampleNumber} (pull request #${cases[0]!.pullNumber})`)
+    const seed = seedScores.get(cases[0]!.seedId)!
+    lines.push(
+      "",
+      `Example ${exampleNumber} (pull request #${cases[0]!.pullNumber}): ${seed.outcome.toUpperCase()} (${seed.passedSamples}/${seed.samples} repeats passed)`,
+    )
     for (const evalCase of cases) {
       const caseScore = scores.get(evalCase.id)
       if (!caseScore) continue
@@ -36,12 +63,23 @@ export function formatReport(run: EvalRun, score: EvalScore): string {
     }
   }
 
-  lines.push("", "Bottom line", `  ${bottomLine(run, score)}`, "")
+  lines.push(
+    "",
+    "Bottom line",
+    `  ${bottomLine(run, score, traceProblems, usesCurrentRules)}`,
+    "",
+  )
   lines.push(
     `Evidence: ${run.cases.length} code versions and ${run.samples.length} review runs.`,
     "This result covers only these examples; it is not a general quality claim.",
   )
   return lines.join("\n")
+}
+
+function countSeedOutcomes(score: EvalScore): Record<"pass" | "unstable" | "fail", number> {
+  const counts = { pass: 0, unstable: 0, fail: 0 }
+  for (const seed of score.seeds) counts[seed.outcome] += 1
+  return counts
 }
 
 function countKinds(cases: EvalCase[]): Record<"control" | "advisory" | "blocking", number> {
@@ -52,6 +90,10 @@ function countKinds(cases: EvalCase[]): Record<"control" | "advisory" | "blockin
 
 function countLabel(count: number, singular: string): string {
   return `${count} ${singular}${count === 1 ? "" : "s"}`
+}
+
+function versionCount(count: number, description: string): string {
+  return `${count} ${count === 1 ? "version" : "versions"} ${description}`
 }
 
 function completionSentence(run: EvalRun, score: EvalScore): string {
@@ -67,16 +109,23 @@ function caseResult(
   samples: EvalSample[],
 ): string {
   const kind = expectedKind(evalCase.expected)
+  const role =
+    evalCase.versionRole === "baseline"
+      ? "Baseline"
+      : evalCase.versionRole === "introduced-issue"
+        ? "Introduced-issue version"
+        : "Version"
   const completed = rateCount(score.operationalCompletion, score.samples)
   if (kind === "control") {
-    if (completed === 0) return "Clean change: no reviews completed"
-    const falseAlarms = rateCount(score.cleanAlertRate, completed)
-    return `Clean change: ${completed - falseAlarms} of ${completed} completed reviews had no false alarms`
+    if (completed === 0) return `${role}, no recorded issues: no reviews completed`
+    const cleanAlerts = rateCount(score.cleanAlertRate, completed)
+    return `${role}, no recorded issues: ${completed - cleanAlerts} of ${completed} completed reviews raised no alert`
   }
   const opportunities = score.samples * score.knownIssues
   const found = rateCount(score.issueDetectionRate, opportunities)
   const rightResponse = rateCount(score.groundedConclusionAgreement, score.samples)
-  const label = kind === "advisory" ? "Smaller issue" : "Serious issue"
+  const label =
+    kind === "advisory" ? "recorded non-blocking issues" : "recorded blocking issues"
   const retainedFindings = samples.reduce(
     (total, sample) =>
       total + (sample.status === "completed" ? sample.retainedResult.findings.length : 0),
@@ -86,45 +135,47 @@ function caseResult(
   const otherFindingsText =
     otherFindings === 0
       ? ""
-      : `; ${otherFindings} other ${otherFindings === 1 ? "finding needs" : "findings need"} checking`
+      : `; ${otherFindings} unmatched ${otherFindings === 1 ? "finding needs" : "findings need"} source checking`
   const foundText =
     score.knownIssues === 1
       ? `found in ${found} of ${score.samples}`
       : `${found} of ${opportunities} known issues found`
-  return `${label}: ${foundText}; right response in ${rightResponse} of ${score.samples}${otherFindingsText}`
+  return `${role}, ${label}: ${foundText}; response matched the recorded issues in ${rightResponse} of ${score.samples}${otherFindingsText}`
 }
 
-function reportVerdict(score: EvalScore): string {
+function reportVerdict(score: EvalScore, traceProblems: number): string {
+  if (traceProblems > 0) return "INVALID FOR COMPARISON"
+  if (score.seeds.length === 0) return "INCOMPLETE"
   if (
     score.operationalCompletion < 1 ||
     (score.judgeCoverage !== null && score.judgeCoverage < 1)
   ) {
     return "INCOMPLETE"
   }
-  let needsMoreRuns = false
-  for (const caseScore of score.cases) {
-    const correct = rateCount(caseScore.groundedConclusionAgreement, caseScore.samples)
-    if (caseScore.samples === 3 && correct === 2) {
-      needsMoreRuns = true
-      continue
-    }
-    if (caseScore.samples === 5 && correct >= 4) continue
-    if (correct === caseScore.samples) continue
-    if (caseScore.samples !== 5 && correct > caseScore.samples / 2) {
-      needsMoreRuns = true
-      continue
-    }
-    return "NEEDS WORK"
-  }
-  return needsMoreRuns ? "MORE RUNS NEEDED" : "PASSED THESE EXAMPLES"
+  if (score.seeds.some((seed) => seed.outcome === "fail")) return "NEEDS WORK"
+  if (score.seeds.some((seed) => seed.outcome === "unstable")) return "UNSTABLE"
+  return "PASSED THESE EXAMPLES"
 }
 
-function bottomLine(run: EvalRun, score: EvalScore): string {
+function bottomLine(
+  run: EvalRun,
+  score: EvalScore,
+  traceProblems: number,
+  usesCurrentRules: boolean,
+): string {
+  if (traceProblems > 0) {
+    return usesCurrentRules
+      ? `${traceProblems} review ${traceProblems === 1 ? "did" : "runs did"} not follow the source setup or target repository rules, so this run cannot be compared with other runs.`
+      : `This historical run is for investigation only. Its trace also shows that ${traceProblems} review ${traceProblems === 1 ? "did" : "runs did"} not follow the current rules.`
+  }
+  const scopePrefix = usesCurrentRules
+    ? "Under these review rules,"
+    : "For investigation only;"
   if (score.operationalCompletion < 1) {
-    return "Some reviews did not finish, so this run cannot give a complete answer."
+    return `${scopePrefix} some reviews did not finish, so the recorded counts are incomplete.`
   }
   if (score.judgeCoverage !== null && score.judgeCoverage < 1) {
-    return "Some findings could not be checked against the known issues, so this run cannot give a complete answer."
+    return `${scopePrefix} some findings could not be checked against the known issues, so the recorded counts are incomplete.`
   }
   const cases = new Map(run.cases.map((evalCase) => [evalCase.id, evalCase]))
   const cleanScores = score.cases.filter(
@@ -133,7 +184,7 @@ function bottomLine(run: EvalRun, score: EvalScore): string {
   const bugScores = score.cases.filter(
     (caseScore) => expectedKind(cases.get(caseScore.caseId)!.expected) !== "control",
   )
-  const falseAlarms = cleanScores.reduce((total, caseScore) => {
+  const cleanAlerts = cleanScores.reduce((total, caseScore) => {
     const completed = rateCount(caseScore.operationalCompletion, caseScore.samples)
     return total + rateCount(caseScore.cleanAlertRate, completed)
   }, 0)
@@ -151,16 +202,27 @@ function bottomLine(run: EvalRun, score: EvalScore): string {
     (total, caseScore) => total + rateCount(caseScore.groundedConclusionAgreement, caseScore.samples),
     0,
   )
+  const retainedFindings = run.samples.reduce(
+    (total, sample) =>
+      total + (sample.status === "completed" ? sample.retainedResult.findings.length : 0),
+    0,
+  )
+  const unmatchedFindings = Math.max(0, retainedFindings - bugsFound)
 
   const observations: string[] = []
-  if (falseAlarms > 0) {
+  if (cleanAlerts > 0) {
     observations.push(
-      `The reviewer raised ${falseAlarms} ${falseAlarms === 1 ? "false alarm" : "false alarms"} on clean code.`,
+      `The reviewer raised ${cleanAlerts} ${cleanAlerts === 1 ? "alert" : "alerts"} on versions with no recorded issues; check the source before deciding whether those alerts were wrong.`,
+    )
+  }
+  if (unmatchedFindings > 0) {
+    observations.push(
+      `${unmatchedFindings} unmatched ${unmatchedFindings === 1 ? "finding needs" : "findings need"} source checking.`,
     )
   }
   if (bugsFound < bugReviews) {
     observations.push(
-      `The reviewer missed the known issue in ${bugReviews - bugsFound} of ${bugReviews} issue reviews.`,
+      `The reviewer missed a recorded issue in ${bugReviews - bugsFound} of ${bugReviews} reviews of versions with issues.`,
     )
   } else if (rightResponses < bugVersionReviews) {
     observations.push(
@@ -168,8 +230,26 @@ function bottomLine(run: EvalRun, score: EvalScore): string {
     )
   }
   return observations.length > 0
-    ? observations.join(" ")
-    : "The reviewer handled every example correctly in these runs."
+    ? `${scopePrefix} ${observations.join(" ")}`
+    : `${scopePrefix} the reviewer handled every recorded example correctly.`
+}
+
+function traceProblemCount(run: EvalRun): number {
+  const cases = new Map(run.cases.map((evalCase) => [evalCase.id, evalCase]))
+  return run.samples.filter((sample) => {
+    const saved = sample.evidenceBoundaryViolations ?? []
+    const evalCase = cases.get(sample.caseId)!
+    const current =
+      sample.trace === undefined || sample.prompt === undefined
+        ? []
+        : checkReviewTrace(sample.trace, sourcePreparationFromPrompt(sample.prompt), {
+            repository: evalCase.repositoryFullName,
+            pullNumber: evalCase.pullNumber,
+            baseSha: evalCase.baseSha,
+            headSha: evalCase.headSha,
+          })
+    return saved.length > 0 || current.length > 0
+  }).length
 }
 
 function rateCount(rate: number | null, total: number): number {

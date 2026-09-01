@@ -1,21 +1,24 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
 import { createHash } from "node:crypto"
-import { mkdtemp, rm, stat } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, stat } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { z } from "zod"
 
-const outputSchema = z.object({
-  rawResult: z.string(),
+const outputFields = {
   threadId: z.string().nullable(),
   models: z.array(z.string()),
-})
+  trace: z.array(z.unknown()),
+}
+const outputSchema = z.discriminatedUnion("status", [
+  z.object({ ...outputFields, status: z.literal("completed"), rawResult: z.string() }).strict(),
+  z.object({ ...outputFields, status: z.literal("error"), error: z.string() }).strict(),
+])
 
-export type BlindReviewInput = {
+export type EvaluationReviewInput = {
   prompt: string
   title: string
-  project: string
   timeoutMs: number
   apiKey?: string
   signal: AbortSignal
@@ -48,15 +51,17 @@ export async function reviewAuthentication(
   }
 }
 
-export async function runBlindReview(
-  input: BlindReviewInput,
+export async function runEvaluationReview(
+  input: EvaluationReviewInput,
   spawnReviewer: SpawnReviewer = spawn,
 ): Promise<z.infer<typeof outputSchema>> {
   input.signal.throwIfAborted()
-  const home = input.apiKey
-    ? await mkdtemp(join(tmpdir(), "amp-reviewbot-reviewer-"))
-    : undefined
+  const temporaryDirectory = await mkdtemp(join(tmpdir(), "amp-reviewbot-reviewer-"))
+  const cwd = join(temporaryDirectory, "source")
+  const home = input.apiKey ? join(temporaryDirectory, "home") : undefined
   try {
+    await mkdir(cwd)
+    if (home) await mkdir(home)
     const { args, entry } = await childCommand()
     return await new Promise((resolveReview, rejectReview) => {
       const child = spawnReviewer(process.execPath, [...args, entry], {
@@ -82,16 +87,48 @@ export async function runBlindReview(
         childError = error
       })
       child.stdin.once("error", (error) => {
-        inputError = new Error("Could not send review input to the blind reviewer", { cause: error })
+        inputError = new Error("Could not send evaluation review input", { cause: error })
         stopChild()
       })
       child.once("close", (code) => {
         cleanup()
+        const errorMessage = Buffer.concat(stderr).toString("utf8").trim()
+        const output = Buffer.concat(stdout).toString("utf8")
+        if (output) {
+          try {
+            const parsed = outputSchema.parse(JSON.parse(output))
+            resolveReview(
+              input.signal.aborted && parsed.status === "completed"
+                ? {
+                    status: "error",
+                    error:
+                      input.signal.reason instanceof Error
+                        ? input.signal.reason.message
+                        : String(input.signal.reason ?? "Evaluation review was cancelled"),
+                    threadId: parsed.threadId,
+                    models: parsed.models,
+                    trace: parsed.trace,
+                  }
+                : parsed,
+            )
+            return
+          } catch (parseError) {
+            if (input.signal.aborted) {
+              rejectReview(input.signal.reason)
+              return
+            }
+            if (code === 0) {
+              rejectReview(
+                new Error("Evaluation reviewer returned an invalid result", { cause: parseError }),
+              )
+              return
+            }
+          }
+        }
         if (input.signal.aborted) {
           rejectReview(input.signal.reason)
           return
         }
-        const errorMessage = Buffer.concat(stderr).toString("utf8").trim()
         if (childError) {
           rejectReview(childError)
           return
@@ -101,20 +138,16 @@ export async function runBlindReview(
           return
         }
         if (code !== 0) {
-          rejectReview(new Error(errorMessage || `Blind reviewer exited with status ${code}`))
+          rejectReview(new Error(errorMessage || `Evaluation reviewer exited with status ${code}`))
           return
         }
-        try {
-          resolveReview(outputSchema.parse(JSON.parse(Buffer.concat(stdout).toString("utf8"))))
-        } catch (parseError) {
-          rejectReview(new Error("Blind reviewer returned an invalid result", { cause: parseError }))
-        }
+        rejectReview(new Error("Evaluation reviewer returned no result"))
       })
       child.stdin.end(
         JSON.stringify({
           prompt: input.prompt,
           title: input.title,
-          project: input.project,
+          cwd,
           timeoutMs: input.timeoutMs,
         }),
       )
@@ -125,7 +158,7 @@ export async function runBlindReview(
       }
     })
   } finally {
-    if (home) await rm(home, { recursive: true, force: true })
+    await rm(temporaryDirectory, { recursive: true, force: true })
   }
 }
 
