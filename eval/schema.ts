@@ -224,6 +224,7 @@ const judgementFields = {
   provenance: z.object({
     version: z.string(),
     mode: z.string(),
+    model: z.string().optional(),
     sdkVersion: z.string(),
     cliVersion: z.string().optional(),
     project: z.string().nullable(),
@@ -315,13 +316,18 @@ export const evalRunSchema = z
       dirty: z.boolean(),
       sdkVersion: z.string(),
       cliVersion: z.string().optional(),
-      mode: z.literal("medium"),
+      mode: z.enum(["medium", "review-gpt56sol-v1"]),
+      model: z.string().optional(),
       failOn: z.literal("high"),
       reviewSourceHash: z.string(),
       methodologyHash: z.string(),
       project: z.string().min(1).nullable(),
       protocol: z
-        .enum(["research-enabled-target-frozen", "research-enabled-target-frozen-v2"])
+        .enum([
+          "research-enabled-target-frozen",
+          "research-enabled-target-frozen-v2",
+          "research-enabled-target-frozen-v3",
+        ])
         .optional(),
       account: z.union([
         z
@@ -365,13 +371,25 @@ export const evalRunSchema = z
         })
       }
       if (
-        run.reviewer.protocol === "research-enabled-target-frozen-v2" &&
+        (run.reviewer.protocol === "research-enabled-target-frozen-v2" ||
+          run.reviewer.protocol === "research-enabled-target-frozen-v3") &&
         run.reviewer.cliVersion === undefined
       ) {
         context.addIssue({
           code: "custom",
           path: ["reviewer", "cliVersion"],
           message: "this evaluation requires the exact Amp CLI version",
+        })
+      }
+      if (
+        run.reviewer.protocol === "research-enabled-target-frozen-v3" &&
+        (run.reviewer.mode !== "review-gpt56sol-v1" ||
+          run.reviewer.model !== "openai/gpt-5.6-sol")
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["reviewer"],
+          message: "this evaluation requires the pinned review mode and model",
         })
       }
       if (
@@ -488,13 +506,25 @@ export const evalRunSchema = z
           sample.judgements.forEach((judgement, judgementIndex) => {
             const provenance = judgement.provenance
             if (
-              run.reviewer.protocol === "research-enabled-target-frozen-v2" &&
+              (run.reviewer.protocol === "research-enabled-target-frozen-v2" ||
+                run.reviewer.protocol === "research-enabled-target-frozen-v3") &&
               provenance.cliVersion === undefined
             ) {
               context.addIssue({
                 code: "custom",
                 path: ["samples", index, "judgements", judgementIndex, "provenance", "cliVersion"],
                 message: "this evaluation requires the Amp CLI version for each judgement",
+              })
+            }
+            if (
+              run.reviewer.protocol === "research-enabled-target-frozen-v3" &&
+              (provenance.mode !== "judge-gpt56sol-v1" ||
+                provenance.model !== "openai/gpt-5.6-sol")
+            ) {
+              context.addIssue({
+                code: "custom",
+                path: ["samples", index, "judgements", judgementIndex, "provenance", "model"],
+                message: "this evaluation requires the pinned finding-check mode and model",
               })
             }
             if (provenance.prompt === undefined || provenance.responseSchema === undefined) {

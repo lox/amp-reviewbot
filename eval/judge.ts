@@ -1,15 +1,19 @@
 import { createHash, randomUUID } from "node:crypto"
-import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, rename, rm, unlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { resolve } from "node:path"
+import { join, resolve } from "node:path"
 import { execute } from "@ampcode/sdk"
 import { z } from "zod"
+import {
+  agentModeFromMessage,
+  judgeMode,
+  pinnedModel,
+} from "../src/amp.js"
 import type { ReviewFinding } from "../src/types.js"
 import { modelFromMessage } from "./evidence.js"
 import type { EvalJudgement, ExpectedIssue } from "./schema.js"
 
-const judgeVersion = "6"
-const judgeMode = "high"
+const judgeVersion = "7"
 const judgeProject = null
 const judgeResponseSchemaDocument = `{
   "type": "object",
@@ -77,6 +81,7 @@ export async function judgeIssue(
   const provenance = {
     version: judgeVersion,
     mode: judgeMode,
+    model: pinnedModel,
     ...versions,
     project: judgeProject,
     prompt,
@@ -139,6 +144,7 @@ async function judgeVote(
     JSON.stringify({
       judgeVersion,
       judgeMode,
+      pinnedModel,
       judgeSchemaHash,
       ...versions,
       project: judgeProject,
@@ -198,26 +204,37 @@ async function readOrCreateJudgeVote(
 
   const models = new Set<string>()
   let response: string | undefined
-  for await (const message of executeAmp({
-    prompt,
-    signal,
-    options: {
-      executor: "orb",
-      cwd: tmpdir(),
-      mode: judgeMode,
-      visibility: "private",
-      title: `Check known issue match ${caseId}`,
-      labels: ["reviewbot-eval"],
-    },
-  })) {
-    const model = modelFromMessage(message)
-    if (model !== undefined) models.add(model)
-    if (message.type === "result") {
-      if (message.is_error) throw new Error(message.error)
-      response = message.result
+  let usedExpectedMode = false
+  const workspace = await mkdtemp(join(tmpdir(), "amp-reviewbot-judge-"))
+  try {
+    for await (const message of executeAmp({
+      prompt,
+      signal,
+      options: {
+        executor: "orb",
+        cwd: workspace,
+        mode: judgeMode,
+        visibility: "private",
+        title: `Check known issue match ${caseId}`,
+        labels: ["reviewbot-eval"],
+      },
+    })) {
+      if (message.type === "system" && agentModeFromMessage(message) !== judgeMode) {
+        throw new Error(`Amp started in an unexpected mode; expected ${judgeMode}`)
+      }
+      if (message.type === "system") usedExpectedMode = true
+      const model = modelFromMessage(message)
+      if (model !== undefined) models.add(model)
+      if (message.type === "result") {
+        if (message.is_error) throw new Error(message.error)
+        response = message.result
+      }
     }
+  } finally {
+    await rm(workspace, { recursive: true, force: true })
   }
   signal.throwIfAborted()
+  if (!usedExpectedMode) throw new Error(`Amp did not report the expected mode ${judgeMode}`)
   if (!response) throw new Error("Judge ended without a result")
 
   const result = judgeResponseSchema.parse(parseJson(response))

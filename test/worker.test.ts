@@ -20,8 +20,15 @@ describe("executeReviewWithRetries", () => {
     assert.equal(fake.calls[0]?.options?.title, "Review lox/example#42")
     assert.equal(fake.calls[0]?.options?.executor, "orb")
     assert.equal(fake.calls[0]?.options?.project, "lox/example")
-    assert.equal(fake.calls[0]?.options?.mode, "medium")
+    assert.equal(fake.calls[0]?.options?.mode, "review-gpt56sol-v1")
     assert.equal(fake.calls[0]?.options?.continue, undefined)
+  })
+
+  it("rejects a review that did not start in the pinned mode", async () => {
+    const fake = fakeExecute([[systemMessage("medium"), successMessage(validResult)]])
+
+    await assert.rejects(() => run(fake.execute), /expected review-gpt56sol-v1/)
+    assert.equal(fake.calls.length, 1)
   })
 
   it("starts evaluation reviews from an explicit no-project directory", async () => {
@@ -231,15 +238,16 @@ function fakeExecute(attempts: StreamMessage[][], beforeResult?: () => void): {
   }
 }
 
-function systemMessage(): StreamMessage {
+function systemMessage(agentMode = "review-gpt56sol-v1"): StreamMessage {
   return {
     type: "system",
     subtype: "init",
     session_id: threadId,
     cwd: "/workspace",
+    agent_mode: agentMode,
     tools: [],
     mcp_servers: [],
-  }
+  } as unknown as StreamMessage
 }
 
 function assistantMessage(text: string): StreamMessage {

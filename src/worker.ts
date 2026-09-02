@@ -4,6 +4,7 @@ import { promisify } from "node:util"
 import { execute } from "@ampcode/sdk"
 import type { StreamMessage } from "@ampcode/sdk"
 import type { Logger } from "pino"
+import { agentModeFromMessage, reviewMode } from "./amp.js"
 import type { Config } from "./config.js"
 import { Database } from "./database.js"
 import { GitHubClient } from "./github.js"
@@ -14,7 +15,6 @@ const execFileAsync = promisify(execFile)
 const ampRetryDelaysMs = [5_000, 20_000]
 const staleRecoveryIntervalMs = 60_000
 const maxJobAttempts = 3
-export const reviewMode = "medium" as const
 const continuationPrompt =
   "Complete the review if necessary, then return only the final review JSON in the required schema."
 
@@ -73,6 +73,9 @@ export async function executeReviewWithRetries({
       })) {
         onMessage?.(message)
         if (message.type === "system") {
+          if (agentModeFromMessage(message) !== reviewMode) {
+            throw new Error(`Amp started in an unexpected mode; expected ${reviewMode}`)
+          }
           if (threadId && message.session_id !== threadId) {
             throw new Error(`Amp continued as unexpected thread ${message.session_id}`)
           }
