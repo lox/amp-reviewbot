@@ -6,6 +6,7 @@ import type { StreamMessage } from "@ampcode/sdk"
 import pino from "pino"
 import { z } from "zod"
 import { executeReviewWithRetries } from "../src/worker.js"
+import { modelsFromTrace } from "./evidence.js"
 
 const execFileAsync = promisify(execFile)
 const inputSchema = z.object({
@@ -25,7 +26,6 @@ async function main(): Promise<void> {
     () => controller.abort(new Error("Evaluation review timed out")),
     input.timeoutMs,
   )
-  const models = new Set<string>()
   const trace: StreamMessage[] = []
   let threadId: string | null = null
 
@@ -44,17 +44,14 @@ async function main(): Promise<void> {
         beforeRetry: async () => {},
         onMessage: (message) => {
           trace.push(message)
-          if (message.type === "assistant" && typeof message.message.model === "string") {
-            models.add(message.message.model)
-          }
         },
       })
       process.stdout.write(
-        `${JSON.stringify({ status: "completed", rawResult, threadId, models: [...models], trace })}\n`,
+        `${JSON.stringify({ status: "completed", rawResult, threadId, models: modelsFromTrace(trace), trace })}\n`,
       )
     } catch (error) {
       process.stdout.write(
-        `${JSON.stringify({ status: "error", error: errorMessage(error), threadId, models: [...models], trace })}\n`,
+        `${JSON.stringify({ status: "error", error: errorMessage(error), threadId, models: modelsFromTrace(trace), trace })}\n`,
       )
     }
   } finally {

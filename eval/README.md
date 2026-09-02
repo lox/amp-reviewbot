@@ -33,13 +33,19 @@ The reviewer gets the same public research tools as a real review. It may read p
 
 There is one restriction: for the repository being reviewed, it must use only the copy we provide. It must not look up the target pull request through GitHub, nor clone, fetch, or inspect another copy of that repository. The supplied copy contains only the history needed for the exact base and reviewed commits. It has no remote, later commits, other branches, or evaluation labels.
 
-The saved trace is checked for three things: the source setup ran first and completed in the original workspace; research tools did not name the target pull request or repository; and the prepared repository did not run `git fetch` or `git pull`. If one of these checks fails, the report says the run is invalid for comparison.
+The saved trace is checked for four things: the source setup ran first and completed before other tools ran; the review used the chosen Amp mode and did not explicitly move shell commands outside its prepared workspace; research tools did not name the target pull request or repository; and the prepared repository did not run `git fetch` or `git pull`. If one of these checks fails, the report says the run is invalid for comparison. The check uses the workspace named by the review's first shell command because Amp reports the trusted machine's path during startup and the mounted orb path in tool calls.
 
 This is a rule plus a trace check, not a secure sandbox. A reviewer trying to cheat could hide a lookup in another process. Preventing all public access would make the test unlike a real review, so we accept that risk. The results measure a reviewer following the instructions in a realistic environment; they do not prove resistance to deliberate cheating.
 
 The example data, recorded issues, focused tests, paired versions, and previous results remain private. Review calls require `AMP_EVAL_REVIEWER_API_KEY` from a separate identity that cannot access them. The review process receives only that key, an empty home directory, one prepared source copy, the pull-request context captured before the run, and the normal review instructions. A trusted local login is used later to compare findings with the recorded issues.
 
 Older result files remain readable, but their reports clearly say that they are historical results and should not be compared with runs using the current rules.
+
+## Amp mode and model
+
+The evaluation uses Amp's built-in `medium` mode, just like the production reviewer. Amp's normal agent API does not let us choose an exact model. A custom plugin can pin a model, but it would replace part of the normal `medium` agent and make the evaluation less like production, so this evaluation does not use one.
+
+Each result records the exact Amp SDK and CLI versions, checks the mode reported by every review, and saves exact model IDs when Amp reports them. Current Amp streams sometimes omit the model ID; an empty model list means “not reported,” not “no model was used.” Run comparisons close together, and do not claim exact-model reproducibility unless both results contain the same reported model IDs.
 
 ## Commands
 
@@ -93,6 +99,8 @@ A report starts by saying what access was allowed and explains each repeat in pl
 Review evaluation: PUBLIC RESEARCH ALLOWED
 Recorded result: NEEDS WORK
 The reviewer could research anything public except this pull request and another copy or later version of the target repository.
+Reviewer: Amp mode medium. SDK: <exact SDK version>. CLI: <exact CLI version>.
+Exact model IDs: not reported by Amp.
 
 2 pull-request examples: 1 pass, 1 unstable, 0 fail.
 1 version with no recorded issues, 1 version with recorded non-blocking issues, and 1 version with recorded blocking issues.
@@ -103,7 +111,7 @@ Example 1 (pull request #1234): PASS (3/3 repeats passed)
   Introduced-issue version, recorded blocking issues: found in 3 of 3; response matched the recorded issues in 3 of 3
 ```
 
-The saved file keeps enough detail to reproduce and inspect the counts: exact commits and context, prompts, full tool traces, model IDs, raw and filtered findings, matching decisions, timing, execution order, source checks, and errors. A report also applies the latest trace checks without changing the original file. Treat the file as private and potentially sensitive.
+The saved file keeps enough detail to reproduce and inspect the counts: exact commits and context, prompts, full tool traces, Amp mode, exact SDK and CLI versions, model IDs when Amp reports them, raw and filtered findings, matching decisions, timing, execution order, source checks, and errors. A report also applies the latest trace checks without changing the original file. Treat the file as private and potentially sensitive.
 
 Each source pull request is one example. For a synthetic before-and-after pair, one repeat passes only when the reviewer gets both versions right. Three repeats support a development check, not a broad accuracy claim: 3 of 3 is a provisional pass, 2 of 3 is unstable, and 0 or 1 needs work. If five repeats were chosen before the run, require at least 4 of 5. Never add only favorable reruns.
 

@@ -5,12 +5,14 @@ import { checkReviewTrace, sourcePreparationFromPrompt } from "./evidence.js"
 
 export function formatReport(run: EvalRun, score: EvalScore): string {
   const traceProblems = traceProblemCount(run)
-  const usesCurrentRules = run.reviewer.protocol === "research-enabled-target-frozen"
+  const usesCurrentRules = run.reviewer.protocol?.startsWith("research-enabled-target-frozen") ?? false
   const lines = usesCurrentRules
     ? [
         "Review evaluation: PUBLIC RESEARCH ALLOWED",
         `Recorded result: ${reportVerdict(score, traceProblems)}`,
         "The reviewer could research anything public except this pull request and another copy or later version of the target repository.",
+        `Reviewer: Amp mode ${run.reviewer.mode}. SDK: ${run.reviewer.sdkVersion}. CLI: ${run.reviewer.cliVersion ?? "not recorded"}.`,
+        modelSentence(run),
         "",
       ]
     : [
@@ -29,7 +31,7 @@ export function formatReport(run: EvalRun, score: EvalScore): string {
   )
   if (traceProblems > 0) {
     lines.push(
-      `${traceProblems} review ${traceProblems === 1 ? "did" : "runs did"} not follow the source setup or target repository rules. This run is not valid for comparison.`,
+      `${traceProblems} review ${traceProblems === 1 ? "did" : "runs did"} not follow the review rules. This run is not valid for comparison.`,
     )
   }
 
@@ -74,6 +76,21 @@ export function formatReport(run: EvalRun, score: EvalScore): string {
     "This result covers only these examples; it is not a general quality claim.",
   )
   return lines.join("\n")
+}
+
+function modelSentence(run: EvalRun): string {
+  const models = new Set<string>()
+  for (const sample of run.samples) {
+    for (const model of sample.models) models.add(model)
+    if (sample.status === "completed") {
+      for (const judgement of sample.judgements) {
+        for (const model of judgement.models) models.add(model)
+      }
+    }
+  }
+  return models.size === 0
+    ? "Exact model IDs: not reported by Amp."
+    : `Reported model IDs: ${[...models].sort().join(", ")}.`
 }
 
 function countSeedOutcomes(score: EvalScore): Record<"pass" | "unstable" | "fail", number> {
@@ -242,12 +259,19 @@ function traceProblemCount(run: EvalRun): number {
     const current =
       sample.trace === undefined || sample.prompt === undefined
         ? []
-        : checkReviewTrace(sample.trace, sourcePreparationFromPrompt(sample.prompt), {
-            repository: evalCase.repositoryFullName,
-            pullNumber: evalCase.pullNumber,
-            baseSha: evalCase.baseSha,
-            headSha: evalCase.headSha,
-          })
+        : checkReviewTrace(
+            sample.trace,
+            sourcePreparationFromPrompt(sample.prompt),
+            {
+              repository: evalCase.repositoryFullName,
+              pullNumber: evalCase.pullNumber,
+              baseSha: evalCase.baseSha,
+              headSha: evalCase.headSha,
+            },
+            run.reviewer.protocol?.startsWith("research-enabled-target-frozen")
+              ? run.reviewer.mode
+              : undefined,
+          )
     return saved.length > 0 || current.length > 0
   }).length
 }

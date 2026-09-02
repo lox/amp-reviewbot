@@ -67,7 +67,7 @@ The trusted runner verifies the input commits and creates a fresh source-only Gi
 
 The reviewer runs the complete setup block as its first successful tool call; any failed command stops the block. It then uses only that copy of the target repository. It must not inspect the target pull request through GitHub pages or APIs, nor clone, fetch, or inspect another copy of the target repository. Public documentation, package registries, dependencies, other repositories, and delegated research that follows the same rule are allowed.
 
-The saved trace is checked for three things: the source setup ran first and completed in the original workspace; research tools did not name the target pull request or repository; and the prepared repository did not run `git fetch` or `git pull`. A breach makes the run invalid for comparison.
+The saved trace is checked for four things: the source setup ran first and completed before other tools ran; the review used the chosen Amp mode and did not explicitly move shell commands outside its prepared workspace; research tools did not name the target pull request or repository; and the prepared repository did not run `git fetch` or `git pull`. Amp reports the trusted machine's path during startup and the mounted orb path in tool calls, so the first shell command establishes the workspace used by later checks. A breach makes the run invalid for comparison.
 
 These checks are deliberately simple. A reviewer trying to cheat could hide a lookup in another process. Blocking all public access would make the test unlike a real review, so we accept that risk. The results measure a reviewer following the instructions in a realistic environment; they do not prove resistance to deliberate cheating.
 
@@ -98,7 +98,9 @@ Never replace a failed run or add runs only where the preferred version is behin
 
 For a synthetic before-and-after pair, one repeat passes only when the reviewer gets both versions right. A baseline with a source-confirmed existing issue is checked against that issue rather than being called clean.
 
-Deciding whether a finding describes a recorded issue also uses a model and can vary. These checks start only after every review has finished and the completed reviews have been saved privately. They have a separate timeout, so a slow or interrupted check cannot erase review results. Two independent calls in Amp's `high` mode compare each recorded issue with the review findings. A third call breaks a disagreement. Identical checks are reused. The saved result includes every decision and the prompt, response format, SDK, mode, model, and timing behind it.
+Deciding whether a finding describes a recorded issue also uses a model and can vary. These checks start only after every review has finished and the completed reviews have been saved privately. They have a separate timeout, so a slow or interrupted check cannot erase review results. Two independent calls in Amp's `high` mode compare each recorded issue with the review findings. A third call breaks a disagreement. Identical checks are reused. The saved result includes every decision and the prompt, response format, SDK, CLI, mode, any model ID Amp reports, and timing behind it.
+
+Amp's normal agent API selects a mode, not an exact model. A plugin-defined agent could pin a model, but it would no longer be the built-in `medium` agent used by the production reviewer. We keep production parity: the run records exact SDK and CLI versions, checks the mode reported by each review, and records exact model IDs when Amp supplies them. An empty model list means Amp did not report the ID. Comparisons should be run close together and should not claim exact-model reproducibility unless the recorded model IDs match.
 
 ## What the report means
 
@@ -110,7 +112,7 @@ The main report answers:
 - was the final response appropriately urgent; and
 - were repeated runs stable?
 
-Saved JSON keeps the exact commits, context, changed lines, prompts, full tool traces, model IDs, raw output, filtered findings, conclusions, matching decisions, code hashes, separate timing, execution order, review-rule identifier, trace checks, and errors. Re-reading it makes no model or network calls. New reports say `PUBLIC RESEARCH ALLOWED`; a rule breach produces `INVALID FOR COMPARISON`. Older files are labeled `HISTORICAL RESULT`. The file is private and potentially sensitive.
+Saved JSON keeps the exact commits, context, changed lines, prompts, full tool traces, Amp mode, exact SDK and CLI versions, any model IDs Amp reports, raw output, filtered findings, conclusions, matching decisions, code hashes, separate timing, execution order, review-rule identifier, trace checks, and errors. Re-reading it makes no model or network calls. New reports say `PUBLIC RESEARCH ALLOWED`; a rule breach produces `INVALID FOR COMPARISON`. Older files are labeled `HISTORICAL RESULT`. The file is private and potentially sensitive.
 
 If matching fails after reviews finish, `npm run eval -- finish RUN.json` retries only the missing matches through the local CLI login. It writes a new file, preserves the original review evidence and timing, and records the exact hash of the source file. It does not rerun reviews or use the separate review-account key.
 
@@ -141,5 +143,5 @@ Because LLMs create and check most recorded issues, report agreement with the ex
 - Saved runs reject altered example evidence, invalid finding indexes, conclusions that do not follow from raw production output, changed prompts or schemas, missing full prompts or traces, inconsistent timing, and changed execution order. They preserve the original trace check while reports also apply the current check, so improved detection does not make an unchanged file unreadable.
 - Interrupted matching can finish into a new traceable result without changing or rerunning saved reviews.
 - One finding cannot earn recall for two known issues.
-- A run requires a separate review-account key and records the exact review rules it used.
+- A run requires a separate review-account key and records the exact review rules, Amp mode, SDK version, and CLI version it used.
 - Public dependency and documentation research is allowed. If the trace shows access to the target pull request or another copy of the target repository, the run is invalid for comparison.

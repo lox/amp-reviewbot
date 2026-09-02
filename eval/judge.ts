@@ -5,6 +5,7 @@ import { resolve } from "node:path"
 import { execute } from "@ampcode/sdk"
 import { z } from "zod"
 import type { ReviewFinding } from "../src/types.js"
+import { modelFromMessage } from "./evidence.js"
 import type { EvalJudgement, ExpectedIssue } from "./schema.js"
 
 const judgeVersion = "6"
@@ -26,6 +27,11 @@ const inFlightVotes = new Map<string, Promise<void>>()
 
 type ExecuteAmp = typeof execute
 
+export type AmpVersions = {
+  sdkVersion: string
+  cliVersion: string
+}
+
 type JudgeVote = {
   matchingFindingIndices: number[]
   models: string[]
@@ -40,7 +46,7 @@ export async function judgeIssue(
   issue: ExpectedIssue,
   findings: ReviewFinding[],
   cacheDirectory: string,
-  sdkVersion: string,
+  versions: AmpVersions,
   signal: AbortSignal,
   executeAmp: ExecuteAmp = execute,
 ): Promise<EvalJudgement> {
@@ -50,7 +56,7 @@ export async function judgeIssue(
     prompt,
     findings.length,
     cacheDirectory,
-    sdkVersion,
+    versions,
     1,
     signal,
     executeAmp,
@@ -60,7 +66,7 @@ export async function judgeIssue(
     prompt,
     findings.length,
     cacheDirectory,
-    sdkVersion,
+    versions,
     2,
     signal,
     executeAmp,
@@ -71,7 +77,7 @@ export async function judgeIssue(
   const provenance = {
     version: judgeVersion,
     mode: judgeMode,
-    sdkVersion,
+    ...versions,
     project: judgeProject,
     prompt,
     responseSchema: judgeResponseSchemaDocument,
@@ -95,7 +101,7 @@ export async function judgeIssue(
     prompt,
     findings.length,
     cacheDirectory,
-    sdkVersion,
+    versions,
     3,
     signal,
     executeAmp,
@@ -124,7 +130,7 @@ async function judgeVote(
   prompt: string,
   findingCount: number,
   cacheDirectory: string,
-  sdkVersion: string,
+  versions: AmpVersions,
   vote: number,
   signal: AbortSignal,
   executeAmp: ExecuteAmp,
@@ -134,7 +140,7 @@ async function judgeVote(
       judgeVersion,
       judgeMode,
       judgeSchemaHash,
-      sdkVersion,
+      ...versions,
       project: judgeProject,
       vote,
       prompt,
@@ -204,9 +210,8 @@ async function readOrCreateJudgeVote(
       labels: ["reviewbot-eval"],
     },
   })) {
-    if (message.type === "assistant" && typeof message.message.model === "string") {
-      models.add(message.message.model)
-    }
+    const model = modelFromMessage(message)
+    if (model !== undefined) models.add(model)
     if (message.type === "result") {
       if (message.is_error) throw new Error(message.error)
       response = message.result

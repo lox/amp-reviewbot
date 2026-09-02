@@ -8,7 +8,7 @@ import { join, resolve } from "node:path"
 import { PassThrough } from "node:stream"
 import { describe, it } from "node:test"
 import { promisify } from "node:util"
-import { checkReviewTrace } from "../eval/evidence.js"
+import { checkReviewTrace, modelsFromTrace } from "../eval/evidence.js"
 import { judgeIssue, resolveMatchingVotes } from "../eval/judge.js"
 import { checkPack, exampleSchema, loadPack } from "../eval/pack.js"
 import { formatReport } from "../eval/report.js"
@@ -45,6 +45,7 @@ const lowFinding = {
 const mediumFinding = { ...lowFinding, severity: "medium" as const }
 const highFinding = { ...lowFinding, severity: "high" as const }
 const artifactHash = `sha256:${"a".repeat(64)}` as const
+const testAmpVersions = { sdkVersion: "test-sdk", cliVersion: "test-cli" }
 const control: ExpectedResult = { issues: [] }
 const blocking: ExpectedResult = {
   issues: [
@@ -412,10 +413,32 @@ describe("eval example packs", () => {
     }
   })
 
-  it("accepts samples when the runtime omits model provenance", () => {
+  it("keeps missing model IDs explicit in historical samples", () => {
     const sample = completed("control", 1, control, "success", [], [])
     sample.models = []
     assert.deepEqual(evalSampleSchema.parse(sample).models, [])
+  })
+
+  it("records model IDs only when Amp reports them", () => {
+    const messageWithoutModel = {
+      type: "assistant",
+      message: {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "text", text: "Review complete." }],
+        stop_reason: "end_turn",
+        usage: { input_tokens: 10, output_tokens: 5, service_tier: "standard" },
+      },
+      parent_tool_use_id: null,
+      session_id: "thread-1",
+    }
+    const messageWithModel = {
+      ...messageWithoutModel,
+      message: { ...messageWithoutModel.message, model: "openai/test-model" },
+    }
+
+    assert.deepEqual(modelsFromTrace([messageWithoutModel]), [])
+    assert.deepEqual(modelsFromTrace([messageWithModel, messageWithModel]), ["openai/test-model"])
   })
 
   it("uses local CLI authentication unless a dedicated review key is provided", () => {
@@ -658,6 +681,70 @@ Use only this checked-out source.`
     assert.deepEqual(
       checkReviewTrace(
         [
+          traceSystemMessage("thread-1", "/private/var/tmp/amp-reviewbot-reviewer/source"),
+          toolMessage(
+            "shell_command",
+            { command: sourceCommand, workdir: "/home/user/workspace" },
+            "orb-source-preparation",
+          ),
+          toolResultMessage("orb-source-preparation"),
+        ],
+        sourcePreparation,
+      ),
+      [],
+    )
+    assert.deepEqual(
+      checkReviewTrace(
+        [
+          traceSystemMessage(),
+          toolMessage("shell_command", { command: sourceCommand }, "source-preparation"),
+          toolResultMessage("source-preparation"),
+        ],
+        sourcePreparation,
+      ),
+      ["did not complete the required source setup"],
+    )
+    assert.deepEqual(
+      checkReviewTrace(
+        [
+          traceSystemMessage(),
+          toolMessage(
+            "shell_command",
+            { command: sourceCommand, workdir: "/home/user/workspace" },
+            "source-preparation",
+          ),
+          toolResultMessage("source-preparation"),
+          toolMessage(
+            "shell_command",
+            { command: "git status", workdir: "/home/user/workspace/src" },
+            "subdirectory-inspection",
+          ),
+          toolResultMessage("subdirectory-inspection"),
+        ],
+        sourcePreparation,
+      ),
+      [],
+    )
+    assert.deepEqual(
+      checkReviewTrace(
+        [
+          traceSystemMessage("thread-1", "/private/var/tmp/amp-reviewbot-reviewer/source"),
+          toolMessage(
+            "shell_command",
+            { command: sourceCommand, workdir: "/home/user/workspace" },
+            "wrong-mode-preparation",
+          ),
+          toolResultMessage("wrong-mode-preparation"),
+        ],
+        sourcePreparation,
+        undefined,
+        "high",
+      ),
+      ["did not use the required agent mode"],
+    )
+    assert.deepEqual(
+      checkReviewTrace(
+        [
           traceSystemMessage(),
           toolMessage("shell_command", { command: sourceCommand }, "source-preparation"),
           toolMessage("shell_command", { command: "git status" }, "early-inspection"),
@@ -712,13 +799,34 @@ Use only this checked-out source.`
           toolMessage(
             "shell_command",
             { command: sourceCommand, workdir: "/tmp/other" },
+            "alternate-workdir",
+          ),
+          toolResultMessage("alternate-workdir"),
+        ],
+        sourcePreparation,
+      ),
+      [],
+    )
+    assert.deepEqual(
+      checkReviewTrace(
+        [
+          traceSystemMessage(),
+          toolMessage(
+            "shell_command",
+            { command: sourceCommand, workdir: "/home/user/workspace" },
+            "source-preparation",
+          ),
+          toolResultMessage("source-preparation"),
+          toolMessage(
+            "shell_command",
+            { command: "git status", workdir: "/tmp/other" },
             "wrong-workdir",
           ),
           toolResultMessage("wrong-workdir"),
         ],
         sourcePreparation,
       ),
-      ["did not complete the required source setup"],
+      ["review continued in a different workspace"],
     )
     assert.deepEqual(
       checkReviewTrace(
@@ -1034,8 +1142,9 @@ describe("eval scoring", () => {
       ...run,
       reviewer: {
         ...run.reviewer,
+        cliVersion: "test-cli",
         project: null,
-        protocol: "research-enabled-target-frozen",
+        protocol: "research-enabled-target-frozen-v2",
         account: {
           authentication: "reviewer-api-key",
           reviewerIdHash: artifactHash,
@@ -1045,7 +1154,29 @@ describe("eval scoring", () => {
     const researchReport = formatReport(researchRun, scoreRun(researchRun))
     assert.match(researchReport, /Review evaluation: PUBLIC RESEARCH ALLOWED/)
     assert.match(researchReport, /could research anything public/)
+    assert.match(researchReport, /Reviewer: Amp mode medium\. SDK: test\. CLI: test-cli\./)
+    assert.match(researchReport, /Reported model IDs: test-judge, test-reviewer\./)
     assert.doesNotMatch(researchReport, /HISTORICAL RESULT/)
+    const unreportedModelsRun = structuredClone(researchRun)
+    unreportedModelsRun.samples[0]!.models = []
+    if (unreportedModelsRun.samples[0]!.status !== "completed") {
+      assert.fail("expected completed sample")
+    }
+    unreportedModelsRun.samples[0]!.judgements[0]!.models = []
+    assert.match(
+      formatReport(unreportedModelsRun, scoreRun(unreportedModelsRun)),
+      /Exact model IDs: not reported by Amp\./,
+    )
+    const previousProtocolRun = structuredClone(researchRun)
+    previousProtocolRun.reviewer.protocol = "research-enabled-target-frozen"
+    delete previousProtocolRun.reviewer.cliVersion
+    assert.doesNotThrow(() => evalRunSchema.parse(previousProtocolRun))
+    const currentProtocolRun = structuredClone(previousProtocolRun)
+    currentProtocolRun.reviewer.protocol = "research-enabled-target-frozen-v2"
+    assert.throws(
+      () => evalRunSchema.parse(currentProtocolRun),
+      /requires the exact Amp CLI version/,
+    )
     run.samples[0]!.promptHash = "0".repeat(64)
     assert.throws(() => evalRunSchema.parse(run), /prompt hash does not match/)
     run.samples[0]!.promptHash = createHash("sha256").update(prompt).digest("hex")
@@ -1148,7 +1279,7 @@ describe("eval judging", () => {
         blocking.issues[0]!,
         [highFinding],
         cacheDirectory,
-        "test-sdk",
+        testAmpVersions,
         new AbortController().signal,
         executeJudge as never,
       )
@@ -1156,6 +1287,7 @@ describe("eval judging", () => {
       assert.ok(options.every((item) => !("project" in item)))
       assert.ok(options.every((item) => item.cwd === tmpdir()))
       assert.equal(result.provenance.project, null)
+      assert.equal(result.provenance.cliVersion, "test-cli")
       assert.match(result.provenance.prompt!, /Known issue:/)
       assert.match(result.provenance.responseSchema!, /matchingFindingIndices/)
       assert.equal(
@@ -1190,7 +1322,7 @@ describe("eval judging", () => {
     const { run, attempted } = await finishJudgements(
       sourceRun,
       { judgeCache: "/unused", concurrency: 1, timeoutMs: 1_000 },
-      "test-sdk",
+      testAmpVersions,
       judge,
     )
     assert.equal(attempted, 1)
@@ -1207,7 +1339,7 @@ describe("eval judging", () => {
     const noOp = await finishJudgements(
       run,
       { judgeCache: "/unused", concurrency: 1, timeoutMs: 1_000 },
-      "test-sdk",
+      testAmpVersions,
       judge,
     )
     assert.equal(noOp.attempted, 0)
@@ -1242,7 +1374,7 @@ describe("eval judging", () => {
         issue,
         [highFinding],
         cacheDirectory,
-        "test-sdk",
+        testAmpVersions,
         new AbortController().signal,
         executeJudge as never,
       )
@@ -1252,7 +1384,7 @@ describe("eval judging", () => {
         issue,
         [highFinding],
         cacheDirectory,
-        "test-sdk",
+        testAmpVersions,
         new AbortController().signal,
         executeJudge as never,
       )
@@ -1290,7 +1422,7 @@ describe("eval judging", () => {
         issue,
         [highFinding],
         cacheDirectory,
-        "test-sdk",
+        testAmpVersions,
         firstController.signal,
         executeJudge as never,
       )
@@ -1300,7 +1432,7 @@ describe("eval judging", () => {
         issue,
         [highFinding],
         cacheDirectory,
-        "test-sdk",
+        testAmpVersions,
         new AbortController().signal,
         executeJudge as never,
       )
@@ -1335,7 +1467,7 @@ describe("eval judging", () => {
         blocking.issues[0]!,
         [highFinding],
         cacheDirectory,
-        "test-sdk",
+        testAmpVersions,
         controller.signal,
         executeJudge as never,
       )
@@ -1579,6 +1711,7 @@ function judgement(
       version: "3",
       mode: "high",
       sdkVersion: "test-sdk",
+      cliVersion: "test-cli",
       project: "no-project",
       prompt,
       responseSchema,
@@ -1606,12 +1739,17 @@ function judgeResult() {
   }
 }
 
-function traceSystemMessage(sessionId = "thread-1", cwd = "/workspace") {
+function traceSystemMessage(
+  sessionId = "thread-1",
+  cwd = "/workspace",
+  agentMode = "medium",
+) {
   return {
     type: "system",
     subtype: "init",
     session_id: sessionId,
     cwd,
+    agent_mode: agentMode,
     tools: [],
     mcp_servers: [],
   }

@@ -225,6 +225,7 @@ const judgementFields = {
     version: z.string(),
     mode: z.string(),
     sdkVersion: z.string(),
+    cliVersion: z.string().optional(),
     project: z.string().nullable(),
     prompt: z.string().optional(),
     responseSchema: z.string().optional(),
@@ -313,12 +314,15 @@ export const evalRunSchema = z
       gitCommit: z.string(),
       dirty: z.boolean(),
       sdkVersion: z.string(),
+      cliVersion: z.string().optional(),
       mode: z.literal("medium"),
       failOn: z.literal("high"),
       reviewSourceHash: z.string(),
       methodologyHash: z.string(),
       project: z.string().min(1).nullable(),
-      protocol: z.literal("research-enabled-target-frozen").optional(),
+      protocol: z
+        .enum(["research-enabled-target-frozen", "research-enabled-target-frozen-v2"])
+        .optional(),
       account: z.union([
         z
           .object({
@@ -345,7 +349,7 @@ export const evalRunSchema = z
   })
   .strict()
   .superRefine((run, context) => {
-    if (run.reviewer.protocol === "research-enabled-target-frozen") {
+    if (run.reviewer.protocol?.startsWith("research-enabled-target-frozen")) {
       if (run.schemaVersion !== 3) {
         context.addIssue({
           code: "custom",
@@ -358,6 +362,16 @@ export const evalRunSchema = z
           code: "custom",
           path: ["reviewer", "project"],
           message: "this evaluation requires a reviewer with no Amp project",
+        })
+      }
+      if (
+        run.reviewer.protocol === "research-enabled-target-frozen-v2" &&
+        run.reviewer.cliVersion === undefined
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["reviewer", "cliVersion"],
+          message: "this evaluation requires the exact Amp CLI version",
         })
       }
       if (
@@ -473,6 +487,16 @@ export const evalRunSchema = z
         if (sample.status === "completed") {
           sample.judgements.forEach((judgement, judgementIndex) => {
             const provenance = judgement.provenance
+            if (
+              run.reviewer.protocol === "research-enabled-target-frozen-v2" &&
+              provenance.cliVersion === undefined
+            ) {
+              context.addIssue({
+                code: "custom",
+                path: ["samples", index, "judgements", judgementIndex, "provenance", "cliVersion"],
+                message: "this evaluation requires the Amp CLI version for each judgement",
+              })
+            }
             if (provenance.prompt === undefined || provenance.responseSchema === undefined) {
               context.addIssue({
                 code: "custom",

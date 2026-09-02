@@ -8,8 +8,8 @@ import { z } from "zod"
 import { buildReviewPrompt, finalizeReview, parseReviewResult, reviewThreadTitle } from "../src/review.js"
 import type { ReviewFinding, ReviewJob } from "../src/types.js"
 import { reviewMode } from "../src/worker.js"
-import { checkReviewTrace } from "./evidence.js"
-import { judgeIssue } from "./judge.js"
+import { checkReviewTrace, modelsFromTrace } from "./evidence.js"
+import { judgeIssue, type AmpVersions } from "./judge.js"
 import { checkPack, describePack, loadPack } from "./pack.js"
 import { formatReport } from "./report.js"
 import {
@@ -97,7 +97,7 @@ async function main(): Promise<void> {
       const { run, attempted } = await finishJudgements(
         sourceRun,
         options,
-        await installedSdkVersion(),
+        await installedAmpVersions(),
         judgeIssue,
         (finished, total, succeeded) => {
           console.log(
@@ -208,7 +208,7 @@ async function runEvaluation(
       concurrency: options.concurrency,
       timeoutMs: options.judgeTimeoutMs,
     },
-    reviewer.sdkVersion,
+    { sdkVersion: reviewer.sdkVersion, cliVersion: reviewer.cliVersion },
     judgeIssue,
     (matched, total, succeeded) => {
       console.log(
@@ -248,7 +248,7 @@ export function selectCases(
 export async function finishJudgements(
   sourceRun: EvalRun,
   options: Pick<FinishOptions, "judgeCache" | "concurrency" | "timeoutMs">,
-  sdkVersion: string,
+  versions: AmpVersions,
   judge: typeof judgeIssue = judgeIssue,
   onProgress?: FinishProgress,
 ): Promise<{ run: EvalRun; attempted: number }> {
@@ -277,7 +277,7 @@ export async function finishJudgements(
         task.issue,
         findings,
         options.judgeCache,
-        sdkVersion,
+        versions,
         AbortSignal.timeout(options.timeoutMs),
       )
       finished += 1
@@ -361,7 +361,12 @@ async function runReviewSample(
     trace = review.trace
     models = [...new Set([...review.models, ...modelsFromTrace(trace)])]
     const reviewDurationMs = Date.now() - startedAt
-    const evidenceBoundaryViolations = checkReviewTrace(trace, sourcePreparation, target)
+    const evidenceBoundaryViolations = checkReviewTrace(
+      trace,
+      sourcePreparation,
+      target,
+      reviewMode,
+    )
     if (review.status === "error") {
       return {
         caseId: evalCase.id,
@@ -419,7 +424,12 @@ async function runReviewSample(
       reviewDurationMs,
       matchingDurationMs: 0,
       trace,
-      evidenceBoundaryViolations: checkReviewTrace(trace, sourcePreparation, target),
+      evidenceBoundaryViolations: checkReviewTrace(
+        trace,
+        sourcePreparation,
+        target,
+        reviewMode,
+      ),
       status: "error",
       error: errorMessage(error),
     }
@@ -454,11 +464,14 @@ function changedLineMap(evalCase: EvalCase): Map<string, Set<number>> {
   )
 }
 
-async function reviewerProvenance(account: ReviewAuthentication): Promise<EvalRun["reviewer"]> {
+async function reviewerProvenance(
+  account: ReviewAuthentication,
+): Promise<Omit<EvalRun["reviewer"], "cliVersion"> & { cliVersion: string }> {
   const [
     { stdout: gitCommit },
     { stdout: status },
     sdkPackage,
+    cliPackage,
     reviewSource,
     workerSource,
     reviewerSource,
@@ -468,6 +481,7 @@ async function reviewerProvenance(account: ReviewAuthentication): Promise<EvalRu
     execFileAsync("git", ["rev-parse", "HEAD"]),
     execFileAsync("git", ["status", "--porcelain"]),
     readFile(resolve("node_modules", "@ampcode", "sdk", "package.json"), "utf8"),
+    readFile(resolve("node_modules", "@ampcode", "cli", "package.json"), "utf8"),
     readFile(resolve("src", "review.ts"), "utf8"),
     readFile(resolve("src", "worker.ts"), "utf8"),
     readFile(resolve("eval", "reviewer.ts"), "utf8"),
@@ -475,11 +489,14 @@ async function reviewerProvenance(account: ReviewAuthentication): Promise<EvalRu
     readFile(resolve(".agents", "skills", "general-code-reviewing", "SKILL.md"), "utf8"),
   ])
   const sdk: unknown = JSON.parse(sdkPackage)
+  const cli: unknown = JSON.parse(cliPackage)
   const sdkVersion = z.object({ version: z.string() }).parse(sdk).version
+  const cliVersion = z.object({ version: z.string() }).parse(cli).version
   return {
     gitCommit: gitCommit.trim(),
     dirty: status.trim().length > 0,
     sdkVersion,
+    cliVersion,
     mode: reviewMode,
     failOn,
     reviewSourceHash: hash(
@@ -487,7 +504,7 @@ async function reviewerProvenance(account: ReviewAuthentication): Promise<EvalRu
     ),
     methodologyHash: hash(methodology),
     project: null,
-    protocol: "research-enabled-target-frozen",
+    protocol: "research-enabled-target-frozen-v2",
     account,
   }
 }
@@ -611,18 +628,6 @@ function hash(value: string): string {
   return createHash("sha256").update(value).digest("hex")
 }
 
-function modelsFromTrace(trace: unknown[]): string[] {
-  const models = new Set<string>()
-  for (const message of trace) {
-    if (!message || typeof message !== "object" || !("message" in message)) continue
-    const body = message.message
-    if (body && typeof body === "object" && "model" in body && typeof body.model === "string") {
-      models.add(body.model)
-    }
-  }
-  return [...models]
-}
-
 function artifactHash(value: Buffer): string {
   return `sha256:${createHash("sha256").update(value).digest("hex")}`
 }
@@ -677,11 +682,15 @@ async function replaceRunArtifact(path: string, run: EvalRun): Promise<void> {
   }
 }
 
-async function installedSdkVersion(): Promise<string> {
-  const packageJson: unknown = JSON.parse(
-    await readFile(resolve("node_modules", "@ampcode", "sdk", "package.json"), "utf8"),
-  )
-  return z.object({ version: z.string() }).parse(packageJson).version
+async function installedAmpVersions(): Promise<AmpVersions> {
+  const [sdkPackage, cliPackage] = await Promise.all([
+    readFile(resolve("node_modules", "@ampcode", "sdk", "package.json"), "utf8"),
+    readFile(resolve("node_modules", "@ampcode", "cli", "package.json"), "utf8"),
+  ])
+  return {
+    sdkVersion: z.object({ version: z.string() }).parse(JSON.parse(sdkPackage)).version,
+    cliVersion: z.object({ version: z.string() }).parse(JSON.parse(cliPackage)).version,
+  }
 }
 
 function kindLabel(evalCase: EvalCase): string {
