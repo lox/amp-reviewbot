@@ -7,10 +7,27 @@ type ReviewTarget = {
   headSha: string
 }
 
+export function modelsFromTrace(trace: unknown[]): string[] {
+  const models = new Set<string>()
+  for (const message of trace) {
+    const model = modelFromMessage(message)
+    if (model !== undefined) models.add(model)
+  }
+  return [...models]
+}
+
+export function modelFromMessage(message: unknown): string | undefined {
+  if (!message || typeof message !== "object" || !("message" in message)) return undefined
+  const body = message.message
+  if (!body || typeof body !== "object" || !("model" in body)) return undefined
+  return typeof body.model === "string" ? body.model : undefined
+}
+
 export function checkReviewTrace(
   trace: unknown[],
   sourcePreparation: string | undefined,
   target?: ReviewTarget,
+  expectedMode?: string,
 ): string[] {
   const problems = new Set<string>()
   const requiredPreparation =
@@ -78,6 +95,13 @@ export function checkReviewTrace(
               ? {}
               : { workdir: input.workdir ?? input.cwd }),
         }
+        if (
+          content.id !== firstTool.id &&
+          isShellTool(tool) &&
+          usesDifferentWorkdir(input.workdir ?? input.cwd, firstTool.workdir)
+        ) {
+          problems.add("review continued in a different workspace")
+        }
       }
       if (!target || (requiredPreparation !== undefined && command === requiredPreparation)) continue
       const canAccessExternalEvidence =
@@ -89,7 +113,7 @@ export function checkReviewTrace(
       } else if (
         command !== undefined &&
         updatesPreparedRepository(command) &&
-        isInitialWorkdir(input.workdir ?? input.cwd, initial?.cwd)
+        usesPreparedWorkdir(input.workdir ?? input.cwd, firstTool?.workdir)
       ) {
         problems.add("accessed the target repository outside the supplied copy")
       }
@@ -115,13 +139,16 @@ export function checkReviewTrace(
       !firstTool ||
       !isShellTool(firstTool.tool) ||
       firstTool.command !== requiredPreparation ||
-      !isInitialWorkdir(firstTool.workdir, initial.cwd) ||
+      !isAbsoluteWorkdir(firstTool.workdir) ||
       !firstToolFinished ||
       !firstToolSucceeded ||
       startedAnotherToolBeforeFirstFinished
     ) {
       problems.add("did not complete the required source setup")
     }
+  }
+  if (expectedMode !== undefined && initial?.agentMode !== expectedMode) {
+    problems.add("did not use the required agent mode")
   }
   return [...problems]
 }
@@ -191,7 +218,9 @@ function sourcePreparationCommand(sourcePreparation: string): string | undefined
   )?.[1]
 }
 
-function systemInit(message: unknown): { sessionId: string; cwd: string } | undefined {
+function systemInit(
+  message: unknown,
+): { sessionId: string; cwd: string; agentMode?: string } | undefined {
   if (
     !message ||
     typeof message !== "object" ||
@@ -206,16 +235,31 @@ function systemInit(message: unknown): { sessionId: string; cwd: string } | unde
   ) {
     return undefined
   }
-  return { sessionId: message.session_id, cwd: message.cwd }
+  return {
+    sessionId: message.session_id,
+    cwd: message.cwd,
+    ...("agent_mode" in message && typeof message.agent_mode === "string"
+      ? { agentMode: message.agent_mode }
+      : {}),
+  }
 }
 
-function isInitialWorkdir(workdir: unknown, initialCwd: string | undefined): boolean {
-  return (
-    initialCwd !== undefined &&
-    (workdir === undefined ||
-      (typeof workdir === "string" &&
-        posix.resolve(initialCwd, workdir) === posix.normalize(initialCwd)))
+function usesPreparedWorkdir(workdir: unknown, preparedWorkdir: unknown): boolean {
+  if (workdir === undefined || preparedWorkdir === undefined) return true
+  if (typeof workdir !== "string" || typeof preparedWorkdir !== "string") return false
+  const relative = posix.relative(
+    posix.normalize(preparedWorkdir),
+    posix.resolve(preparedWorkdir, workdir),
   )
+  return relative === "" || (!relative.startsWith("../") && relative !== "..")
+}
+
+function isAbsoluteWorkdir(workdir: unknown): workdir is string {
+  return typeof workdir === "string" && posix.isAbsolute(workdir)
+}
+
+function usesDifferentWorkdir(workdir: unknown, preparedWorkdir: unknown): boolean {
+  return workdir !== undefined && !usesPreparedWorkdir(workdir, preparedWorkdir)
 }
 
 function isShellTool(tool: string): boolean {
