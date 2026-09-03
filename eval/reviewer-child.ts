@@ -5,8 +5,9 @@ import { promisify } from "node:util"
 import type { StreamMessage } from "@ampcode/sdk"
 import pino from "pino"
 import { z } from "zod"
+import { reviewMode } from "../src/amp.js"
 import { executeReviewWithRetries } from "../src/worker.js"
-import { modelsFromTrace } from "./evidence.js"
+import { checkReviewTrace, modelsFromTrace } from "./evidence.js"
 
 const execFileAsync = promisify(execFile)
 const inputSchema = z.object({
@@ -14,7 +15,21 @@ const inputSchema = z.object({
   title: z.string().min(1),
   cwd: z.string().min(1),
   timeoutMs: z.number().int().positive(),
+  sourceSetup: z
+    .object({
+      prompt: z.string().min(1),
+      preparation: z.string().min(1),
+      target: z.object({
+        repository: z.string().min(1),
+        pullNumber: z.number().int().positive(),
+        baseSha: z.string().min(1),
+        headSha: z.string().min(1),
+      }),
+    })
+    .optional(),
 })
+const setupRetryPrompt =
+  "Complete only the source setup requested in the first message, then end the turn. Do not begin the review."
 
 async function main(): Promise<void> {
   const input = inputSchema.parse(JSON.parse(await readStdin()))
@@ -31,21 +46,41 @@ async function main(): Promise<void> {
 
   try {
     try {
-      const rawResult = await executeReviewWithRetries({
-        prompt: input.prompt,
-        title: input.title,
-        cwd: input.cwd,
-        visibility: "private",
-        signal: controller.signal,
-        logger: pino({ level: "silent" }),
-        onThread: async (id) => {
-          threadId = id
-        },
-        beforeRetry: async () => {},
-        onMessage: (message) => {
-          trace.push(message)
-        },
-      })
+      const runTurn = (prompt: string, continueThreadId?: string, retryPrompt?: string) =>
+        executeReviewWithRetries({
+          prompt,
+          title: input.title,
+          cwd: input.cwd,
+          visibility: "private",
+          signal: controller.signal,
+          logger: pino({ level: "silent" }),
+          onThread: async (id) => {
+            threadId = id
+          },
+          beforeRetry: async () => {},
+          onMessage: (message) => {
+            trace.push(message)
+          },
+          ...(continueThreadId === undefined ? {} : { continueThreadId }),
+          ...(retryPrompt === undefined ? {} : { retryPrompt }),
+        })
+
+      if (input.sourceSetup) {
+        await runTurn(input.sourceSetup.prompt, undefined, setupRetryPrompt)
+        const problems = checkReviewTrace(
+          trace,
+          input.sourceSetup.preparation,
+          input.sourceSetup.target,
+          reviewMode,
+          true,
+        )
+        if (problems.length > 0) {
+          throw new Error(`Source setup failed its checks: ${problems.join("; ")}`)
+        }
+        if (!threadId) throw new Error("Source setup did not create a review thread")
+      }
+
+      const rawResult = await runTurn(input.prompt, threadId ?? undefined)
       process.stdout.write(
         `${JSON.stringify({ status: "completed", rawResult, threadId, models: modelsFromTrace(trace), trace })}\n`,
       )

@@ -5,7 +5,13 @@ import { dirname, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
 import { z } from "zod"
-import { buildReviewPrompt, finalizeReview, parseReviewResult, reviewThreadTitle } from "../src/review.js"
+import {
+  buildReviewPrompt,
+  buildSourceSetupPrompt,
+  finalizeReview,
+  parseReviewResult,
+  reviewThreadTitle,
+} from "../src/review.js"
 import type { ReviewFinding, ReviewJob } from "../src/types.js"
 import { pinnedModel, reviewMode } from "../src/amp.js"
 import { checkReviewTrace, modelsFromTrace } from "./evidence.js"
@@ -340,14 +346,25 @@ async function runReviewSample(
   let models: string[] = []
   let trace: unknown[] = []
   const job = evalJob(evalCase, sample)
-  const prompt = buildReviewPrompt(job, sourcePreparation)
-  const promptHash = hash(prompt)
   const target = {
     repository: evalCase.repositoryFullName,
     pullNumber: evalCase.pullNumber,
     baseSha: evalCase.baseSha,
     headSha: evalCase.headSha,
   }
+  const prompt = buildReviewPrompt(job, { preparedSource: sourcePreparation !== undefined })
+  const promptHash = hash(prompt)
+  const sourceSetup =
+    sourcePreparation === undefined
+      ? undefined
+      : { prompt: buildSourceSetupPrompt(sourcePreparation), preparation: sourcePreparation, target }
+  const sourceSetupEvidence =
+    sourceSetup === undefined
+      ? {}
+      : {
+          sourceSetupPrompt: sourceSetup.prompt,
+          sourceSetupPromptHash: hash(sourceSetup.prompt),
+        }
 
   try {
     const review = await runEvaluationReview({
@@ -356,6 +373,7 @@ async function runReviewSample(
       timeoutMs: options.timeoutMs,
       signal: controller.signal,
       apiKey: options.reviewerApiKey,
+      ...(sourceSetup === undefined ? {} : { sourceSetup }),
     })
     threadId = review.threadId
     trace = review.trace
@@ -366,6 +384,7 @@ async function runReviewSample(
       sourcePreparation,
       target,
       reviewMode,
+      true,
     )
     if (review.status === "error") {
       return {
@@ -374,6 +393,7 @@ async function runReviewSample(
         expected: evalCase.expected,
         promptHash,
         prompt,
+        ...sourceSetupEvidence,
         threadId,
         models,
         durationMs: reviewDurationMs,
@@ -394,6 +414,7 @@ async function runReviewSample(
       expected: evalCase.expected,
       promptHash,
       prompt,
+      ...sourceSetupEvidence,
       threadId,
       models,
       durationMs: reviewDurationMs,
@@ -418,6 +439,7 @@ async function runReviewSample(
       expected: evalCase.expected,
       promptHash,
       prompt,
+      ...sourceSetupEvidence,
       threadId,
       models,
       durationMs: reviewDurationMs,
@@ -429,6 +451,7 @@ async function runReviewSample(
         sourcePreparation,
         target,
         reviewMode,
+        true,
       ),
       status: "error",
       error: errorMessage(error),
@@ -509,7 +532,7 @@ async function reviewerProvenance(
     ),
     methodologyHash: hash(methodology),
     project: null,
-    protocol: "research-enabled-target-frozen-v3",
+    protocol: "research-enabled-target-frozen-v4",
     account,
   }
 }

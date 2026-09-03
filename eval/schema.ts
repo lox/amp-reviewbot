@@ -243,6 +243,8 @@ const sampleFields = {
   expected: expectedSchema,
   promptHash: z.string(),
   prompt: z.string().optional(),
+  sourceSetupPromptHash: z.string().optional(),
+  sourceSetupPrompt: z.string().optional(),
   threadId: z.string().nullable(),
   models: z.array(z.string()),
   durationMs: z.number().int().nonnegative(),
@@ -327,6 +329,7 @@ export const evalRunSchema = z
           "research-enabled-target-frozen",
           "research-enabled-target-frozen-v2",
           "research-enabled-target-frozen-v3",
+          "research-enabled-target-frozen-v4",
         ])
         .optional(),
       account: z.union([
@@ -372,7 +375,8 @@ export const evalRunSchema = z
       }
       if (
         (run.reviewer.protocol === "research-enabled-target-frozen-v2" ||
-          run.reviewer.protocol === "research-enabled-target-frozen-v3") &&
+          run.reviewer.protocol === "research-enabled-target-frozen-v3" ||
+          run.reviewer.protocol === "research-enabled-target-frozen-v4") &&
         run.reviewer.cliVersion === undefined
       ) {
         context.addIssue({
@@ -382,7 +386,8 @@ export const evalRunSchema = z
         })
       }
       if (
-        run.reviewer.protocol === "research-enabled-target-frozen-v3" &&
+        (run.reviewer.protocol === "research-enabled-target-frozen-v3" ||
+          run.reviewer.protocol === "research-enabled-target-frozen-v4") &&
         (run.reviewer.mode !== "reviewbot-v1" ||
           run.reviewer.model !== "openai/gpt-5.6-sol")
       ) {
@@ -492,6 +497,26 @@ export const evalRunSchema = z
           })
         }
         if (
+          run.reviewer.protocol === "research-enabled-target-frozen-v4" &&
+          (sample.sourceSetupPrompt === undefined || sample.sourceSetupPromptHash === undefined)
+        ) {
+          context.addIssue({
+            code: "custom",
+            path: ["samples", index, "sourceSetupPrompt"],
+            message: "this evaluation requires the full source setup prompt and its hash",
+          })
+        } else if (
+          sample.sourceSetupPrompt !== undefined &&
+          sample.sourceSetupPromptHash !==
+            createHash("sha256").update(sample.sourceSetupPrompt).digest("hex")
+        ) {
+          context.addIssue({
+            code: "custom",
+            path: ["samples", index, "sourceSetupPromptHash"],
+            message: "source setup prompt hash does not match the saved full prompt",
+          })
+        }
+        if (
           sample.reviewDurationMs !== undefined &&
           sample.matchingDurationMs !== undefined &&
           sample.durationMs !== sample.reviewDurationMs + sample.matchingDurationMs
@@ -507,7 +532,8 @@ export const evalRunSchema = z
             const provenance = judgement.provenance
             if (
               (run.reviewer.protocol === "research-enabled-target-frozen-v2" ||
-                run.reviewer.protocol === "research-enabled-target-frozen-v3") &&
+                run.reviewer.protocol === "research-enabled-target-frozen-v3" ||
+                run.reviewer.protocol === "research-enabled-target-frozen-v4") &&
               provenance.cliVersion === undefined
             ) {
               context.addIssue({
@@ -517,7 +543,8 @@ export const evalRunSchema = z
               })
             }
             if (
-              run.reviewer.protocol === "research-enabled-target-frozen-v3" &&
+              (run.reviewer.protocol === "research-enabled-target-frozen-v3" ||
+                run.reviewer.protocol === "research-enabled-target-frozen-v4") &&
               (provenance.mode !== "reviewbot-judge-v1" ||
                 provenance.model !== "openai/gpt-5.6-sol")
             ) {

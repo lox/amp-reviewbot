@@ -591,6 +591,16 @@ describe("eval example packs", () => {
         title: "Test review",
         timeoutMs: 1_000,
         signal: new AbortController().signal,
+        sourceSetup: {
+          prompt: "Prepare the source.",
+          preparation: "Run these commands from the repository:\n\ngit init\n\nUse only this source.",
+          target: {
+            repository: "example/repository",
+            pullNumber: 42,
+            baseSha: "base-sha",
+            headSha: "head-sha",
+          },
+        },
       },
       () => {
         spawned.resolve()
@@ -600,6 +610,16 @@ describe("eval example packs", () => {
     await spawned.promise
     const submitted = await childInput.promise
     assert.equal("project" in submitted, false)
+    assert.deepEqual(submitted.sourceSetup, {
+      prompt: "Prepare the source.",
+      preparation: "Run these commands from the repository:\n\ngit init\n\nUse only this source.",
+      target: {
+        repository: "example/repository",
+        pullNumber: 42,
+        baseSha: "base-sha",
+        headSha: "head-sha",
+      },
+    })
     await stat(submitted.cwd)
     await assert.rejects(stat(join(submitted.cwd, ".git")))
     await assert.rejects(stat(join(submitted.cwd, ".amp")))
@@ -747,6 +767,54 @@ Use only this checked-out source.`
       checkReviewTrace(
         [
           traceSystemMessage(),
+          toolMessage(
+            "shell_command",
+            { command: sourceCommand, workdir: "/home/user/workspace" },
+            "separate-setup",
+          ),
+          toolResultMessage("separate-setup", false, 0),
+          turnResultMessage(),
+          toolMessage("shell_command", {
+            command: "git status",
+            workdir: "/home/user/workspace",
+          }),
+        ],
+        sourcePreparation,
+        undefined,
+        undefined,
+        true,
+      ),
+      [],
+    )
+    assert.deepEqual(
+      checkReviewTrace(
+        [
+          traceSystemMessage(),
+          toolMessage(
+            "shell_command",
+            { command: sourceCommand, workdir: "/home/user/workspace" },
+            "separate-setup",
+          ),
+          toolResultMessage("separate-setup", false, 0),
+          toolMessage(
+            "shell_command",
+            { command: "git status", workdir: "/home/user/workspace" },
+            "extra-setup-tool",
+          ),
+          toolResultMessage("extra-setup-tool"),
+          turnResultMessage(),
+        ],
+        sourcePreparation,
+        undefined,
+        undefined,
+        true,
+      ),
+      ["did not complete the required source setup"],
+    )
+    assert.deepEqual(
+      checkReviewTrace(
+        [
+          traceSystemMessage(),
           toolMessage("shell_command", { command: sourceCommand }, "source-preparation"),
           toolResultMessage("source-preparation"),
         ],
@@ -829,6 +897,17 @@ Use only this checked-out source.`
       "did not start in a clean review workspace",
       "did not complete the required source setup",
     ])
+    assert.deepEqual(
+      checkReviewTrace(
+        [
+          traceSystemMessage(),
+          toolMessage("shell_command", { command: sourceCommand }, "nested-failed-preparation"),
+          toolResultMessage("nested-failed-preparation", false, 1),
+        ],
+        sourcePreparation,
+      ),
+      ["did not complete the required source setup"],
+    )
     assert.deepEqual(
       checkReviewTrace(
         [
@@ -1238,6 +1317,17 @@ describe("eval scoring", () => {
     pinnedRun.samples[0]!.judgements[0]!.provenance.mode = judgeMode
     pinnedRun.samples[0]!.judgements[0]!.provenance.model = pinnedModel
     assert.doesNotThrow(() => evalRunSchema.parse(pinnedRun))
+    const splitPromptRun = structuredClone(pinnedRun)
+    splitPromptRun.reviewer.protocol = "research-enabled-target-frozen-v4"
+    splitPromptRun.samples[0]!.sourceSetupPrompt = "complete source setup prompt"
+    splitPromptRun.samples[0]!.sourceSetupPromptHash = createHash("sha256")
+      .update(splitPromptRun.samples[0]!.sourceSetupPrompt)
+      .digest("hex")
+    assert.doesNotThrow(() => evalRunSchema.parse(splitPromptRun))
+    splitPromptRun.samples[0]!.sourceSetupPromptHash = "0".repeat(64)
+    assert.throws(() => evalRunSchema.parse(splitPromptRun), /source setup prompt hash/)
+    delete splitPromptRun.samples[0]!.sourceSetupPromptHash
+    assert.throws(() => evalRunSchema.parse(splitPromptRun), /full source setup prompt and its hash/)
     const wrongReviewerModel = structuredClone(pinnedRun)
     wrongReviewerModel.reviewer.model = "openai/another-model"
     assert.throws(
@@ -1863,7 +1953,7 @@ function toolMessage(name: string, input: Record<string, unknown>, id = "tool") 
   }
 }
 
-function toolResultMessage(toolUseId: string, isError = false) {
+function toolResultMessage(toolUseId: string, isError = false, exitCode?: number) {
   return {
     type: "user",
     message: {
@@ -1871,11 +1961,20 @@ function toolResultMessage(toolUseId: string, isError = false) {
         {
           type: "tool_result",
           tool_use_id: toolUseId,
-          content: "command completed",
+          content:
+            exitCode === undefined ? "command completed" : JSON.stringify({ output: "", exitCode }),
           is_error: isError,
         },
       ],
     },
+  }
+}
+
+function turnResultMessage() {
+  return {
+    type: "result",
+    is_error: false,
+    result: "Source ready",
   }
 }
 

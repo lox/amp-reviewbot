@@ -2,6 +2,7 @@ import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 import {
   buildReviewPrompt,
+  buildSourceSetupPrompt,
   checkConclusion,
   finalizeReview,
   parseReviewResult,
@@ -76,7 +77,7 @@ describe("buildReviewPrompt", () => {
     assert.doesNotMatch(buildReviewPrompt(job), /pull-request-context/)
   })
 
-  it("adds trusted source preparation without changing the production prompt by default", () => {
+  it("separates trusted source setup from the prepared-source review", () => {
     const job: ReviewJob = {
       id: "job-1",
       sourceDeliveryId: "delivery-1",
@@ -96,12 +97,20 @@ describe("buildReviewPrompt", () => {
     }
 
     const productionPrompt = buildReviewPrompt(job)
-    const evalPrompt = buildReviewPrompt(job, "git fetch /tmp/source.bundle refs/heads/target")
+    const evalPrompt = buildReviewPrompt(job, { preparedSource: true })
+    const setupPrompt = buildSourceSetupPrompt(
+      "git fetch /tmp/source.bundle refs/heads/target",
+    )
 
-    assert.doesNotMatch(productionPrompt, /source-preparation/)
-    assert.match(evalPrompt, /Trusted source preparation/)
-    assert.match(evalPrompt, /git fetch \/tmp\/source\.bundle/)
+    assert.doesNotMatch(productionPrompt, /source boundary/i)
+    assert.match(evalPrompt, /Trusted source boundary/)
+    assert.match(evalPrompt, /exact source is already prepared/)
+    assert.doesNotMatch(evalPrompt, /git fetch \/tmp\/source\.bundle/)
     assert.match(evalPrompt, /Review only changes in base-sha\.\.\.head-sha/)
+    assert.match(setupPrompt, /Trusted source preparation/)
+    assert.match(setupPrompt, /git fetch \/tmp\/source\.bundle/)
+    assert.match(setupPrompt, /your only task in this turn/i)
+    assert.match(setupPrompt, /first and only tool call/i)
   })
 })
 

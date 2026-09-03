@@ -5,6 +5,7 @@ import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { z } from "zod"
+import type { ReviewTarget } from "./evidence.js"
 
 const outputFields = {
   threadId: z.string().nullable(),
@@ -22,6 +23,11 @@ export type EvaluationReviewInput = {
   timeoutMs: number
   apiKey?: string
   signal: AbortSignal
+  sourceSetup?: {
+    prompt: string
+    preparation: string
+    target: ReviewTarget
+  }
 }
 
 export type ReviewAuthentication =
@@ -149,6 +155,7 @@ export async function runEvaluationReview(
           title: input.title,
           cwd,
           timeoutMs: input.timeoutMs,
+          ...(input.sourceSetup === undefined ? {} : { sourceSetup: input.sourceSetup }),
         }),
       )
 

@@ -15,7 +15,7 @@ const execFileAsync = promisify(execFile)
 const ampRetryDelaysMs = [5_000, 20_000]
 const staleRecoveryIntervalMs = 60_000
 const maxJobAttempts = 3
-const continuationPrompt =
+const defaultRetryPrompt =
   "Complete the review if necessary, then return only the final review JSON in the required schema."
 
 type ExecuteAmp = typeof execute
@@ -31,6 +31,8 @@ type ExecuteReviewOptions = {
   onMessage?: (message: StreamMessage) => void
   executeAmp?: ExecuteAmp
   retryDelaysMs?: number[]
+  continueThreadId?: string
+  retryPrompt?: string
 } & ({ project: string; cwd?: never } | { cwd: string; project?: never })
 
 export async function executeReviewWithRetries({
@@ -46,15 +48,20 @@ export async function executeReviewWithRetries({
   onMessage,
   executeAmp = execute,
   retryDelaysMs = ampRetryDelaysMs,
+  continueThreadId,
+  retryPrompt = defaultRetryPrompt,
 }: ExecuteReviewOptions): Promise<string> {
-  let threadId: string | undefined
+  let threadId = continueThreadId
+  let firstExecution = true
 
   for (let attempt = 0; ; attempt += 1) {
     let assistantFallback: string | undefined
     try {
       const continuing = threadId !== undefined
+      const executionPrompt = !continuing || firstExecution ? prompt : retryPrompt
+      firstExecution = false
       for await (const message of executeAmp({
-        prompt: continuing ? continuationPrompt : prompt,
+        prompt: executionPrompt,
         signal,
         options: {
           executor: "orb",

@@ -52,7 +52,30 @@ describe("executeReviewWithRetries", () => {
     assert.equal(fake.calls[0]?.options?.project, undefined)
   })
 
-  it("keeps no-project continuation commands outside the local repository", async () => {
+  it("uses the requested prompt when continuing a prepared review thread", async () => {
+    const fake = fakeExecute([[systemMessage(), successMessage(validResult)]])
+
+    const result = await executeReviewWithRetries({
+      prompt: "Review the prepared source",
+      title: "Review lox/example#42",
+      cwd: "/tmp/empty-review-workspace",
+      visibility: "private",
+      signal: new AbortController().signal,
+      logger: pino({ level: "silent" }),
+      onThread: async () => {},
+      beforeRetry: async () => {},
+      continueThreadId: threadId,
+      executeAmp: fake.execute,
+      retryDelaysMs: [0, 0],
+    })
+
+    assert.equal(result, validResult)
+    assert.equal(fake.calls[0]?.prompt, "Review the prepared source")
+    assert.equal(fake.calls[0]?.options?.continue, threadId)
+    assert.equal(fake.calls[0]?.options?.title, undefined)
+  })
+
+  it("keeps no-project retries outside the local repository and uses their prompt", async () => {
     const fake = fakeExecute([
       [systemMessage(), errorMessage("OpenAI WebSocket closed: 1011")],
       [systemMessage(), successMessage(validResult)],
@@ -69,11 +92,13 @@ describe("executeReviewWithRetries", () => {
       beforeRetry: async () => {},
       executeAmp: fake.execute,
       retryDelaysMs: [0, 0],
+      retryPrompt: "Complete source setup only",
     })
 
     assert.equal(fake.calls[1]?.options?.continue, threadId)
     assert.equal(fake.calls[1]?.options?.cwd, "/tmp/empty-review-workspace")
     assert.equal(fake.calls[1]?.options?.project, undefined)
+    assert.equal(fake.calls[1]?.prompt, "Complete source setup only")
   })
 
   it("uses a valid final assistant response when the result stream fails", async () => {
