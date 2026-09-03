@@ -1,5 +1,5 @@
-// @amp-agent-mode {"key":"review-gpt56sol-v1","label":"review-gpt56sol-v1"}
-// @amp-agent-mode {"key":"judge-gpt56sol-v1","label":"judge-gpt56sol-v1"}
+// @amp-agent-mode {"key":"reviewbot-v1","label":"reviewbot-v1"}
+// @amp-agent-mode {"key":"reviewbot-judge-v1","label":"reviewbot-judge-v1"}
 
 export const description =
   "Pins amp-reviewbot's main agents while retaining Amp's built-in prompts and tools. Install this exact file for every Amp account that runs reviews or evaluation checks."
@@ -12,10 +12,10 @@ export default function (amp) {
     model,
     reasoningEffort: "medium",
     oracle: { model, reasoningEffort: "high" },
-    display: { label: "review-gpt56sol-v1" },
+    display: { label: "reviewbot-v1" },
   })
   amp.registerAgentMode({
-    key: "review-gpt56sol-v1",
+    key: "reviewbot-v1",
     description: "Production code review with a fixed main model. Use for amp-reviewbot reviews.",
     agent: reviewer.definition,
   })
@@ -25,10 +25,10 @@ export default function (amp) {
     model,
     reasoningEffort: "xhigh",
     oracle: { model, reasoningEffort: "high" },
-    display: { label: "judge-gpt56sol-v1" },
+    display: { label: "reviewbot-judge-v1" },
   })
   amp.registerAgentMode({
-    key: "judge-gpt56sol-v1",
+    key: "reviewbot-judge-v1",
     description: "Evaluation finding comparison with a fixed main model. Use only for amp-reviewbot evaluation.",
     agent: judge.definition,
   })

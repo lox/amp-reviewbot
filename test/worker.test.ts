@@ -20,14 +20,14 @@ describe("executeReviewWithRetries", () => {
     assert.equal(fake.calls[0]?.options?.title, "Review lox/example#42")
     assert.equal(fake.calls[0]?.options?.executor, "orb")
     assert.equal(fake.calls[0]?.options?.project, "lox/example")
-    assert.equal(fake.calls[0]?.options?.mode, "review-gpt56sol-v1")
+    assert.equal(fake.calls[0]?.options?.mode, "reviewbot-v1")
     assert.equal(fake.calls[0]?.options?.continue, undefined)
   })
 
   it("rejects a review that did not start in the pinned mode", async () => {
     const fake = fakeExecute([[systemMessage("medium"), successMessage(validResult)]])
 
-    await assert.rejects(() => run(fake.execute), /expected review-gpt56sol-v1/)
+    await assert.rejects(() => run(fake.execute), /expected reviewbot-v1/)
     assert.equal(fake.calls.length, 1)
   })
 
@@ -238,7 +238,7 @@ function fakeExecute(attempts: StreamMessage[][], beforeResult?: () => void): {
   }
 }
 
-function systemMessage(agentMode = "review-gpt56sol-v1"): StreamMessage {
+function systemMessage(agentMode = "reviewbot-v1"): StreamMessage {
   return {
     type: "system",
     subtype: "init",

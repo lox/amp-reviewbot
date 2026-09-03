@@ -23,7 +23,7 @@ The service keeps the GitHub App private key. Review orbs receive repository acc
 
 Reviewbot keeps one self-contained [`general-code-reviewing`](.agents/skills/general-code-reviewing/SKILL.md) skill under `.agents/skills`. Its ship-risk and simplicity passes are embedded directly into every review prompt without skill metadata, so target-repository orbs do not depend on globally installed skills.
 
-The `review-gpt56sol-v1` Amp mode extends the built-in `medium` agent, preserving its prompt and tools while pinning the main reviewer and Oracle to `openai/gpt-5.6-sol`. Amp continues to route specialist tools such as Search and Librarian because replacing their different models with one model would change how the production agent works.
+The `reviewbot-v1` Amp mode extends the built-in `medium` agent, preserving its prompt and tools while pinning the main reviewer and Oracle to `openai/gpt-5.6-sol`. Amp continues to route specialist tools such as Search and Librarian because replacing their different models with one model would change how the production agent works.
 
 ## Requirements
 

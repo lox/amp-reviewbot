@@ -43,7 +43,7 @@ Older result files remain readable, but their reports clearly say that they are 
 
 ## Amp mode and model
 
-Production and evaluation reviews use the tracked `review-gpt56sol-v1` Amp mode. It extends built-in `medium`, preserving that mode's prompt and tools, while pinning the main reviewer and Oracle to `openai/gpt-5.6-sol` at their existing reasoning levels. Finding comparisons similarly extend `high` through `judge-gpt56sol-v1` and pin their main model and Oracle.
+Production and evaluation reviews use the tracked `reviewbot-v1` Amp mode. It extends built-in `medium`, preserving that mode's prompt and tools, while pinning the main reviewer and Oracle to `openai/gpt-5.6-sol` at their existing reasoning levels. Finding comparisons similarly extend `high` through `reviewbot-judge-v1` and pin their main model and Oracle.
 
 Every Amp account involved must install the exact [`pinned-models.js`](../.amp/plugins/pinned-models.js) file as a personal or workspace plugin: the production service account, the separate evaluation review account, and the local account used for finding comparisons. An orb loads the mode from that account's plugins; keeping the file only in this repository is not enough. A missing mode stops the run instead of falling back to an unpinned model.
 
@@ -103,7 +103,7 @@ A report starts by saying what access was allowed and explains each repeat in pl
 Review evaluation: PUBLIC RESEARCH ALLOWED
 Recorded result: NEEDS WORK
 The reviewer could research anything public except this pull request and another copy or later version of the target repository.
-Reviewer: Amp mode review-gpt56sol-v1. Model: openai/gpt-5.6-sol. SDK: <exact SDK version>. CLI: <exact CLI version>.
+Reviewer: Amp mode reviewbot-v1. Model: openai/gpt-5.6-sol. SDK: <exact SDK version>. CLI: <exact CLI version>.
 Exact model IDs: not reported by Amp.
 
 2 pull-request examples: 1 pass, 1 unstable, 0 fail.

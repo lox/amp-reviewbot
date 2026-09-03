@@ -56,7 +56,7 @@ Production and evaluation use the same:
 
 - the exact `base...head` target;
 - title, description, and branch names captured before the run;
-- a fresh Amp orb using the production `review-gpt56sol-v1` mode, which retains `medium` behavior while fixing its main model;
+- a fresh Amp orb using the production `reviewbot-v1` mode, which retains `medium` behavior while fixing its main model;
 - the production prompt and embedded two-pass review method;
 - retry and JSON parsing behavior; and
 - changed-line filtering and conclusion calculation.
@@ -98,7 +98,7 @@ Never replace a failed run or add runs only where the preferred version is behin
 
 For a synthetic before-and-after pair, one repeat passes only when the reviewer gets both versions right. A baseline with a source-confirmed existing issue is checked against that issue rather than being called clean.
 
-Deciding whether a finding describes a recorded issue also uses a model and can vary. These checks start only after every review has finished and the completed reviews have been saved privately. They have a separate timeout, so a slow or interrupted check cannot erase review results. Two independent calls in the `judge-gpt56sol-v1` mode, which retains built-in `high` behavior, compare each recorded issue with the review findings. A third call breaks a disagreement. Identical checks are reused. The saved result includes every decision and the prompt, response format, SDK, CLI, configured mode and model, any model ID Amp reports, and timing behind it.
+Deciding whether a finding describes a recorded issue also uses a model and can vary. These checks start only after every review has finished and the completed reviews have been saved privately. They have a separate timeout, so a slow or interrupted check cannot erase review results. Two independent calls in the `reviewbot-judge-v1` mode, which retains built-in `high` behavior, compare each recorded issue with the review findings. A third call breaks a disagreement. Identical checks are reused. The saved result includes every decision and the prompt, response format, SDK, CLI, configured mode and model, any model ID Amp reports, and timing behind it.
 
 The tracked plugin modes extend Amp's built-in modes, preserving their prompts and tools while pinning each main agent and Oracle to `openai/gpt-5.6-sol` at the existing reasoning level. The exact plugin file must be installed as a personal or workspace plugin for the production account, the separate review account, and the trusted account that compares findings. Orbs load plugin modes from the account running them, not from this runner's filesystem. A missing mode stops the run instead of silently selecting another model.
 

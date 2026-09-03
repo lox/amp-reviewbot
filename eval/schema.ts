@@ -316,7 +316,7 @@ export const evalRunSchema = z
       dirty: z.boolean(),
       sdkVersion: z.string(),
       cliVersion: z.string().optional(),
-      mode: z.enum(["medium", "review-gpt56sol-v1"]),
+      mode: z.enum(["medium", "reviewbot-v1"]),
       model: z.string().optional(),
       failOn: z.literal("high"),
       reviewSourceHash: z.string(),
@@ -383,7 +383,7 @@ export const evalRunSchema = z
       }
       if (
         run.reviewer.protocol === "research-enabled-target-frozen-v3" &&
-        (run.reviewer.mode !== "review-gpt56sol-v1" ||
+        (run.reviewer.mode !== "reviewbot-v1" ||
           run.reviewer.model !== "openai/gpt-5.6-sol")
       ) {
         context.addIssue({
@@ -518,7 +518,7 @@ export const evalRunSchema = z
             }
             if (
               run.reviewer.protocol === "research-enabled-target-frozen-v3" &&
-              (provenance.mode !== "judge-gpt56sol-v1" ||
+              (provenance.mode !== "reviewbot-judge-v1" ||
                 provenance.model !== "openai/gpt-5.6-sol")
             ) {
               context.addIssue({
