@@ -9,10 +9,12 @@ import { PassThrough } from "node:stream"
 import { describe, it } from "node:test"
 import { pathToFileURL } from "node:url"
 import { promisify } from "node:util"
+import { AmpOptionsSchema } from "@ampcode/sdk"
 import { checkReviewTrace, modelsFromTrace } from "../eval/evidence.js"
 import { judgeIssue, resolveMatchingVotes } from "../eval/judge.js"
 import { checkPack, exampleSchema, loadPack } from "../eval/pack.js"
 import { formatReport } from "../eval/report.js"
+import { evaluationAmpArgs } from "../eval/reviewer-child.js"
 import {
   reviewAuthentication,
   reviewerEnvironment,
@@ -38,6 +40,7 @@ import {
   pinnedModel,
   reviewMode,
 } from "../src/amp.js"
+import { preparedSourceVerificationCommand } from "../src/review.js"
 
 const execFileAsync = promisify(execFile)
 const lowFinding = {
@@ -460,6 +463,7 @@ describe("eval example packs", () => {
       registerAgentMode(mode: Record<string, unknown>) {
         modes.push(mode)
       },
+      on() {},
     })
 
     assert.deepEqual(
@@ -488,6 +492,130 @@ describe("eval example packs", () => {
       modes.map(({ key }) => key),
       [reviewMode, judgeMode],
     )
+  })
+
+  it("prepares evaluation source in the plugin before the reviewer starts", async () => {
+    let startHandler:
+      | ((
+          event: { message: string },
+          context: Record<string, unknown>,
+        ) => Promise<unknown>)
+      | undefined
+    const pluginPath = pathToFileURL(resolve("plugins", "pinned-models.js")).href
+    const plugin: { default: (amp: Record<string, unknown>) => void } = await import(pluginPath)
+    plugin.default({
+      createAgent(config: Record<string, unknown>) {
+        return { definition: config }
+      },
+      registerAgentMode() {},
+      on(event: string, handler: typeof startHandler) {
+        if (event === "agent.start") startHandler = handler
+      },
+      system: { workspaceRoot: { path: "/workspace" } },
+      helpers: {
+        filePathFromURI(uri: { path: string }) {
+          return uri.path
+        },
+      },
+    })
+    assert.ok(startHandler)
+
+    const calls: Array<{ strings: string[]; values: unknown[] }> = []
+    let cancellations = 0
+    const result = await startHandler(
+      {
+        message:
+          "<reviewbot-source-setup-v1>\nprintf 'ready'\n</reviewbot-source-setup-v1>\n\nReview now.",
+      },
+      {
+        $: async (strings: TemplateStringsArray, ...values: unknown[]) => {
+          calls.push({ strings: [...strings], values })
+          return { exitCode: 0, stdout: "", stderr: "" }
+        },
+        thread: {
+          async cancel() {
+            cancellations += 1
+          },
+        },
+      },
+    )
+
+    assert.deepEqual(calls, [
+      {
+        strings: ["cd ", " && bash -c ", ""],
+        values: ["/workspace", "printf 'ready'"],
+      },
+    ])
+    assert.equal(cancellations, 0)
+    assert.deepEqual(result, {
+      message: { content: "The trusted source setup completed successfully. Do not repeat it." },
+    })
+
+    await startHandler(
+      { message: "<reviewbot-source-setup-v2>\nprintf bad\n</reviewbot-source-setup-v2>" },
+      {
+        $: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+        thread: {
+          async cancel() {
+            cancellations += 1
+          },
+        },
+      },
+    )
+    assert.equal(cancellations, 1)
+
+    await startHandler(
+      { message: "<reviewbot-source-setup-v1>\nexit 1\n</reviewbot-source-setup-v1>" },
+      {
+        $: async () => ({ exitCode: 1, stdout: "", stderr: "setup failed" }),
+        thread: {
+          async cancel() {
+            cancellations += 1
+          },
+        },
+      },
+    )
+    assert.equal(cancellations, 2)
+
+    const ordinary = await startHandler(
+      { message: "Review this pull request." },
+      {
+        $: async () => assert.fail("ordinary reviews must not run source setup"),
+        thread: { cancel: async () => assert.fail("ordinary reviews must not be cancelled") },
+      },
+    )
+    assert.equal(ordinary, undefined)
+  })
+
+  it("waits for plugin hooks when starting an evaluation orb", () => {
+    const args = evaluationAmpArgs(
+      AmpOptionsSchema.parse({
+        cwd: "/tmp/empty-source",
+        executor: "orb",
+        mode: reviewMode,
+        noArchiveAfterExecute: true,
+        visibility: "private",
+        labels: ["reviewbot"],
+        title: "Review example/repository#42",
+      }),
+    )
+
+    assert.deepEqual(args, [
+      "--execute",
+      "--stream-json",
+      "--orb-execute",
+      "--plugin-ready-timeout",
+      "30",
+      "--mode",
+      reviewMode,
+      "--no-archive-after-execute",
+      "--visibility",
+      "private",
+      "--label",
+      "reviewbot",
+      "--title",
+      "Review example/repository#42",
+    ])
   })
 
   it("uses local CLI authentication unless a dedicated review key is provided", () => {
@@ -591,16 +719,6 @@ describe("eval example packs", () => {
         title: "Test review",
         timeoutMs: 1_000,
         signal: new AbortController().signal,
-        sourceSetup: {
-          prompt: "Prepare the source.",
-          preparation: "Run these commands from the repository:\n\ngit init\n\nUse only this source.",
-          target: {
-            repository: "example/repository",
-            pullNumber: 42,
-            baseSha: "base-sha",
-            headSha: "head-sha",
-          },
-        },
       },
       () => {
         spawned.resolve()
@@ -610,16 +728,7 @@ describe("eval example packs", () => {
     await spawned.promise
     const submitted = await childInput.promise
     assert.equal("project" in submitted, false)
-    assert.deepEqual(submitted.sourceSetup, {
-      prompt: "Prepare the source.",
-      preparation: "Run these commands from the repository:\n\ngit init\n\nUse only this source.",
-      target: {
-        repository: "example/repository",
-        pullNumber: 42,
-        baseSha: "base-sha",
-        headSha: "head-sha",
-      },
-    })
+    assert.equal(submitted.prompt, "Review this change.")
     await stat(submitted.cwd)
     await assert.rejects(stat(join(submitted.cwd, ".git")))
     await assert.rejects(stat(join(submitted.cwd, ".amp")))
@@ -748,6 +857,91 @@ Use only this checked-out source.`
       ),
       ["did not complete the required source setup"],
     )
+    const verificationCommand = preparedSourceVerificationCommand(target)
+    assert.deepEqual(
+      checkReviewTrace(
+        [
+          traceSystemMessage("thread-1", "/workspace", reviewMode),
+          toolMessage(
+            "shell_command",
+            { command: verificationCommand, workdir: "/home/user/workspace" },
+            "source-verification",
+          ),
+          toolResultMessage("source-verification", false, 0),
+          toolMessage(
+            "shell_command",
+            { command: "git status", workdir: "/home/user/workspace" },
+            "inspection",
+          ),
+          toolResultMessage("inspection"),
+        ],
+        sourcePreparation,
+        target,
+        reviewMode,
+        "plugin",
+      ),
+      [],
+    )
+    assert.deepEqual(
+      checkReviewTrace(
+        [
+          traceSystemMessage("thread-1", "/workspace", reviewMode),
+          toolMessage(
+            "shell_command",
+            { command: verificationCommand, workdir: "/home/user/workspace" },
+            "failed-verification",
+          ),
+          toolResultMessage("failed-verification", false, 1),
+        ],
+        sourcePreparation,
+        target,
+        reviewMode,
+        "plugin",
+      ),
+      ["did not complete the required source setup"],
+    )
+    assert.deepEqual(
+      checkReviewTrace(
+        [
+          traceSystemMessage("thread-1", "/workspace", reviewMode),
+          toolMessage(
+            "shell_command",
+            { command: verificationCommand, workdir: "/home/user/workspace" },
+            "verification-without-exit-code",
+          ),
+          toolResultMessage("verification-without-exit-code"),
+        ],
+        sourcePreparation,
+        target,
+        reviewMode,
+        "plugin",
+      ),
+      ["did not complete the required source setup"],
+    )
+    assert.deepEqual(
+      checkReviewTrace(
+        [
+          traceSystemMessage("thread-1", "/workspace", reviewMode),
+          toolMessage(
+            "shell_command",
+            { command: verificationCommand, workdir: "/home/user/workspace" },
+            "source-verification",
+          ),
+          toolResultMessage("source-verification", false, 0),
+          toolMessage(
+            "shell_command",
+            { command: sourceCommand, workdir: "/home/user/workspace" },
+            "repeated-source-setup",
+          ),
+          toolResultMessage("repeated-source-setup"),
+        ],
+        sourcePreparation,
+        target,
+        reviewMode,
+        "plugin",
+      ),
+      ["accessed the target repository outside the supplied copy"],
+    )
     assert.deepEqual(
       checkReviewTrace(
         [
@@ -782,7 +976,7 @@ Use only this checked-out source.`
         sourcePreparation,
         undefined,
         undefined,
-        true,
+        "separate-turn",
       ),
       [],
     )
@@ -807,7 +1001,7 @@ Use only this checked-out source.`
         sourcePreparation,
         undefined,
         undefined,
-        true,
+        "separate-turn",
       ),
       ["did not complete the required source setup"],
     )
@@ -1328,6 +1522,21 @@ describe("eval scoring", () => {
     assert.throws(() => evalRunSchema.parse(splitPromptRun), /source setup prompt hash/)
     delete splitPromptRun.samples[0]!.sourceSetupPromptHash
     assert.throws(() => evalRunSchema.parse(splitPromptRun), /full source setup prompt and its hash/)
+    const pluginSetupRun = structuredClone(splitPromptRun)
+    pluginSetupRun.reviewer.protocol = "research-enabled-target-frozen-v5"
+    delete pluginSetupRun.samples[0]!.sourceSetupPrompt
+    delete pluginSetupRun.samples[0]!.sourceSetupPromptHash
+    pluginSetupRun.samples[0]!.prompt =
+      "<reviewbot-source-setup-v1>\nsetup command\n</reviewbot-source-setup-v1>\n\nreview prompt"
+    pluginSetupRun.samples[0]!.promptHash = createHash("sha256")
+      .update(pluginSetupRun.samples[0]!.prompt)
+      .digest("hex")
+    assert.doesNotThrow(() => evalRunSchema.parse(pluginSetupRun))
+    pluginSetupRun.samples[0]!.prompt = "review prompt without setup"
+    pluginSetupRun.samples[0]!.promptHash = createHash("sha256")
+      .update(pluginSetupRun.samples[0]!.prompt)
+      .digest("hex")
+    assert.throws(() => evalRunSchema.parse(pluginSetupRun), /start with its source setup block/)
     const wrongReviewerModel = structuredClone(pinnedRun)
     wrongReviewerModel.reviewer.model = "openai/another-model"
     assert.throws(

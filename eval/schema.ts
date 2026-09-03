@@ -330,6 +330,7 @@ export const evalRunSchema = z
           "research-enabled-target-frozen-v2",
           "research-enabled-target-frozen-v3",
           "research-enabled-target-frozen-v4",
+          "research-enabled-target-frozen-v5",
         ])
         .optional(),
       account: z.union([
@@ -376,7 +377,8 @@ export const evalRunSchema = z
       if (
         (run.reviewer.protocol === "research-enabled-target-frozen-v2" ||
           run.reviewer.protocol === "research-enabled-target-frozen-v3" ||
-          run.reviewer.protocol === "research-enabled-target-frozen-v4") &&
+          run.reviewer.protocol === "research-enabled-target-frozen-v4" ||
+          run.reviewer.protocol === "research-enabled-target-frozen-v5") &&
         run.reviewer.cliVersion === undefined
       ) {
         context.addIssue({
@@ -387,7 +389,8 @@ export const evalRunSchema = z
       }
       if (
         (run.reviewer.protocol === "research-enabled-target-frozen-v3" ||
-          run.reviewer.protocol === "research-enabled-target-frozen-v4") &&
+          run.reviewer.protocol === "research-enabled-target-frozen-v4" ||
+          run.reviewer.protocol === "research-enabled-target-frozen-v5") &&
         (run.reviewer.mode !== "reviewbot-v1" ||
           run.reviewer.model !== "openai/gpt-5.6-sol")
       ) {
@@ -517,6 +520,18 @@ export const evalRunSchema = z
           })
         }
         if (
+          run.reviewer.protocol === "research-enabled-target-frozen-v5" &&
+          !/^<reviewbot-source-setup-v1>\n[\s\S]+?\n<\/reviewbot-source-setup-v1>\n\n/.test(
+            sample.prompt,
+          )
+        ) {
+          context.addIssue({
+            code: "custom",
+            path: ["samples", index, "prompt"],
+            message: "this evaluation prompt must start with its source setup block",
+          })
+        }
+        if (
           sample.reviewDurationMs !== undefined &&
           sample.matchingDurationMs !== undefined &&
           sample.durationMs !== sample.reviewDurationMs + sample.matchingDurationMs
@@ -533,7 +548,8 @@ export const evalRunSchema = z
             if (
               (run.reviewer.protocol === "research-enabled-target-frozen-v2" ||
                 run.reviewer.protocol === "research-enabled-target-frozen-v3" ||
-                run.reviewer.protocol === "research-enabled-target-frozen-v4") &&
+                run.reviewer.protocol === "research-enabled-target-frozen-v4" ||
+                run.reviewer.protocol === "research-enabled-target-frozen-v5") &&
               provenance.cliVersion === undefined
             ) {
               context.addIssue({
@@ -544,7 +560,8 @@ export const evalRunSchema = z
             }
             if (
               (run.reviewer.protocol === "research-enabled-target-frozen-v3" ||
-                run.reviewer.protocol === "research-enabled-target-frozen-v4") &&
+                run.reviewer.protocol === "research-enabled-target-frozen-v4" ||
+                run.reviewer.protocol === "research-enabled-target-frozen-v5") &&
               (provenance.mode !== "reviewbot-judge-v1" ||
                 provenance.model !== "openai/gpt-5.6-sol")
             ) {

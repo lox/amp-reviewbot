@@ -6,6 +6,7 @@ import {
   checkConclusion,
   finalizeReview,
   parseReviewResult,
+  preparedSourceVerificationCommand,
   reviewThreadTitle,
 } from "../src/review.js"
 import type { ReviewJob } from "../src/types.js"
@@ -77,7 +78,7 @@ describe("buildReviewPrompt", () => {
     assert.doesNotMatch(buildReviewPrompt(job), /pull-request-context/)
   })
 
-  it("separates trusted source setup from the prepared-source review", () => {
+  it("gives the setup hook its command and makes the prepared source observable", () => {
     const job: ReviewJob = {
       id: "job-1",
       sourceDeliveryId: "delivery-1",
@@ -99,7 +100,13 @@ describe("buildReviewPrompt", () => {
     const productionPrompt = buildReviewPrompt(job)
     const evalPrompt = buildReviewPrompt(job, { preparedSource: true })
     const setupPrompt = buildSourceSetupPrompt(
-      "git fetch /tmp/source.bundle refs/heads/target",
+      `Prepare the exact source before review.
+
+Run these commands from the repository:
+
+git fetch /tmp/source.bundle refs/heads/target
+
+Use only this checked-out source.`,
     )
 
     assert.doesNotMatch(productionPrompt, /source boundary/i)
@@ -107,10 +114,11 @@ describe("buildReviewPrompt", () => {
     assert.match(evalPrompt, /exact source is already prepared/)
     assert.doesNotMatch(evalPrompt, /git fetch \/tmp\/source\.bundle/)
     assert.match(evalPrompt, /Review only changes in base-sha\.\.\.head-sha/)
-    assert.match(setupPrompt, /Trusted source preparation/)
+    assert.ok(evalPrompt.includes(preparedSourceVerificationCommand(job)))
+    assert.match(setupPrompt, /^<reviewbot-source-setup-v1>/)
     assert.match(setupPrompt, /git fetch \/tmp\/source\.bundle/)
-    assert.match(setupPrompt, /your only task in this turn/i)
-    assert.match(setupPrompt, /first and only tool call/i)
+    assert.match(setupPrompt, /trusted reviewbot plugin/i)
+    assert.match(setupPrompt, /Do not run or repeat it/)
   })
 })
 

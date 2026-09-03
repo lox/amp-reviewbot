@@ -54,7 +54,7 @@ Checks write permission automatically enables the `check_run` events used by Git
 
 Install the App on repositories that have corresponding Amp projects. The Amp account behind `AMP_API_KEY` must be allowed to start orb threads for those projects and must have the exact [pinned agent plugin](plugins/pinned-models.js) installed as a personal or workspace plugin. Do not install it as a project plugin: loading the same mode from both the project and the account makes the mode ambiguous.
 
-The plugin must be installed through Amp, not only included in the service image. The local CLI sends its mode name when it starts an orb, and the orb loads the matching definition from that account's plugins. A missing plugin makes the review fail rather than silently use a different model. The model and version are part of the mode name so a future mode can be installed before the service switches to it.
+The plugin must be installed through Amp, not only included in the service image. The local CLI sends its mode name when it starts an orb, and the orb loads the matching definition from that account's plugins. A missing plugin makes the review fail rather than silently use a different model. The plugin also prepares frozen source for the separate evaluation runner; normal production review prompts do not activate that hook. The model and version are part of the mode name so a future mode can be installed before the service switches to it.
 
 ## Configure
 

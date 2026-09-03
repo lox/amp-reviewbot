@@ -54,7 +54,11 @@ The exact source is already prepared in the current workspace. Use only this cop
 `
     : ""
   const checkoutInstruction = preparedSource
-    ? `First verify HEAD equals ${job.headSha}.`
+    ? `Before inspecting the source or using any other tool, run this exact verification as one shell command:
+
+${preparedSourceVerificationCommand(job)}
+
+Wait for it to finish and stop if it fails.`
     : `First fetch and check out exactly the head SHA. Verify HEAD equals ${job.headSha}.`
 
   return `You are reviewing GitHub pull request #${job.pullNumber} in ${job.repositoryFullName}.
@@ -94,14 +98,32 @@ Return only JSON matching this exact shape, with at most 20 findings:
 }
 
 export function buildSourceSetupPrompt(trustedSourcePreparation: string): string {
-  return `Prepare the source for a later review.
+  const command = sourcePreparationCommand(trustedSourcePreparation)
+  if (!command) throw new Error("Trusted source preparation has no setup command")
+  return `<reviewbot-source-setup-v1>
+${command}
+</reviewbot-source-setup-v1>
 
-Trusted source preparation:
-<source-preparation>
-${trustedSourcePreparation}
-</source-preparation>
+This block is for the trusted reviewbot plugin. Do not run or repeat it. Begin the review only after the plugin confirms that source setup succeeded.`
+}
 
-This is your only task in this turn. Run the complete setup block exactly as written in one shell_command call. It must be your first and only tool call. Wait for it to finish. If it succeeds, state briefly that the source is ready and end the turn. If it fails, stop. Do not plan, inspect, research, delegate, or begin the review.`
+export function sourcePreparationCommand(sourcePreparation: string): string | undefined {
+  return (
+    /<reviewbot-source-setup-v1>\n([\s\S]*?)\n<\/reviewbot-source-setup-v1>/.exec(
+      sourcePreparation,
+    )?.[1] ??
+    /Run these commands from the repository:\n\n([\s\S]*?)\n\nUse only/.exec(sourcePreparation)?.[1]
+  )
+}
+
+export function preparedSourceVerificationCommand(
+  target: Pick<ReviewJob, "baseSha" | "headSha">,
+): string {
+  return `set -euo pipefail
+test "$(git rev-parse HEAD)" = '${target.headSha}'
+test "$(git rev-parse refs/source/base)" = '${target.baseSha}'
+test "$(git rev-parse refs/source/target)" = '${target.headSha}'
+test -z "$(git remote)"`
 }
 
 export function reviewThreadTitle(

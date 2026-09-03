@@ -1,13 +1,20 @@
-import { execFile } from "node:child_process"
+import { execFile, spawn } from "node:child_process"
+import { readFileSync } from "node:fs"
+import { createInterface } from "node:readline"
 import { resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
-import type { StreamMessage } from "@ampcode/sdk"
+import {
+  AmpOptionsSchema,
+  type ExecuteOptions,
+  type ResolvedAmpOptions,
+  type StreamMessage,
+} from "@ampcode/sdk"
 import pino from "pino"
 import { z } from "zod"
 import { reviewMode } from "../src/amp.js"
 import { executeReviewWithRetries } from "../src/worker.js"
-import { checkReviewTrace, modelsFromTrace } from "./evidence.js"
+import { modelsFromTrace } from "./evidence.js"
 
 const execFileAsync = promisify(execFile)
 const inputSchema = z.object({
@@ -15,21 +22,12 @@ const inputSchema = z.object({
   title: z.string().min(1),
   cwd: z.string().min(1),
   timeoutMs: z.number().int().positive(),
-  sourceSetup: z
-    .object({
-      prompt: z.string().min(1),
-      preparation: z.string().min(1),
-      target: z.object({
-        repository: z.string().min(1),
-        pullNumber: z.number().int().positive(),
-        baseSha: z.string().min(1),
-        headSha: z.string().min(1),
-      }),
-    })
-    .optional(),
 })
-const setupRetryPrompt =
-  "Complete only the source setup requested in the first message, then end the turn. Do not begin the review."
+const pluginReadyTimeoutSeconds = 30
+const sdkVersion = z
+  .object({ version: z.string() })
+  .parse(JSON.parse(readFileSync(resolve("node_modules", "@ampcode", "sdk", "package.json"), "utf8")))
+  .version
 
 async function main(): Promise<void> {
   const input = inputSchema.parse(JSON.parse(await readStdin()))
@@ -46,41 +44,22 @@ async function main(): Promise<void> {
 
   try {
     try {
-      const runTurn = (prompt: string, continueThreadId?: string, retryPrompt?: string) =>
-        executeReviewWithRetries({
-          prompt,
-          title: input.title,
-          cwd: input.cwd,
-          visibility: "private",
-          signal: controller.signal,
-          logger: pino({ level: "silent" }),
-          onThread: async (id) => {
-            threadId = id
-          },
-          beforeRetry: async () => {},
-          onMessage: (message) => {
-            trace.push(message)
-          },
-          ...(continueThreadId === undefined ? {} : { continueThreadId }),
-          ...(retryPrompt === undefined ? {} : { retryPrompt }),
-        })
-
-      if (input.sourceSetup) {
-        await runTurn(input.sourceSetup.prompt, undefined, setupRetryPrompt)
-        const problems = checkReviewTrace(
-          trace,
-          input.sourceSetup.preparation,
-          input.sourceSetup.target,
-          reviewMode,
-          true,
-        )
-        if (problems.length > 0) {
-          throw new Error(`Source setup failed its checks: ${problems.join("; ")}`)
-        }
-        if (!threadId) throw new Error("Source setup did not create a review thread")
-      }
-
-      const rawResult = await runTurn(input.prompt, threadId ?? undefined)
+      const rawResult = await executeReviewWithRetries({
+        prompt: input.prompt,
+        title: input.title,
+        cwd: input.cwd,
+        visibility: "private",
+        signal: controller.signal,
+        logger: pino({ level: "silent" }),
+        onThread: async (id) => {
+          threadId = id
+        },
+        beforeRetry: async () => {},
+        onMessage: (message) => {
+          trace.push(message)
+        },
+        executeAmp: executeAmpWithPluginReady,
+      })
       process.stdout.write(
         `${JSON.stringify({ status: "completed", rawResult, threadId, models: modelsFromTrace(trace), trace })}\n`,
       )
@@ -95,6 +74,90 @@ async function main(): Promise<void> {
     process.removeListener("SIGINT", abort)
     if (threadId) await archiveThread(threadId)
   }
+}
+
+export async function* executeAmpWithPluginReady({
+  prompt,
+  options = {},
+  signal,
+}: ExecuteOptions): AsyncIterable<StreamMessage> {
+  if (typeof prompt !== "string") throw new Error("Evaluation reviews require a text prompt")
+  const resolved = AmpOptionsSchema.parse(options)
+  if (resolved.executor !== "orb") throw new Error("Evaluation reviews require an orb")
+
+  const child = spawn(resolve("node_modules", ".bin", "amp"), evaluationAmpArgs(resolved), {
+    cwd: resolved.cwd ?? process.cwd(),
+    env: { ...process.env, ...resolved.env, AMP_SDK_VERSION: sdkVersion },
+    signal,
+    stdio: ["pipe", "pipe", "pipe"],
+  })
+  let childError: Error | undefined
+  let stderr = ""
+  child.once("error", (error) => {
+    childError = error
+  })
+  child.stdin.once("error", () => {})
+  child.stderr.on("data", (chunk: Buffer) => {
+    if (stderr.length < 1_000_000) stderr += chunk.toString("utf8")
+  })
+  const closed = new Promise<{ code: number | null; processSignal: NodeJS.Signals | null }>(
+    (resolveClose) => {
+      child.once("close", (code, processSignal) => resolveClose({ code, processSignal }))
+    },
+  )
+
+  child.stdin.end(`${prompt}\n`)
+  const lines = createInterface({ input: child.stdout, crlfDelay: Number.POSITIVE_INFINITY })
+  try {
+    for await (const line of lines) {
+      if (!line.trim()) continue
+      try {
+        yield JSON.parse(line) as StreamMessage
+      } catch (error) {
+        throw new Error(`Amp returned invalid stream JSON: ${line.slice(0, 500)}`, {
+          cause: error,
+        })
+      }
+    }
+    const { code, processSignal } = await closed
+    if (signal?.aborted) throw signal.reason
+    if (childError) throw childError
+    if (code === null) throw new Error(`Amp CLI was killed by ${processSignal ?? "an unknown signal"}`)
+    if (code !== 0) {
+      throw new Error(`Amp CLI exited with status ${code}${stderr.trim() ? `: ${stderr.trim()}` : ""}`)
+    }
+  } finally {
+    lines.close()
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM")
+  }
+}
+
+export function evaluationAmpArgs(options: ResolvedAmpOptions): string[] {
+  const args: string[] = []
+  if (typeof options.continue === "string") {
+    args.push("threads", "continue", options.continue)
+  } else if (options.continue === true) {
+    args.push("threads", "continue")
+  }
+  args.push(
+    "--execute",
+    "--stream-json",
+    "--orb-execute",
+    "--plugin-ready-timeout",
+    String(pluginReadyTimeoutSeconds),
+    "--mode",
+    options.mode,
+  )
+  if (options.project) args.push("--project", options.project)
+  if (options.noArchiveAfterExecute || options.archive === false) {
+    args.push("--no-archive-after-execute")
+  }
+  if (options.visibility) {
+    args.push("--visibility", options.visibility === "public" ? "unlisted" : options.visibility)
+  }
+  for (const label of options.labels ?? []) args.push("--label", label)
+  if (options.title) args.push("--title", options.title)
+  return args
 }
 
 async function readStdin(): Promise<string> {

@@ -1,5 +1,9 @@
 import { posix } from "node:path"
 import { agentModeFromMessage } from "../src/amp.js"
+import {
+  preparedSourceVerificationCommand,
+  sourcePreparationCommand,
+} from "../src/review.js"
 
 export type ReviewTarget = {
   repository: string
@@ -29,11 +33,15 @@ export function checkReviewTrace(
   sourcePreparation: string | undefined,
   target?: ReviewTarget,
   expectedMode?: string,
-  separateSetupTurn = false,
+  sourceSetup?: "separate-turn" | "plugin",
 ): string[] {
   const problems = new Set<string>()
   const requiredPreparation =
     sourcePreparation === undefined ? undefined : sourcePreparationCommand(sourcePreparation)
+  const requiredFirstCommand =
+    sourceSetup === "plugin" && target
+      ? preparedSourceVerificationCommand(target)
+      : requiredPreparation
   const initial = systemInit(trace[0])
   let firstTool:
     | {
@@ -122,7 +130,14 @@ export function checkReviewTrace(
           problems.add("review continued in a different workspace")
         }
       }
-      if (!target || (requiredPreparation !== undefined && command === requiredPreparation)) continue
+      if (
+        !target ||
+        (sourceSetup !== "plugin" &&
+          requiredPreparation !== undefined &&
+          command === requiredPreparation)
+      ) {
+        continue
+      }
       const canAccessExternalEvidence =
         isResearchTool(tool) || (command !== undefined && runsNetworkCommand(command))
       if (canAccessExternalEvidence && refersToTargetPullRequest(serializedInput, target)) {
@@ -153,17 +168,18 @@ export function checkReviewTrace(
       problems.add("review continued in a different workspace")
     }
     if (
-      requiredPreparation === undefined ||
+      requiredFirstCommand === undefined ||
       !initial ||
       !firstTool ||
       !isShellTool(firstTool.tool) ||
-      firstTool.command !== requiredPreparation ||
+      firstTool.command !== requiredFirstCommand ||
       !isAbsoluteWorkdir(firstTool.workdir) ||
       !firstToolFinished ||
       !firstToolSucceeded ||
       startedAnotherToolBeforeFirstFinished ||
-      (separateSetupTurn &&
-        (!setupTurnFinished || setupTurnToolCount !== 1 || firstToolExitCode !== 0))
+      (sourceSetup !== undefined && firstToolExitCode !== 0) ||
+      (sourceSetup === "separate-turn" &&
+        (!setupTurnFinished || setupTurnToolCount !== 1))
     ) {
       problems.add("did not complete the required source setup")
     }
@@ -230,13 +246,10 @@ function updatesPreparedRepository(command: string): boolean {
 }
 
 export function sourcePreparationFromPrompt(prompt: string): string | undefined {
-  return /<source-preparation>\n([\s\S]*?)\n<\/source-preparation>/.exec(prompt)?.[1]
-}
-
-function sourcePreparationCommand(sourcePreparation: string): string | undefined {
-  return /Run these commands from the repository:\n\n([\s\S]*?)\n\nUse only/.exec(
-    sourcePreparation,
-  )?.[1]
+  return (
+    /<source-preparation>\n([\s\S]*?)\n<\/source-preparation>/.exec(prompt)?.[1] ??
+    /<reviewbot-source-setup-v1>\n[\s\S]*?\n<\/reviewbot-source-setup-v1>/.exec(prompt)?.[0]
+  )
 }
 
 function systemInit(

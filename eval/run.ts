@@ -352,19 +352,12 @@ async function runReviewSample(
     baseSha: evalCase.baseSha,
     headSha: evalCase.headSha,
   }
-  const prompt = buildReviewPrompt(job, { preparedSource: sourcePreparation !== undefined })
+  const reviewPrompt = buildReviewPrompt(job, { preparedSource: sourcePreparation !== undefined })
+  const sourceSetupPrompt =
+    sourcePreparation === undefined ? undefined : buildSourceSetupPrompt(sourcePreparation)
+  const prompt =
+    sourceSetupPrompt === undefined ? reviewPrompt : `${sourceSetupPrompt}\n\n${reviewPrompt}`
   const promptHash = hash(prompt)
-  const sourceSetup =
-    sourcePreparation === undefined
-      ? undefined
-      : { prompt: buildSourceSetupPrompt(sourcePreparation), preparation: sourcePreparation, target }
-  const sourceSetupEvidence =
-    sourceSetup === undefined
-      ? {}
-      : {
-          sourceSetupPrompt: sourceSetup.prompt,
-          sourceSetupPromptHash: hash(sourceSetup.prompt),
-        }
 
   try {
     const review = await runEvaluationReview({
@@ -373,7 +366,6 @@ async function runReviewSample(
       timeoutMs: options.timeoutMs,
       signal: controller.signal,
       apiKey: options.reviewerApiKey,
-      ...(sourceSetup === undefined ? {} : { sourceSetup }),
     })
     threadId = review.threadId
     trace = review.trace
@@ -384,7 +376,7 @@ async function runReviewSample(
       sourcePreparation,
       target,
       reviewMode,
-      true,
+      "plugin",
     )
     if (review.status === "error") {
       return {
@@ -393,7 +385,6 @@ async function runReviewSample(
         expected: evalCase.expected,
         promptHash,
         prompt,
-        ...sourceSetupEvidence,
         threadId,
         models,
         durationMs: reviewDurationMs,
@@ -414,7 +405,6 @@ async function runReviewSample(
       expected: evalCase.expected,
       promptHash,
       prompt,
-      ...sourceSetupEvidence,
       threadId,
       models,
       durationMs: reviewDurationMs,
@@ -439,7 +429,6 @@ async function runReviewSample(
       expected: evalCase.expected,
       promptHash,
       prompt,
-      ...sourceSetupEvidence,
       threadId,
       models,
       durationMs: reviewDurationMs,
@@ -451,7 +440,7 @@ async function runReviewSample(
         sourcePreparation,
         target,
         reviewMode,
-        true,
+        "plugin",
       ),
       status: "error",
       error: errorMessage(error),
@@ -532,7 +521,7 @@ async function reviewerProvenance(
     ),
     methodologyHash: hash(methodology),
     project: null,
-    protocol: "research-enabled-target-frozen-v4",
+    protocol: "research-enabled-target-frozen-v5",
     account,
   }
 }
