@@ -512,7 +512,7 @@ async function reviewerProvenance(
     readFile(resolve("src", "amp.ts"), "utf8"),
     readFile(resolve("eval", "reviewer.ts"), "utf8"),
     readFile(resolve("eval", "reviewer-child.ts"), "utf8"),
-    readFile(resolve(".amp", "plugins", "pinned-models.js"), "utf8"),
+    readFile(resolve("plugins", "pinned-models.js"), "utf8"),
     readFile(resolve(".agents", "skills", "general-code-reviewing", "SKILL.md"), "utf8"),
   ])
   const sdk: unknown = JSON.parse(sdkPackage)

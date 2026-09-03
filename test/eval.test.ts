@@ -450,7 +450,7 @@ describe("eval example packs", () => {
   it("pins the review agents without replacing their built-in modes", async () => {
     const agentConfigs: Array<Record<string, unknown>> = []
     const modes: Array<Record<string, unknown>> = []
-    const pluginPath = pathToFileURL(resolve(".amp", "plugins", "pinned-models.js")).href
+    const pluginPath = pathToFileURL(resolve("plugins", "pinned-models.js")).href
     const plugin: { default: (amp: Record<string, unknown>) => void } = await import(pluginPath)
     plugin.default({
       createAgent(config: Record<string, unknown>) {

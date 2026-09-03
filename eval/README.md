@@ -45,7 +45,7 @@ Older result files remain readable, but their reports clearly say that they are 
 
 Production and evaluation reviews use the tracked `reviewbot-v1` Amp mode. It extends built-in `medium`, preserving that mode's prompt and tools, while pinning the main reviewer and Oracle to `openai/gpt-5.6-sol` at their existing reasoning levels. Finding comparisons similarly extend `high` through `reviewbot-judge-v1` and pin their main model and Oracle.
 
-Every Amp account involved must install the exact [`pinned-models.js`](../.amp/plugins/pinned-models.js) file as a personal or workspace plugin: the production service account, the separate evaluation review account, and the local account used for finding comparisons. An orb loads the mode from that account's plugins; keeping the file only in this repository is not enough. A missing mode stops the run instead of falling back to an unpinned model.
+Every Amp account involved must install the exact [`pinned-models.js`](../plugins/pinned-models.js) file as a personal or workspace plugin: the production service account, the separate evaluation review account, and the local account used for finding comparisons. An orb loads the mode from that account's plugins; keeping the file only in this repository is not enough. Do not also install it as a project plugin because duplicate mode keys are ambiguous. A missing or ambiguous mode stops the run instead of falling back to an unpinned model.
 
 Amp still chooses models for specialist tools such as Search and Librarian. One plugin setting covers all specialists, so overriding it would replace their deliberately different routing and make the test less like production. The result therefore names the pinned main model without claiming that every supporting model is fixed.
 
