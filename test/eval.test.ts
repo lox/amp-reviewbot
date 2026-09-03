@@ -7,6 +7,7 @@ import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { PassThrough } from "node:stream"
 import { describe, it } from "node:test"
+import { pathToFileURL } from "node:url"
 import { promisify } from "node:util"
 import { checkReviewTrace, modelsFromTrace } from "../eval/evidence.js"
 import { judgeIssue, resolveMatchingVotes } from "../eval/judge.js"
@@ -32,6 +33,11 @@ import {
   type ExpectedResult,
 } from "../eval/schema.js"
 import { scoreRun } from "../eval/score.js"
+import {
+  judgeMode,
+  pinnedModel,
+  reviewMode,
+} from "../src/amp.js"
 
 const execFileAsync = promisify(execFile)
 const lowFinding = {
@@ -441,6 +447,49 @@ describe("eval example packs", () => {
     assert.deepEqual(modelsFromTrace([messageWithModel, messageWithModel]), ["openai/test-model"])
   })
 
+  it("pins the review agents without replacing their built-in modes", async () => {
+    const agentConfigs: Array<Record<string, unknown>> = []
+    const modes: Array<Record<string, unknown>> = []
+    const pluginPath = pathToFileURL(resolve(".amp", "plugins", "pinned-models.js")).href
+    const plugin: { default: (amp: Record<string, unknown>) => void } = await import(pluginPath)
+    plugin.default({
+      createAgent(config: Record<string, unknown>) {
+        agentConfigs.push(config)
+        return { definition: config }
+      },
+      registerAgentMode(mode: Record<string, unknown>) {
+        modes.push(mode)
+      },
+    })
+
+    assert.deepEqual(
+      agentConfigs.map(({ extends: extendedMode, model, reasoningEffort, oracle }) => ({
+        extendedMode,
+        model,
+        reasoningEffort,
+        oracle,
+      })),
+      [
+        {
+          extendedMode: "medium",
+          model: pinnedModel,
+          reasoningEffort: "medium",
+          oracle: { model: pinnedModel, reasoningEffort: "high" },
+        },
+        {
+          extendedMode: "high",
+          model: pinnedModel,
+          reasoningEffort: "xhigh",
+          oracle: { model: pinnedModel, reasoningEffort: "high" },
+        },
+      ],
+    )
+    assert.deepEqual(
+      modes.map(({ key }) => key),
+      [reviewMode, judgeMode],
+    )
+  })
+
   it("uses local CLI authentication unless a dedicated review key is provided", () => {
     const previousApiKey = process.env.AMP_API_KEY
     const previousReviewerApiKey = process.env.AMP_EVAL_REVIEWER_API_KEY
@@ -553,6 +602,7 @@ describe("eval example packs", () => {
     assert.equal("project" in submitted, false)
     await stat(submitted.cwd)
     await assert.rejects(stat(join(submitted.cwd, ".git")))
+    await assert.rejects(stat(join(submitted.cwd, ".amp")))
     stdout.write(
       JSON.stringify({
         status: "completed",
@@ -1154,7 +1204,10 @@ describe("eval scoring", () => {
     const researchReport = formatReport(researchRun, scoreRun(researchRun))
     assert.match(researchReport, /Review evaluation: PUBLIC RESEARCH ALLOWED/)
     assert.match(researchReport, /could research anything public/)
-    assert.match(researchReport, /Reviewer: Amp mode medium\. SDK: test\. CLI: test-cli\./)
+    assert.match(
+      researchReport,
+      /Reviewer: Amp mode medium\. Model: not pinned\. SDK: test\. CLI: test-cli\./,
+    )
     assert.match(researchReport, /Reported model IDs: test-judge, test-reviewer\./)
     assert.doesNotMatch(researchReport, /HISTORICAL RESULT/)
     const unreportedModelsRun = structuredClone(researchRun)
@@ -1176,6 +1229,27 @@ describe("eval scoring", () => {
     assert.throws(
       () => evalRunSchema.parse(currentProtocolRun),
       /requires the exact Amp CLI version/,
+    )
+    const pinnedRun = structuredClone(researchRun)
+    pinnedRun.reviewer.protocol = "research-enabled-target-frozen-v3"
+    pinnedRun.reviewer.mode = reviewMode
+    pinnedRun.reviewer.model = pinnedModel
+    if (pinnedRun.samples[0]!.status !== "completed") assert.fail("expected completed sample")
+    pinnedRun.samples[0]!.judgements[0]!.provenance.mode = judgeMode
+    pinnedRun.samples[0]!.judgements[0]!.provenance.model = pinnedModel
+    assert.doesNotThrow(() => evalRunSchema.parse(pinnedRun))
+    const wrongReviewerModel = structuredClone(pinnedRun)
+    wrongReviewerModel.reviewer.model = "openai/another-model"
+    assert.throws(
+      () => evalRunSchema.parse(wrongReviewerModel),
+      /requires the pinned review mode and model/,
+    )
+    const wrongJudgeMode = structuredClone(pinnedRun)
+    if (wrongJudgeMode.samples[0]!.status !== "completed") assert.fail("expected completed sample")
+    wrongJudgeMode.samples[0]!.judgements[0]!.provenance.mode = "high"
+    assert.throws(
+      () => evalRunSchema.parse(wrongJudgeMode),
+      /requires the pinned finding-check mode and model/,
     )
     run.samples[0]!.promptHash = "0".repeat(64)
     assert.throws(() => evalRunSchema.parse(run), /prompt hash does not match/)
@@ -1270,6 +1344,7 @@ describe("eval judging", () => {
     const options: Array<Record<string, unknown>> = []
     const executeJudge = async function* (input: { options: Record<string, unknown> }) {
       options.push(input.options)
+      yield judgeSystemMessage()
       yield judgeResult()
     }
 
@@ -1285,8 +1360,17 @@ describe("eval judging", () => {
       )
       assert.equal(options.length, 2)
       assert.ok(options.every((item) => !("project" in item)))
-      assert.ok(options.every((item) => item.cwd === tmpdir()))
+      assert.ok(
+        options.every(
+          (item) =>
+            typeof item.cwd === "string" &&
+            item.cwd.startsWith(join(tmpdir(), "amp-reviewbot-judge-")),
+        ),
+      )
+      assert.ok(options.every((item) => item.mode === judgeMode))
       assert.equal(result.provenance.project, null)
+      assert.equal(result.provenance.mode, judgeMode)
+      assert.equal(result.provenance.model, "openai/gpt-5.6-sol")
       assert.equal(result.provenance.cliVersion, "test-cli")
       assert.match(result.provenance.prompt!, /Known issue:/)
       assert.match(result.provenance.responseSchema!, /matchingFindingIndices/)
@@ -1364,6 +1448,7 @@ describe("eval judging", () => {
       calls += 1
       started.resolve()
       await release.promise
+      yield judgeSystemMessage()
       yield judgeResult()
     }
 
@@ -1411,6 +1496,7 @@ describe("eval judging", () => {
       if (calls === 1) firstStarted.resolve()
       if (calls === 2) replacementStarted.resolve()
       await waitForTestRelease(release.promise, input.signal)
+      yield judgeSystemMessage()
       yield judgeResult()
     }
     const firstController = new AbortController()
@@ -1458,6 +1544,7 @@ describe("eval judging", () => {
     const executeJudge = async function* () {
       started.resolve()
       await release.promise
+      yield judgeSystemMessage()
       yield judgeResult()
     }
 
@@ -1736,6 +1823,18 @@ function judgeResult() {
     type: "result",
     is_error: false,
     result: '{"matchingFindingIndices":[0]}',
+  }
+}
+
+function judgeSystemMessage() {
+  return {
+    type: "system",
+    subtype: "init",
+    session_id: "judge-thread",
+    cwd: "/workspace",
+    agent_mode: judgeMode,
+    tools: [],
+    mcp_servers: [],
   }
 }
 

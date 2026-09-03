@@ -7,7 +7,7 @@ import { promisify } from "node:util"
 import { z } from "zod"
 import { buildReviewPrompt, finalizeReview, parseReviewResult, reviewThreadTitle } from "../src/review.js"
 import type { ReviewFinding, ReviewJob } from "../src/types.js"
-import { reviewMode } from "../src/worker.js"
+import { pinnedModel, reviewMode } from "../src/amp.js"
 import { checkReviewTrace, modelsFromTrace } from "./evidence.js"
 import { judgeIssue, type AmpVersions } from "./judge.js"
 import { checkPack, describePack, loadPack } from "./pack.js"
@@ -474,8 +474,10 @@ async function reviewerProvenance(
     cliPackage,
     reviewSource,
     workerSource,
+    ampSource,
     reviewerSource,
     reviewerChildSource,
+    pinnedModelPlugin,
     methodology,
   ] = await Promise.all([
     execFileAsync("git", ["rev-parse", "HEAD"]),
@@ -484,8 +486,10 @@ async function reviewerProvenance(
     readFile(resolve("node_modules", "@ampcode", "cli", "package.json"), "utf8"),
     readFile(resolve("src", "review.ts"), "utf8"),
     readFile(resolve("src", "worker.ts"), "utf8"),
+    readFile(resolve("src", "amp.ts"), "utf8"),
     readFile(resolve("eval", "reviewer.ts"), "utf8"),
     readFile(resolve("eval", "reviewer-child.ts"), "utf8"),
+    readFile(resolve(".amp", "plugins", "pinned-models.js"), "utf8"),
     readFile(resolve(".agents", "skills", "general-code-reviewing", "SKILL.md"), "utf8"),
   ])
   const sdk: unknown = JSON.parse(sdkPackage)
@@ -498,13 +502,14 @@ async function reviewerProvenance(
     sdkVersion,
     cliVersion,
     mode: reviewMode,
+    model: pinnedModel,
     failOn,
     reviewSourceHash: hash(
-      `${reviewSource}\n${workerSource}\n${reviewerSource}\n${reviewerChildSource}`,
+      `${reviewSource}\n${workerSource}\n${ampSource}\n${reviewerSource}\n${reviewerChildSource}\n${pinnedModelPlugin}`,
     ),
     methodologyHash: hash(methodology),
     project: null,
-    protocol: "research-enabled-target-frozen-v2",
+    protocol: "research-enabled-target-frozen-v3",
     account,
   }
 }

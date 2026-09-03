@@ -23,6 +23,8 @@ The service keeps the GitHub App private key. Review orbs receive repository acc
 
 Reviewbot keeps one self-contained [`general-code-reviewing`](.agents/skills/general-code-reviewing/SKILL.md) skill under `.agents/skills`. Its ship-risk and simplicity passes are embedded directly into every review prompt without skill metadata, so target-repository orbs do not depend on globally installed skills.
 
+The `reviewbot-v1` Amp mode extends the built-in `medium` agent, preserving its prompt and tools while pinning the main reviewer and Oracle to `openai/gpt-5.6-sol`. Amp continues to route specialist tools such as Search and Librarian because replacing their different models with one model would change how the production agent works.
+
 ## Requirements
 
 - Node.js 22+
@@ -50,7 +52,9 @@ Create a GitHub App with:
 
 Checks write permission automatically enables the `check_run` events used by GitHub's **Re-run** control.
 
-Install the App on repositories that have corresponding Amp projects. The Amp account behind `AMP_API_KEY` must be allowed to start orb threads for those projects.
+Install the App on repositories that have corresponding Amp projects. The Amp account behind `AMP_API_KEY` must be allowed to start orb threads for those projects and must have the exact [pinned agent plugin](.amp/plugins/pinned-models.js) installed as a personal or workspace plugin.
+
+The plugin must be installed through Amp, not only included in the service image. The local CLI sends its mode name when it starts an orb, and the orb loads the matching definition from that account's plugins. A missing plugin makes the review fail rather than silently use a different model. The model and version are part of the mode name so a future mode can be installed before the service switches to it.
 
 ## Configure
 

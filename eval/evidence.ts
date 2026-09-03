@@ -1,4 +1,5 @@
 import { posix } from "node:path"
+import { agentModeFromMessage } from "../src/amp.js"
 
 type ReviewTarget = {
   repository: string
@@ -235,12 +236,11 @@ function systemInit(
   ) {
     return undefined
   }
+  const agentMode = agentModeFromMessage(message)
   return {
     sessionId: message.session_id,
     cwd: message.cwd,
-    ...("agent_mode" in message && typeof message.agent_mode === "string"
-      ? { agentMode: message.agent_mode }
-      : {}),
+    ...(agentMode === undefined ? {} : { agentMode }),
   }
 }
 

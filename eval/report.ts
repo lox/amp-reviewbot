@@ -11,7 +11,7 @@ export function formatReport(run: EvalRun, score: EvalScore): string {
         "Review evaluation: PUBLIC RESEARCH ALLOWED",
         `Recorded result: ${reportVerdict(score, traceProblems)}`,
         "The reviewer could research anything public except this pull request and another copy or later version of the target repository.",
-        `Reviewer: Amp mode ${run.reviewer.mode}. SDK: ${run.reviewer.sdkVersion}. CLI: ${run.reviewer.cliVersion ?? "not recorded"}.`,
+        `Reviewer: Amp mode ${run.reviewer.mode}. Model: ${run.reviewer.model ?? "not pinned"}. SDK: ${run.reviewer.sdkVersion}. CLI: ${run.reviewer.cliVersion ?? "not recorded"}.`,
         modelSentence(run),
         "",
       ]

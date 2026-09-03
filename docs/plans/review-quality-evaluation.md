@@ -56,7 +56,7 @@ Production and evaluation use the same:
 
 - the exact `base...head` target;
 - title, description, and branch names captured before the run;
-- a fresh Amp orb in `medium` mode;
+- a fresh Amp orb using the production `reviewbot-v1` mode, which retains `medium` behavior while fixing its main model;
 - the production prompt and embedded two-pass review method;
 - retry and JSON parsing behavior; and
 - changed-line filtering and conclusion calculation.
@@ -98,9 +98,11 @@ Never replace a failed run or add runs only where the preferred version is behin
 
 For a synthetic before-and-after pair, one repeat passes only when the reviewer gets both versions right. A baseline with a source-confirmed existing issue is checked against that issue rather than being called clean.
 
-Deciding whether a finding describes a recorded issue also uses a model and can vary. These checks start only after every review has finished and the completed reviews have been saved privately. They have a separate timeout, so a slow or interrupted check cannot erase review results. Two independent calls in Amp's `high` mode compare each recorded issue with the review findings. A third call breaks a disagreement. Identical checks are reused. The saved result includes every decision and the prompt, response format, SDK, CLI, mode, any model ID Amp reports, and timing behind it.
+Deciding whether a finding describes a recorded issue also uses a model and can vary. These checks start only after every review has finished and the completed reviews have been saved privately. They have a separate timeout, so a slow or interrupted check cannot erase review results. Two independent calls in the `reviewbot-judge-v1` mode, which retains built-in `high` behavior, compare each recorded issue with the review findings. A third call breaks a disagreement. Identical checks are reused. The saved result includes every decision and the prompt, response format, SDK, CLI, configured mode and model, any model ID Amp reports, and timing behind it.
 
-Amp's normal agent API selects a mode, not an exact model. A plugin-defined agent could pin a model, but it would no longer be the built-in `medium` agent used by the production reviewer. We keep production parity: the run records exact SDK and CLI versions, checks the mode reported by each review, and records exact model IDs when Amp supplies them. An empty model list means Amp did not report the ID. Comparisons should be run close together and should not claim exact-model reproducibility unless the recorded model IDs match.
+The tracked plugin modes extend Amp's built-in modes, preserving their prompts and tools while pinning each main agent and Oracle to `openai/gpt-5.6-sol` at the existing reasoning level. The exact plugin file must be installed as a personal or workspace plugin for the production account, the separate review account, and the trusted account that compares findings. Orbs load plugin modes from the account running them, not from this runner's filesystem. A missing mode stops the run instead of silently selecting another model.
+
+Production and evaluation therefore use the same fixed reviewer. Amp still routes specialist tools such as Search and Librarian: its plugin API offers one override for all specialists, and replacing their different models with one would change production behavior. Results identify this remaining source of variation rather than claiming that every supporting model is fixed.
 
 ## What the report means
 
@@ -112,7 +114,7 @@ The main report answers:
 - was the final response appropriately urgent; and
 - were repeated runs stable?
 
-Saved JSON keeps the exact commits, context, changed lines, prompts, full tool traces, Amp mode, exact SDK and CLI versions, any model IDs Amp reports, raw output, filtered findings, conclusions, matching decisions, code hashes, separate timing, execution order, review-rule identifier, trace checks, and errors. Re-reading it makes no model or network calls. New reports say `PUBLIC RESEARCH ALLOWED`; a rule breach produces `INVALID FOR COMPARISON`. Older files are labeled `HISTORICAL RESULT`. The file is private and potentially sensitive.
+Saved JSON keeps the exact commits, context, changed lines, prompts, full tool traces, configured Amp mode and main model, exact SDK and CLI versions, any model IDs Amp reports, raw output, filtered findings, conclusions, matching decisions, code hashes, separate timing, execution order, review-rule identifier, trace checks, and errors. Re-reading it makes no model or network calls. New reports say `PUBLIC RESEARCH ALLOWED`; a rule breach produces `INVALID FOR COMPARISON`. Older files are labeled `HISTORICAL RESULT`. The file is private and potentially sensitive.
 
 If matching fails after reviews finish, `npm run eval -- finish RUN.json` retries only the missing matches through the local CLI login. It writes a new file, preserves the original review evidence and timing, and records the exact hash of the source file. It does not rerun reviews or use the separate review-account key.
 
@@ -143,5 +145,5 @@ Because LLMs create and check most recorded issues, report agreement with the ex
 - Saved runs reject altered example evidence, invalid finding indexes, conclusions that do not follow from raw production output, changed prompts or schemas, missing full prompts or traces, inconsistent timing, and changed execution order. They preserve the original trace check while reports also apply the current check, so improved detection does not make an unchanged file unreadable.
 - Interrupted matching can finish into a new traceable result without changing or rerunning saved reviews.
 - One finding cannot earn recall for two known issues.
-- A run requires a separate review-account key and records the exact review rules, Amp mode, SDK version, and CLI version it used.
+- A run requires a separate review-account key and records the exact review rules, configured main model, Amp mode, SDK version, and CLI version it used.
 - Public dependency and documentation research is allowed. If the trace shows access to the target pull request or another copy of the target repository, the run is invalid for comparison.
