@@ -1,7 +1,11 @@
 import { posix } from "node:path"
 import { agentModeFromMessage } from "../src/amp.js"
+import {
+  preparedSourceVerificationCommand,
+  sourcePreparationCommand,
+} from "../src/review.js"
 
-type ReviewTarget = {
+export type ReviewTarget = {
   repository: string
   pullNumber: number
   baseSha: string
@@ -29,10 +33,15 @@ export function checkReviewTrace(
   sourcePreparation: string | undefined,
   target?: ReviewTarget,
   expectedMode?: string,
+  sourceSetup?: "separate-turn" | "plugin",
 ): string[] {
   const problems = new Set<string>()
   const requiredPreparation =
     sourcePreparation === undefined ? undefined : sourcePreparationCommand(sourcePreparation)
+  const requiredFirstCommand =
+    sourceSetup === "plugin" && target
+      ? preparedSourceVerificationCommand(target)
+      : requiredPreparation
   const initial = systemInit(trace[0])
   let firstTool:
     | {
@@ -44,8 +53,21 @@ export function checkReviewTrace(
     | undefined
   let firstToolFinished = false
   let firstToolSucceeded = false
+  let firstToolExitCode: number | undefined
   let startedAnotherToolBeforeFirstFinished = false
+  let setupTurnFinished = false
+  let setupTurnToolCount = 0
   for (const message of trace) {
+    if (
+      message &&
+      typeof message === "object" &&
+      "type" in message &&
+      message.type === "result" &&
+      "is_error" in message &&
+      message.is_error === false
+    ) {
+      setupTurnFinished = true
+    }
     if (!message || typeof message !== "object" || !("message" in message)) continue
     const body = message.message
     if (!body || typeof body !== "object" || !("content" in body) || !Array.isArray(body.content)) {
@@ -60,9 +82,12 @@ export function checkReviewTrace(
         "tool_use_id" in content &&
         typeof content.tool_use_id === "string"
       ) {
-        if (content.tool_use_id === firstTool?.id) {
+        if (firstTool && content.tool_use_id === firstTool.id) {
           firstToolFinished = true
-          firstToolSucceeded = "is_error" in content && content.is_error === false
+          firstToolExitCode = shellExitCode(content.content)
+          firstToolSucceeded =
+            content.is_error === false &&
+            (firstToolExitCode === undefined || firstToolExitCode === 0)
         }
         continue
       }
@@ -77,6 +102,7 @@ export function checkReviewTrace(
         continue
       }
       const tool = content.name.toLowerCase()
+      if (!setupTurnFinished) setupTurnToolCount += 1
       if (!("input" in content) || !content.input || typeof content.input !== "object") continue
       const input = content.input as Record<string, unknown>
       const serializedInput = JSON.stringify(input)
@@ -104,7 +130,14 @@ export function checkReviewTrace(
           problems.add("review continued in a different workspace")
         }
       }
-      if (!target || (requiredPreparation !== undefined && command === requiredPreparation)) continue
+      if (
+        !target ||
+        (sourceSetup !== "plugin" &&
+          requiredPreparation !== undefined &&
+          command === requiredPreparation)
+      ) {
+        continue
+      }
       const canAccessExternalEvidence =
         isResearchTool(tool) || (command !== undefined && runsNetworkCommand(command))
       if (canAccessExternalEvidence && refersToTargetPullRequest(serializedInput, target)) {
@@ -135,15 +168,18 @@ export function checkReviewTrace(
       problems.add("review continued in a different workspace")
     }
     if (
-      requiredPreparation === undefined ||
+      requiredFirstCommand === undefined ||
       !initial ||
       !firstTool ||
       !isShellTool(firstTool.tool) ||
-      firstTool.command !== requiredPreparation ||
+      firstTool.command !== requiredFirstCommand ||
       !isAbsoluteWorkdir(firstTool.workdir) ||
       !firstToolFinished ||
       !firstToolSucceeded ||
-      startedAnotherToolBeforeFirstFinished
+      startedAnotherToolBeforeFirstFinished ||
+      (sourceSetup !== undefined && firstToolExitCode !== 0) ||
+      (sourceSetup === "separate-turn" &&
+        (!setupTurnFinished || setupTurnToolCount !== 1))
     ) {
       problems.add("did not complete the required source setup")
     }
@@ -210,13 +246,10 @@ function updatesPreparedRepository(command: string): boolean {
 }
 
 export function sourcePreparationFromPrompt(prompt: string): string | undefined {
-  return /<source-preparation>\n([\s\S]*?)\n<\/source-preparation>/.exec(prompt)?.[1]
-}
-
-function sourcePreparationCommand(sourcePreparation: string): string | undefined {
-  return /Run these commands from the repository:\n\n([\s\S]*?)\n\nUse only/.exec(
-    sourcePreparation,
-  )?.[1]
+  return (
+    /<source-preparation>\n([\s\S]*?)\n<\/source-preparation>/.exec(prompt)?.[1] ??
+    /<reviewbot-source-setup-v1>\n[\s\S]*?\n<\/reviewbot-source-setup-v1>/.exec(prompt)?.[0]
+  )
 }
 
 function systemInit(
@@ -264,4 +297,15 @@ function usesDifferentWorkdir(workdir: unknown, preparedWorkdir: unknown): boole
 
 function isShellTool(tool: string): boolean {
   return /bash|shell|terminal/.test(tool)
+}
+
+function shellExitCode(value: unknown): number | undefined {
+  if (typeof value !== "string") return undefined
+  try {
+    const parsed: unknown = JSON.parse(value)
+    if (!parsed || typeof parsed !== "object" || !("exitCode" in parsed)) return undefined
+    return typeof parsed.exitCode === "number" ? parsed.exitCode : undefined
+  } catch {
+    return undefined
+  }
 }

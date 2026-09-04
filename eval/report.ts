@@ -261,7 +261,7 @@ function traceProblemCount(run: EvalRun): number {
         ? []
         : checkReviewTrace(
             sample.trace,
-            sourcePreparationFromPrompt(sample.prompt),
+            sourcePreparationFromPrompt(sample.sourceSetupPrompt ?? sample.prompt),
             {
               repository: evalCase.repositoryFullName,
               pullNumber: evalCase.pullNumber,
@@ -271,6 +271,11 @@ function traceProblemCount(run: EvalRun): number {
             run.reviewer.protocol?.startsWith("research-enabled-target-frozen")
               ? run.reviewer.mode
               : undefined,
+            run.reviewer.protocol === "research-enabled-target-frozen-v4"
+              ? "separate-turn"
+              : run.reviewer.protocol === "research-enabled-target-frozen-v5"
+                ? "plugin"
+                : undefined,
           )
     return saved.length > 0 || current.length > 0
   }).length

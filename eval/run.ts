@@ -5,7 +5,13 @@ import { dirname, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
 import { z } from "zod"
-import { buildReviewPrompt, finalizeReview, parseReviewResult, reviewThreadTitle } from "../src/review.js"
+import {
+  buildReviewPrompt,
+  buildSourceSetupPrompt,
+  finalizeReview,
+  parseReviewResult,
+  reviewThreadTitle,
+} from "../src/review.js"
 import type { ReviewFinding, ReviewJob } from "../src/types.js"
 import { pinnedModel, reviewMode } from "../src/amp.js"
 import { checkReviewTrace, modelsFromTrace } from "./evidence.js"
@@ -340,14 +346,18 @@ async function runReviewSample(
   let models: string[] = []
   let trace: unknown[] = []
   const job = evalJob(evalCase, sample)
-  const prompt = buildReviewPrompt(job, sourcePreparation)
-  const promptHash = hash(prompt)
   const target = {
     repository: evalCase.repositoryFullName,
     pullNumber: evalCase.pullNumber,
     baseSha: evalCase.baseSha,
     headSha: evalCase.headSha,
   }
+  const reviewPrompt = buildReviewPrompt(job, { preparedSource: sourcePreparation !== undefined })
+  const sourceSetupPrompt =
+    sourcePreparation === undefined ? undefined : buildSourceSetupPrompt(sourcePreparation)
+  const prompt =
+    sourceSetupPrompt === undefined ? reviewPrompt : `${sourceSetupPrompt}\n\n${reviewPrompt}`
+  const promptHash = hash(prompt)
 
   try {
     const review = await runEvaluationReview({
@@ -366,6 +376,7 @@ async function runReviewSample(
       sourcePreparation,
       target,
       reviewMode,
+      "plugin",
     )
     if (review.status === "error") {
       return {
@@ -429,6 +440,7 @@ async function runReviewSample(
         sourcePreparation,
         target,
         reviewMode,
+        "plugin",
       ),
       status: "error",
       error: errorMessage(error),
@@ -489,7 +501,7 @@ async function reviewerProvenance(
     readFile(resolve("src", "amp.ts"), "utf8"),
     readFile(resolve("eval", "reviewer.ts"), "utf8"),
     readFile(resolve("eval", "reviewer-child.ts"), "utf8"),
-    readFile(resolve(".amp", "plugins", "pinned-models.js"), "utf8"),
+    readFile(resolve("plugins", "pinned-models.js"), "utf8"),
     readFile(resolve(".agents", "skills", "general-code-reviewing", "SKILL.md"), "utf8"),
   ])
   const sdk: unknown = JSON.parse(sdkPackage)
@@ -509,7 +521,7 @@ async function reviewerProvenance(
     ),
     methodologyHash: hash(methodology),
     project: null,
-    protocol: "research-enabled-target-frozen-v3",
+    protocol: "research-enabled-target-frozen-v5",
     account,
   }
 }
