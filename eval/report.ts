@@ -136,7 +136,7 @@ function caseResult(
   if (kind === "control") {
     if (completed === 0) return `${role}, no recorded issues: no reviews completed`
     const cleanAlerts = rateCount(score.cleanAlertRate, completed)
-    return `${role}, no recorded issues: ${completed - cleanAlerts} of ${completed} completed reviews raised no alert`
+    return `${role}, no recorded issues: ${completed - cleanAlerts} of ${completed} completed reviews raised no alert${droppedFindingsText(droppedFindings(samples))}`
   }
   const opportunities = score.samples * score.knownIssues
   const found = rateCount(score.issueDetectionRate, opportunities)
@@ -157,7 +157,19 @@ function caseResult(
     score.knownIssues === 1
       ? `found in ${found} of ${score.samples}`
       : `${found} of ${opportunities} known issues found`
-  return `${role}, ${label}: ${foundText}; response matched the recorded issues in ${rightResponse} of ${score.samples}${otherFindingsText}`
+  return `${role}, ${label}: ${foundText}; response matched the recorded issues in ${rightResponse} of ${score.samples}${otherFindingsText}${droppedFindingsText(droppedFindings(samples))}`
+}
+
+function droppedFindings(samples: EvalSample[]): number {
+  return samples.reduce(
+    (total, sample) => total + (sample.status === "completed" ? sample.omitted : 0),
+    0,
+  )
+}
+
+function droppedFindingsText(dropped: number): string {
+  if (dropped === 0) return ""
+  return `; ${dropped} raw ${dropped === 1 ? "finding" : "findings"} dropped for not pointing at a changed line`
 }
 
 function reportVerdict(score: EvalScore, traceProblems: number): string {
@@ -205,7 +217,7 @@ function bottomLine(
     const completed = rateCount(caseScore.operationalCompletion, caseScore.samples)
     return total + rateCount(caseScore.cleanAlertRate, completed)
   }, 0)
-  const bugReviews = bugScores.reduce(
+  const issueChances = bugScores.reduce(
     (total, caseScore) => total + caseScore.samples * caseScore.knownIssues,
     0,
   )
@@ -225,11 +237,12 @@ function bottomLine(
     0,
   )
   const unmatchedFindings = Math.max(0, retainedFindings - bugsFound)
+  const dropped = droppedFindings(run.samples)
 
   const observations: string[] = []
   if (cleanAlerts > 0) {
     observations.push(
-      `The reviewer raised ${cleanAlerts} ${cleanAlerts === 1 ? "alert" : "alerts"} on versions with no recorded issues; check the source before deciding whether those alerts were wrong.`,
+      `the reviewer raised ${cleanAlerts} ${cleanAlerts === 1 ? "alert" : "alerts"} on versions with no recorded issues; check the source before deciding whether those alerts were wrong.`,
     )
   }
   if (unmatchedFindings > 0) {
@@ -237,13 +250,18 @@ function bottomLine(
       `${unmatchedFindings} unmatched ${unmatchedFindings === 1 ? "finding needs" : "findings need"} source checking.`,
     )
   }
-  if (bugsFound < bugReviews) {
+  if (bugsFound < issueChances) {
     observations.push(
-      `The reviewer missed a recorded issue in ${bugReviews - bugsFound} of ${bugReviews} reviews of versions with issues.`,
+      `the reviewer missed ${issueChances - bugsFound} of ${issueChances} chances to find a recorded issue across ${bugVersionReviews} ${bugVersionReviews === 1 ? "review" : "reviews"} of versions with issues.`,
     )
+    if (dropped > 0) {
+      observations.push(
+        `${dropped} raw ${dropped === 1 ? "finding was" : "findings were"} dropped for not pointing at a changed line; check whether ${dropped === 1 ? "it describes" : "they describe"} the missed issues before treating this as a reviewer miss.`,
+      )
+    }
   } else if (rightResponses < bugVersionReviews) {
     observations.push(
-      "The reviewer found every known issue, but did not always respond with the right urgency.",
+      "the reviewer found every known issue, but did not always respond with the right urgency.",
     )
   }
   return observations.length > 0

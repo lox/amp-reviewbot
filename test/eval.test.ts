@@ -1380,6 +1380,39 @@ describe("eval scoring", () => {
     assert.match(formatReport(run, score), /1 unmatched finding needs source checking/)
   })
 
+  it("reports dropped raw findings and counts missed chances, not reviews", () => {
+    const unchangedLineFinding = { ...highFinding, startLine: 386 }
+    const twoIssues: ExpectedResult = {
+      issues: [
+        blocking.issues[0]!,
+        { ...blocking.issues[0]!, id: "second-failure" },
+      ],
+    }
+    const cases = [evalCase("blocking", twoIssues)]
+    const rawResult = { summary: "Review complete", findings: [highFinding, unchangedLineFinding] }
+    const sample = {
+      ...completed("blocking", 1, twoIssues, "failure", [highFinding], [
+        judgement([0], false),
+        judgement([], false, "second-failure"),
+      ]),
+      rawResult: JSON.stringify(rawResult),
+      parsedResult: rawResult,
+      omitted: 1,
+    }
+    const run = makeRun(cases, 1, [sample])
+
+    const report = formatReport(run, scoreRun(run))
+    assert.match(
+      report,
+      /1 of 2 known issues found; response matched the recorded issues in 0 of 1; 1 raw finding dropped for not pointing at a changed line/,
+    )
+    assert.match(
+      report,
+      /the reviewer missed 1 of 2 chances to find a recorded issue across 1 review of versions with issues\. 1 raw finding was dropped for not pointing at a changed line; check whether it describes the missed issues/,
+    )
+    assert.doesNotMatch(report, /of 2 reviews/)
+  })
+
   it("does not report failed clean reviews as clean", () => {
     const cases = [evalCase("control", control)]
     assert.equal(scoreRun(makeRun(cases, 1, [failed("control", 1, control)])).cleanAlertRate, null)

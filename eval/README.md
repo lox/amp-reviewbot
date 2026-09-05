@@ -119,6 +119,8 @@ The saved file keeps enough detail to reproduce and inspect the counts: exact co
 
 Each source pull request is one example. For a synthetic before-and-after pair, one repeat passes only when the reviewer gets both versions right. Three repeats support a development check, not a broad accuracy claim: 3 of 3 is a provisional pass, 2 of 3 is unstable, and 0 or 1 needs work. If five repeats were chosen before the run, require at least 4 of 5. Never add only favorable reruns.
 
+Production discards a finding whose `startLine` is not a line the pull request added, and the evaluation applies the same filter before checking findings against the recorded issues. A version line therefore also counts raw findings dropped for not pointing at a changed line. Those findings were never compared with the recorded issues, so read them in the saved file before calling a missed issue a reviewer miss.
+
 An alert on a version with no recorded issues is not automatically a false positive: the recorded list may be incomplete. A finding that does not match a recorded issue is also not automatically wrong. Check the source before classifying either. Keep those later source checks separate from the original counts. Do not call the percentage of findings that matched recorded issues “precision,” because the remaining findings have not yet been proven wrong.
 
 An open example pack helps catch the reviewer getting worse on known cases. It is not a hidden test, a representative estimate of all pull requests, or proof of general review quality.
