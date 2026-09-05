@@ -285,7 +285,11 @@ function updatesPreparedRepository(
     const git = /^\s*(?:(?:command|env|exec|sudo)\s+)*(?:\S*\/)?git\b(.*)$/i.exec(segment)
     if (!git || !/\b(?:fetch|pull)\b/.test(git[1] ?? "")) continue
     // `git fetch -h` and `git help fetch` read documentation, not the remote.
-    if (/(?:^|\s)(?:-h|--help)(?:\s|$)|^\s+(?:-\S+\s+)*help\b/.test(git[1] ?? "")) continue
+    if (
+      /(?:^|\s)(?:-h|--help)(?:\s|$)|^\s+(?:-[cC]\s+\S+\s+|-\S+\s+)*help\b/.test(git[1] ?? "")
+    ) {
+      continue
+    }
     const repository = /\s(?:-C|--git-dir|--work-tree)(?:=|\s+)(\S+)/.exec(git[1] ?? "")
     if (!repository) {
       if (usesPreparedWorkdir(workdir, preparedWorkdir)) return true

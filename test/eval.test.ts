@@ -1302,6 +1302,7 @@ Use only this checked-out source.`
       "git --git-dir=/tmp/scratch/.git fetch origin main",
       "git --version && git fetch -h | sed -n '/--filter/,+3p' && git clone -h | head",
       "git help --no-man-viewer fetch 2>&1 | sed -n '/--filter/,/--refetch/p'",
+      "git -c core.pager=cat help fetch",
     ]
     for (const command of scratchCommands) {
       assert.deepEqual(
