@@ -153,8 +153,7 @@ export function checkReviewTrace(
         problems.add("accessed the target repository outside the supplied copy")
       } else if (
         command !== undefined &&
-        updatesPreparedRepository(command) &&
-        usesPreparedWorkdir(input.workdir ?? input.cwd, firstTool?.workdir)
+        updatesPreparedRepository(command, input.workdir ?? input.cwd, firstTool?.workdir)
       ) {
         problems.add("accessed the target repository outside the supplied copy")
       }
@@ -264,13 +263,38 @@ function runsNetworkCommand(command: string): boolean {
   )
 }
 
-function updatesPreparedRepository(command: string): boolean {
-  // Ignore quoted text such as search patterns, and git invocations aimed at
-  // another repository through -C, --git-dir, or --work-tree.
-  const unquoted = command.replace(/"[^"\n]*"|'[^'\n]*'/g, "")
-  return /(?:^|[\n;&|])\s*(?:(?:command|env|exec|sudo)\s+)*(?:\S*\/)?git\b(?![^\n;&|]*\s(?:-C|--git-dir|--work-tree)\b)[^\n;&|]*\b(?:fetch|pull)\b/im.test(
-    unquoted,
-  )
+function updatesPreparedRepository(
+  command: string,
+  workdir: unknown,
+  preparedWorkdir: unknown,
+): boolean {
+  // Quoted text such as search patterns must not look like a git command, but
+  // a quoted -C/--git-dir/--work-tree value still needs to be read back.
+  const quoted: string[] = []
+  const masked = command.replace(/"[^"\n]*"|'[^'\n]*'/g, (match) => {
+    quoted.push(match.slice(1, -1))
+    return `\u0000${quoted.length - 1}\u0000`
+  })
+  for (const segment of masked.split(/[\n;&|]/)) {
+    const git = /^\s*(?:(?:command|env|exec|sudo)\s+)*(?:\S*\/)?git\b(.*)$/i.exec(segment)
+    if (!git || !/\b(?:fetch|pull)\b/.test(git[1] ?? "")) continue
+    const repository = /\s(?:-C|--git-dir|--work-tree)(?:=|\s+)(\S+)/.exec(git[1] ?? "")
+    if (!repository) {
+      if (usesPreparedWorkdir(workdir, preparedWorkdir)) return true
+      continue
+    }
+    // A git invocation aimed at another repository is only exempt when that
+    // repository is demonstrably outside the prepared copy. A shell-expanded
+    // path (mktemp scratch directories) cannot be resolved and is trusted.
+    const path = (repository[1] ?? "").replace(
+      /\u0000(\d+)\u0000/g,
+      (_, index: string) => quoted[Number(index)] ?? "",
+    )
+    if (/[$`~]/.test(path) || typeof preparedWorkdir !== "string") continue
+    const base = typeof workdir === "string" ? posix.resolve(preparedWorkdir, workdir) : preparedWorkdir
+    if (usesPreparedWorkdir(posix.resolve(base, path), preparedWorkdir)) return true
+  }
+  return false
 }
 
 export function sourcePreparationFromPrompt(prompt: string): string | undefined {

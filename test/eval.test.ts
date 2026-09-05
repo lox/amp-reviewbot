@@ -1292,6 +1292,31 @@ Use only this checked-out source.`
         command,
       )
     }
+    const preparedCommands = [
+      'git fetch origin "refs/pull/42/head"',
+      "git -C . fetch origin main",
+      "git -C /workspace fetch origin main",
+      'git -C "/workspace/agent" fetch origin main',
+      "git --git-dir=/workspace/.git fetch origin main",
+      "git --work-tree /workspace pull",
+    ]
+    for (const command of preparedCommands) {
+      assert.deepEqual(
+        checkReviewTrace(
+          [
+            traceSystemMessage(),
+            toolMessage("shell_command", { command: "git status", workdir: "/workspace" }, "first"),
+            toolResultMessage("first"),
+            toolMessage("shell_command", { command, workdir: "/workspace" }, "update"),
+            toolResultMessage("update"),
+          ],
+          undefined,
+          target,
+        ),
+        ["accessed the target repository outside the supplied copy"],
+        command,
+      )
+    }
     assert.deepEqual(
       checkReviewTrace(
         [
@@ -1300,7 +1325,7 @@ Use only this checked-out source.`
           toolResultMessage("first"),
           toolMessage(
             "shell_command",
-            { command: 'git fetch origin "refs/pull/42/head"', workdir: "/workspace" },
+            { command: "git -C ../../workspace fetch origin main", workdir: "/tmp/scratch" },
             "update",
           ),
           toolResultMessage("update"),
@@ -1308,7 +1333,10 @@ Use only this checked-out source.`
         undefined,
         target,
       ),
-      ["accessed the target repository outside the supplied copy"],
+      [
+        "review continued in a different workspace",
+        "accessed the target repository outside the supplied copy",
+      ],
     )
   })
 
