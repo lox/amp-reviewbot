@@ -109,6 +109,8 @@ Exact model IDs: not reported by Amp.
 2 pull-request examples: 1 pass, 1 unstable, 0 fail.
 1 version with no recorded issues, 1 version with recorded non-blocking issues, and 1 version with recorded blocking issues.
 Each was reviewed 3 times. All 9 reviews completed.
+Review time: 9 reviews took 24.3 min in total; median 2.5 min, longest 6.1 min.
+Reviewer tokens from 9 traces: 4.4M input tokens (including cache reads and writes), 31k output tokens; median 480k input tokens per review. Amp reports no cost, and tokens spent by delegated subagents are not in the trace.
 
 Example 1 (pull request #1234): PASS (3/3 repeats passed)
   Baseline, no recorded issues: 3 of 3 completed reviews raised no alert

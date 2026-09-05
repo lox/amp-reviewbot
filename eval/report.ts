@@ -37,6 +37,7 @@ export function formatReport(savedRun: EvalRun): string {
       `${traceProblems} review ${traceProblems === 1 ? "did" : "runs did"} not follow the review rules and ${traceProblems === 1 ? "is" : "are"} excluded from these counts.`,
     )
   }
+  lines.push(...resourceLines(savedRun))
 
   const scores = new Map(score.cases.map((caseScore) => [caseScore.caseId, caseScore]))
   const samples = new Map<string, EvalSample[]>()
@@ -94,6 +95,98 @@ function modelSentence(run: EvalRun): string {
   return models.size === 0
     ? "Exact model IDs: not reported by Amp."
     : `Reported model IDs: ${[...models].sort().join(", ")}.`
+}
+
+export interface ReviewResources {
+  reviews: number
+  totalReviewMs: number
+  medianReviewMs: number
+  longestReviewMs: number
+  tracedReviews: number
+  inputTokens: number
+  outputTokens: number
+  medianInputTokens: number
+}
+
+/**
+ * Time and tokens spent by the reviewer, derived from every saved review
+ * (including reviews later excluded from the counts, which still cost money).
+ * Tokens come from the assistant turns in the trace. Amp reports no cost, and
+ * turns run by delegated subagents are not in the trace, so token totals are a
+ * lower bound.
+ */
+export function reviewResources(run: EvalRun): ReviewResources | undefined {
+  const durations = run.samples.flatMap((sample) => sample.reviewDurationMs ?? [])
+  if (durations.length === 0) return undefined
+  // An empty trace means Amp never started, so there is no usage to count.
+  const perReview = run.samples.flatMap((sample) =>
+    sample.trace === undefined || sample.trace.length === 0 ? [] : [sumTraceUsage(sample.trace)],
+  )
+  return {
+    reviews: durations.length,
+    totalReviewMs: durations.reduce((sum, ms) => sum + ms, 0),
+    medianReviewMs: median(durations),
+    longestReviewMs: Math.max(...durations),
+    tracedReviews: perReview.length,
+    inputTokens: perReview.reduce((sum, usage) => sum + usage.input, 0),
+    outputTokens: perReview.reduce((sum, usage) => sum + usage.output, 0),
+    medianInputTokens: median(perReview.map((usage) => usage.input)),
+  }
+}
+
+function resourceLines(run: EvalRun): string[] {
+  const resources = reviewResources(run)
+  if (resources === undefined) return []
+  const lines = [
+    `Review time: ${countLabel(resources.reviews, "review")} took ${hours(resources.totalReviewMs)} in total; median ${minutes(resources.medianReviewMs)}, longest ${minutes(resources.longestReviewMs)}.`,
+  ]
+  if (resources.tracedReviews > 0) {
+    lines.push(
+      `Reviewer tokens from ${countLabel(resources.tracedReviews, "trace")}: ${millions(resources.inputTokens)} input tokens (including cache reads and writes), ${millions(resources.outputTokens)} output tokens; median ${millions(resources.medianInputTokens)} input tokens per review. Amp reports no cost, and tokens spent by delegated subagents are not in the trace.`,
+    )
+  }
+  return lines
+}
+
+function sumTraceUsage(trace: unknown[]): { input: number; output: number } {
+  const usage = { input: 0, output: 0 }
+  for (const message of trace) {
+    if (!message || typeof message !== "object" || !("message" in message)) continue
+    const body = message.message
+    if (!body || typeof body !== "object" || !("usage" in body)) continue
+    const counts = body.usage
+    if (!counts || typeof counts !== "object") continue
+    usage.input +=
+      tokenCount(counts, "input_tokens") +
+      tokenCount(counts, "cache_creation_input_tokens") +
+      tokenCount(counts, "cache_read_input_tokens")
+    usage.output += tokenCount(counts, "output_tokens")
+  }
+  return usage
+}
+
+function tokenCount(usage: object, key: string): number {
+  const value = (usage as Record<string, unknown>)[key]
+  return typeof value === "number" && Number.isFinite(value) ? value : 0
+}
+
+function median(values: number[]): number {
+  if (values.length === 0) return 0
+  const sorted = [...values].sort((a, b) => a - b)
+  const middle = Math.floor(sorted.length / 2)
+  return sorted.length % 2 === 1 ? sorted[middle]! : (sorted[middle - 1]! + sorted[middle]!) / 2
+}
+
+function minutes(ms: number): string {
+  return `${(ms / 60_000).toFixed(1)} min`
+}
+
+function hours(ms: number): string {
+  return ms < 3_600_000 ? minutes(ms) : `${(ms / 3_600_000).toFixed(1)} hours`
+}
+
+function millions(tokens: number): string {
+  return tokens < 1_000_000 ? `${Math.round(tokens / 1_000)}k` : `${(tokens / 1_000_000).toFixed(1)}M`
 }
 
 function countSeedOutcomes(score: EvalScore): Record<"pass" | "unstable" | "fail", number> {

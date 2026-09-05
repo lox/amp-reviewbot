@@ -13,7 +13,7 @@ import { AmpOptionsSchema, type StreamMessage } from "@ampcode/sdk"
 import { checkReviewTrace, modelsFromTrace } from "../eval/evidence.js"
 import { judgeIssue, resolveMatchingVotes } from "../eval/judge.js"
 import { checkPack, exampleSchema, loadPack } from "../eval/pack.js"
-import { formatReport } from "../eval/report.js"
+import { formatReport, reviewResources } from "../eval/report.js"
 import { evaluationAmpArgs, keepThreadTrace } from "../eval/reviewer-child.js"
 import {
   reviewAuthentication,
@@ -1541,6 +1541,48 @@ describe("eval scoring", () => {
     const score = scoreRun(run)
     assert.equal(score.cases[0]!.frozenLabelMatchFraction, 1 / 2)
     assert.match(formatReport(run), /1 unmatched finding needs source checking/)
+  })
+
+  it("reports review time and reviewer tokens from the saved traces", () => {
+    const cases = [evalCase("blocking", blocking)]
+    const usage = (input: number, cached: number, output: number) => ({
+      type: "assistant",
+      message: { usage: { input_tokens: input, cache_read_input_tokens: cached, output_tokens: output } },
+    })
+    const run = makeRun(cases, 3, [
+      {
+        ...completed("blocking", 1, blocking, "failure", [highFinding], [judgement([0], false)]),
+        reviewDurationMs: 60_000,
+        trace: [{ type: "system" }, usage(1_000, 0, 100), usage(500, 2_000, 400)],
+      },
+      {
+        ...completed("blocking", 2, blocking, "failure", [highFinding], [judgement([0], false)]),
+        reviewDurationMs: 180_000,
+        trace: [usage(300_000, 0, 500)],
+      },
+      { ...failed("blocking", 3, blocking), reviewDurationMs: 300_000, trace: [] },
+    ])
+
+    assert.deepEqual(reviewResources(run), {
+      reviews: 3,
+      totalReviewMs: 540_000,
+      medianReviewMs: 180_000,
+      longestReviewMs: 300_000,
+      tracedReviews: 2,
+      inputTokens: 303_500,
+      outputTokens: 1_000,
+      medianInputTokens: 151_750,
+    })
+    const report = formatReport(run)
+    assert.match(report, /Review time: 3 reviews took 9\.0 min in total; median 3\.0 min, longest 5\.0 min\./)
+    assert.match(report, /Reviewer tokens from 2 traces: 304k input tokens .*, 1k output tokens; median 152k input tokens per review\./)
+    assert.match(report, /Amp reports no cost/)
+
+    const withoutTimings = makeRun(cases, 1, [
+      completed("blocking", 1, blocking, "failure", [highFinding], [judgement([0], false)]),
+    ])
+    assert.equal(reviewResources(withoutTimings), undefined)
+    assert.doesNotMatch(formatReport(withoutTimings), /Review time/)
   })
 
   it("reports dropped raw findings and counts missed chances, not reviews", () => {
