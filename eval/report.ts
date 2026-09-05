@@ -102,24 +102,35 @@ export interface ReviewResources {
   totalReviewMs: number
   medianReviewMs: number
   longestReviewMs: number
-  tracedReviews: number
-  inputTokens: number
-  outputTokens: number
-  medianInputTokens: number
+  /** What Amp billed, from `amp threads usage`; absent when no review recorded it. */
+  billed?: {
+    reviews: number
+    costUsd: number
+    medianCostUsd: number
+    inputTokens: number
+    outputTokens: number
+    requests: number
+    subscriptionUsed: boolean
+  }
+  /** Tokens summed from the assistant turns in the saved traces (no subagent turns, no cost). */
+  traced?: {
+    reviews: number
+    inputTokens: number
+    outputTokens: number
+    medianInputTokens: number
+  }
 }
 
 /**
- * Time and tokens spent by the reviewer, derived from every saved review
- * (including reviews later excluded from the counts, which still cost money).
- * Tokens come from the assistant turns in the trace. Amp reports no cost, and
- * turns run by delegated subagents are not in the trace, so token totals are a
- * lower bound.
+ * Time, cost, and tokens spent by the reviewer across every saved review,
+ * including reviews later excluded from the counts, which still cost money.
  */
 export function reviewResources(run: EvalRun): ReviewResources | undefined {
   const durations = run.samples.flatMap((sample) => sample.reviewDurationMs ?? [])
   if (durations.length === 0) return undefined
+  const usages = run.samples.flatMap((sample) => sample.usage ?? [])
   // An empty trace means Amp never started, so there is no usage to count.
-  const perReview = run.samples.flatMap((sample) =>
+  const traced = run.samples.flatMap((sample) =>
     sample.trace === undefined || sample.trace.length === 0 ? [] : [sumTraceUsage(sample.trace)],
   )
   return {
@@ -127,10 +138,29 @@ export function reviewResources(run: EvalRun): ReviewResources | undefined {
     totalReviewMs: durations.reduce((sum, ms) => sum + ms, 0),
     medianReviewMs: median(durations),
     longestReviewMs: Math.max(...durations),
-    tracedReviews: perReview.length,
-    inputTokens: perReview.reduce((sum, usage) => sum + usage.input, 0),
-    outputTokens: perReview.reduce((sum, usage) => sum + usage.output, 0),
-    medianInputTokens: median(perReview.map((usage) => usage.input)),
+    ...(usages.length === 0
+      ? {}
+      : {
+          billed: {
+            reviews: usages.length,
+            costUsd: usages.reduce((sum, usage) => sum + usage.costUsd, 0),
+            medianCostUsd: median(usages.map((usage) => usage.costUsd)),
+            inputTokens: usages.reduce((sum, usage) => sum + usage.inputTokens, 0),
+            outputTokens: usages.reduce((sum, usage) => sum + usage.outputTokens, 0),
+            requests: usages.reduce((sum, usage) => sum + usage.requests, 0),
+            subscriptionUsed: usages.some((usage) => usage.subscriptionUsed),
+          },
+        }),
+    ...(traced.length === 0
+      ? {}
+      : {
+          traced: {
+            reviews: traced.length,
+            inputTokens: traced.reduce((sum, usage) => sum + usage.input, 0),
+            outputTokens: traced.reduce((sum, usage) => sum + usage.output, 0),
+            medianInputTokens: median(traced.map((usage) => usage.input)),
+          },
+        }),
   }
 }
 
@@ -140,9 +170,15 @@ function resourceLines(run: EvalRun): string[] {
   const lines = [
     `Review time: ${countLabel(resources.reviews, "review")} took ${hours(resources.totalReviewMs)} in total; median ${minutes(resources.medianReviewMs)}, longest ${minutes(resources.longestReviewMs)}.`,
   ]
-  if (resources.tracedReviews > 0) {
+  const { billed, traced } = resources
+  if (billed !== undefined) {
+    const coverage = billed.reviews === resources.reviews ? "" : ` (${billed.reviews} of ${resources.reviews} reviews reported usage)`
     lines.push(
-      `Reviewer tokens from ${countLabel(resources.tracedReviews, "trace")}: ${millions(resources.inputTokens)} input tokens (including cache reads and writes), ${millions(resources.outputTokens)} output tokens; median ${millions(resources.medianInputTokens)} input tokens per review. Amp reports no cost, and tokens spent by delegated subagents are not in the trace.`,
+      `Amp usage${coverage}: $${billed.costUsd.toFixed(2)} in credits, ${millions(billed.inputTokens)} input tokens, ${millions(billed.outputTokens)} output tokens, ${countLabel(billed.requests, "model request")}; median $${billed.medianCostUsd.toFixed(2)} per review. Subagent threads are included.${billed.subscriptionUsed ? " A subscription covered some inference, so credits understate the cost." : ""}`,
+    )
+  } else if (traced !== undefined) {
+    lines.push(
+      `Reviewer tokens from ${countLabel(traced.reviews, "trace")}: ${millions(traced.inputTokens)} input tokens (including cache reads and writes), ${millions(traced.outputTokens)} output tokens; median ${millions(traced.medianInputTokens)} input tokens per review. This run recorded no Amp usage, so cost is unknown and tokens spent by delegated subagents are not counted.`,
     )
   }
   return lines

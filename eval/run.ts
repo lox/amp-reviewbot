@@ -31,6 +31,7 @@ import {
   type EvalCase,
   type EvalRun,
   type EvalSample,
+  type ThreadUsage,
 } from "./schema.js"
 import { scoreRun, type EvalScore } from "./score.js"
 
@@ -345,6 +346,7 @@ async function runReviewSample(
   let threadId: string | null = null
   let models: string[] = []
   let trace: unknown[] = []
+  let usage: ThreadUsage | undefined
   const job = evalJob(evalCase, sample)
   const target = {
     repository: evalCase.repositoryFullName,
@@ -369,6 +371,7 @@ async function runReviewSample(
     })
     threadId = review.threadId
     trace = review.trace
+    usage = review.usage ?? undefined
     models = [...new Set([...review.models, ...modelsFromTrace(trace)])]
     const reviewDurationMs = Date.now() - startedAt
     const evidenceBoundaryViolations = checkReviewTrace(
@@ -392,6 +395,7 @@ async function runReviewSample(
         matchingDurationMs: 0,
         trace,
         evidenceBoundaryViolations,
+        usage,
         status: "error",
         error: review.error,
       }
@@ -412,6 +416,7 @@ async function runReviewSample(
       matchingDurationMs: 0,
       trace,
       evidenceBoundaryViolations,
+      usage,
       status: "completed",
       rawResult: review.rawResult,
       parsedResult,
@@ -442,6 +447,7 @@ async function runReviewSample(
         reviewMode,
         "plugin",
       ),
+      usage,
       status: "error",
       error: errorMessage(error),
     }

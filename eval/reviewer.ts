@@ -5,11 +5,13 @@ import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { z } from "zod"
+import { threadUsageSchema } from "./schema.js"
 
 const outputFields = {
   threadId: z.string().nullable(),
   models: z.array(z.string()),
   trace: z.array(z.unknown()),
+  usage: threadUsageSchema.nullable(),
 }
 const outputSchema = z.discriminatedUnion("status", [
   z.object({ ...outputFields, status: z.literal("completed"), rawResult: z.string() }).strict(),
@@ -108,6 +110,7 @@ export async function runEvaluationReview(
                     threadId: parsed.threadId,
                     models: parsed.models,
                     trace: parsed.trace,
+                    usage: parsed.usage,
                   }
                 : parsed,
             )
