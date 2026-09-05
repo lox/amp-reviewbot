@@ -278,6 +278,8 @@ export class ReviewWorkers {
   private async review(initialJob: ReviewJob, logger: Logger): Promise<void> {
     let job = initialJob
     let checkRunId = job.checkRunId
+    // Every thread this review used, including one abandoned by a fresh restart.
+    const threadIds = new Set(job.ampThreadId ? [job.ampThreadId] : [])
     const controller = new AbortController()
     const log = logger.child({ jobId: job.id, repository: job.repositoryFullName, pr: job.pullNumber })
     this.active.add(controller)
@@ -319,6 +321,7 @@ export class ReviewWorkers {
         visibility: this.config.ampThreadVisibility,
         logger: log,
         onThread: async (threadId) => {
+          threadIds.add(threadId)
           job = { ...job, ampThreadId: threadId }
           await this.database.setThread(job.id, threadId)
           try {
@@ -390,15 +393,15 @@ export class ReviewWorkers {
       }
       if (!cancelled) await this.database.finish(job.id, "failed", reason)
     } finally {
-      if (job.ampThreadId) {
+      for (const threadId of threadIds) {
         try {
           await execFileAsync(
             resolve("node_modules", ".bin", "amp"),
-            ["threads", "archive", job.ampThreadId],
+            ["threads", "archive", threadId],
             { timeout: 30_000 },
           )
         } catch (error) {
-          log.warn({ err: error, threadId: job.ampThreadId }, "failed to archive Amp review thread")
+          log.warn({ err: error, threadId }, "failed to archive Amp review thread")
         }
       }
       clearTimeout(timeout)
