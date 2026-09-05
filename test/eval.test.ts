@@ -1164,6 +1164,32 @@ Use only this checked-out source.`
       ),
       ["review continued in a different workspace"],
     )
+    // A throwaway experiment elsewhere that never touches Git is research.
+    assert.deepEqual(
+      checkReviewTrace(
+        [
+          traceSystemMessage(),
+          toolMessage(
+            "shell_command",
+            { command: sourceCommand, workdir: "/home/user/workspace" },
+            "source-preparation",
+          ),
+          toolResultMessage("source-preparation"),
+          toolMessage(
+            "shell_command",
+            {
+              command:
+                "mkdir -p pkg cov && cat >go.mod <<'EOF'\nmodule probe\nEOF\ngo test -cover -test.gocoverdir=/tmp/probe/cov ./pkg",
+              workdir: "/tmp/probe",
+            },
+            "scratch-workdir",
+          ),
+          toolResultMessage("scratch-workdir"),
+        ],
+        sourcePreparation,
+      ),
+      [],
+    )
     assert.deepEqual(
       checkReviewTrace(
         [
@@ -1274,6 +1300,8 @@ Use only this checked-out source.`
       "rg -n 'git-fetch-flags|GIT_FETCH_FLAGS' . | head",
       'tmp=$(mktemp -d)\ngit init -q "$tmp/work"\ngit -C "$tmp/work" fetch --filter=blob:none origin "$sha"',
       "git --git-dir=/tmp/scratch/.git fetch origin main",
+      "git --version && git fetch -h | sed -n '/--filter/,+3p' && git clone -h | head",
+      "git help --no-man-viewer fetch 2>&1 | sed -n '/--filter/,/--refetch/p'",
     ]
     for (const command of scratchCommands) {
       assert.deepEqual(
@@ -1393,7 +1421,7 @@ describe("eval scoring", () => {
     assert.equal(blockingScore.judgeCoverage, 1)
     assert.equal(blockingScore.judgeDisagreementRate, 1 / 3)
 
-    const report = formatReport(run, score)
+    const report = formatReport(run)
     assert.match(report, /Review evaluation: HISTORICAL RESULT/)
     assert.match(report, /Recorded result: INCOMPLETE/)
     assert.match(report, /Use its counts for investigation, not comparison/)
@@ -1403,11 +1431,20 @@ describe("eval scoring", () => {
     assert.match(report, /This result covers only these examples/)
 
     const contaminatedRun = structuredClone(run)
-    contaminatedRun.samples[2]!.evidenceBoundaryViolations = [
+    contaminatedRun.samples[3]!.evidenceBoundaryViolations = [
       "did not complete the required source setup",
     ]
-    const contaminatedReport = formatReport(contaminatedRun, scoreRun(contaminatedRun))
-    assert.match(contaminatedReport, /Recorded result: INVALID FOR COMPARISON/)
+    const contaminatedReport = formatReport(contaminatedRun)
+    assert.match(contaminatedReport, /Recorded result: INCOMPLETE/)
+    assert.match(contaminatedReport, /4 of 6 reviews completed/)
+    assert.match(
+      contaminatedReport,
+      /recorded blocking issues: found in 1 of 3; response matched the recorded issues in 0 of 3/,
+    )
+    assert.match(
+      contaminatedReport,
+      /1 review did not follow the review rules and is excluded from these counts/,
+    )
     assert.match(
       contaminatedReport,
       /trace also shows that 1 review did not follow the current rules/,
@@ -1421,7 +1458,7 @@ describe("eval scoring", () => {
       completed("blocking", 2, blocking, "neutral", [mediumFinding], [judgement([0], false)]),
       completed("blocking", 3, blocking, "neutral", [mediumFinding], [judgement([0], false)]),
     ])
-    const completeReport = formatReport(completeRun, scoreRun(completeRun))
+    const completeReport = formatReport(completeRun)
     assert.match(completeReport, /Recorded result: NEEDS WORK/)
     assert.match(
       completeReport,
@@ -1502,7 +1539,7 @@ describe("eval scoring", () => {
 
     const score = scoreRun(run)
     assert.equal(score.cases[0]!.frozenLabelMatchFraction, 1 / 2)
-    assert.match(formatReport(run, score), /1 unmatched finding needs source checking/)
+    assert.match(formatReport(run), /1 unmatched finding needs source checking/)
   })
 
   it("reports dropped raw findings and counts missed chances, not reviews", () => {
@@ -1526,7 +1563,7 @@ describe("eval scoring", () => {
     }
     const run = makeRun(cases, 1, [sample])
 
-    const report = formatReport(run, scoreRun(run))
+    const report = formatReport(run)
     assert.match(
       report,
       /1 of 2 known issues found; response matched the recorded issues in 0 of 1; 1 raw finding dropped for not pointing at a changed line/,
@@ -1632,7 +1669,7 @@ describe("eval scoring", () => {
         },
       },
     })
-    const researchReport = formatReport(researchRun, scoreRun(researchRun))
+    const researchReport = formatReport(researchRun)
     assert.match(researchReport, /Review evaluation: PUBLIC RESEARCH ALLOWED/)
     assert.match(researchReport, /could research anything public/)
     assert.match(
@@ -1648,7 +1685,7 @@ describe("eval scoring", () => {
     }
     unreportedModelsRun.samples[0]!.judgements[0]!.models = []
     assert.match(
-      formatReport(unreportedModelsRun, scoreRun(unreportedModelsRun)),
+      formatReport(unreportedModelsRun),
       /Exact model IDs: not reported by Amp\./,
     )
     const previousProtocolRun = structuredClone(researchRun)
@@ -1720,7 +1757,7 @@ describe("eval scoring", () => {
     ]
     const reaudited = evalRunSchema.parse(run)
     assert.deepEqual(reaudited.samples[0]!.evidenceBoundaryViolations, [])
-    assert.match(formatReport(reaudited, scoreRun(reaudited)), /trace also shows/)
+    assert.match(formatReport(reaudited), /trace also shows/)
     mutableSample.trace = trace
     if (run.samples[0]!.status !== "completed") assert.fail("expected completed sample")
     run.samples[0]!.judgements[0]!.provenance.promptHash = "0".repeat(64)

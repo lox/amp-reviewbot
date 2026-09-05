@@ -76,14 +76,14 @@ async function main(): Promise<void> {
     let complete = false
     let checkpointed = false
     try {
-      const { run, score } = await runEvaluation(options, async (reviewedRun) => {
+      const { run } = await runEvaluation(options, async (reviewedRun) => {
         await writeRunArtifact(output, reviewedRun)
         checkpointed = true
         console.log(`Review checkpoint: ${options.outputPath}`)
       })
       await replaceRunArtifact(options.outputPath, run)
       complete = true
-      console.log(`\n${formatReport(run, score)}`)
+      console.log(`\n${formatReport(run)}`)
       console.log(`\nFull results: ${options.outputPath}`)
     } finally {
       await output.close()
@@ -115,7 +115,7 @@ async function main(): Promise<void> {
       const finishedRun = recordFinishedRun(run, sourceBytes, new Date().toISOString())
       await output.writeFile(`${JSON.stringify(finishedRun, null, 2)}\n`)
       complete = true
-      console.log(`\n${formatReport(finishedRun, scoreRun(finishedRun))}`)
+      console.log(`\n${formatReport(finishedRun)}`)
       console.log(`\nFinished results: ${options.outputPath}`)
     } finally {
       await output.close()
@@ -127,7 +127,7 @@ async function main(): Promise<void> {
     const runPath = requiredInput(process.argv.slice(3), "--run")
     const input: unknown = JSON.parse(await readFile(runPath, "utf8"))
     const run = evalRunSchema.parse(input)
-    console.log(formatReport(run, scoreRun(run)))
+    console.log(formatReport(run))
     return
   }
   printHelp()

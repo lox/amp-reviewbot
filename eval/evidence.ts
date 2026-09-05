@@ -125,10 +125,16 @@ export function checkReviewTrace(
               ? {}
               : { workdir: input.workdir ?? input.cwd }),
         }
+        // Scratch experiments in another directory (a throwaway Go module, a
+        // downloaded toolchain) are research. Moving Git work or the target
+        // repository out of the prepared workspace is not.
         if (
           content.id !== firstTool.id &&
           isShellTool(tool) &&
-          usesDifferentWorkdir(input.workdir ?? input.cwd, firstTool.workdir)
+          usesDifferentWorkdir(input.workdir ?? input.cwd, firstTool.workdir) &&
+          (command === undefined ||
+            /(?:^|[\s;&|(])(?:\S*\/)?git\b/.test(command) ||
+            (target !== undefined && refersToTargetRepository(serializedInput, target)))
         ) {
           problems.add("review continued in a different workspace")
         }
@@ -278,6 +284,8 @@ function updatesPreparedRepository(
   for (const segment of masked.split(/[\n;&|]/)) {
     const git = /^\s*(?:(?:command|env|exec|sudo)\s+)*(?:\S*\/)?git\b(.*)$/i.exec(segment)
     if (!git || !/\b(?:fetch|pull)\b/.test(git[1] ?? "")) continue
+    // `git fetch -h` and `git help fetch` read documentation, not the remote.
+    if (/(?:^|\s)(?:-h|--help)(?:\s|$)|^\s+(?:-\S+\s+)*help\b/.test(git[1] ?? "")) continue
     const repository = /\s(?:-C|--git-dir|--work-tree)(?:=|\s+)(\S+)/.exec(git[1] ?? "")
     if (!repository) {
       if (usesPreparedWorkdir(workdir, preparedWorkdir)) return true

@@ -114,7 +114,7 @@ The main report answers:
 - was the final response appropriately urgent; and
 - were repeated runs stable?
 
-Saved JSON keeps the exact commits, context, changed lines, prompts, full tool traces, configured Amp mode and main model, exact SDK and CLI versions, any model IDs Amp reports, raw output, filtered findings, conclusions, matching decisions, code hashes, separate timing, execution order, review-rule identifier, trace checks, and errors. Re-reading it makes no model or network calls. New reports say `PUBLIC RESEARCH ALLOWED`; a rule breach produces `INVALID FOR COMPARISON`. Older files are labeled `HISTORICAL RESULT`. The file is private and potentially sensitive.
+Saved JSON keeps the exact commits, context, changed lines, prompts, full tool traces, configured Amp mode and main model, exact SDK and CLI versions, any model IDs Amp reports, raw output, filtered findings, conclusions, matching decisions, code hashes, separate timing, execution order, review-rule identifier, trace checks, and errors. Re-reading it makes no model or network calls. New reports say `PUBLIC RESEARCH ALLOWED`; a review that breaks a rule is excluded from the counts and the result is marked `INCOMPLETE`. Older files are labeled `HISTORICAL RESULT`. The file is private and potentially sensitive.
 
 If matching fails after reviews finish, `npm run eval -- finish RUN.json` retries only the missing matches through the local CLI login. It writes a new file, preserves the original review evidence and timing, and records the exact hash of the source file. It does not rerun reviews or use the separate review-account key.
 

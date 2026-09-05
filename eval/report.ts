@@ -1,23 +1,26 @@
 import type { EvalCase, EvalRun, EvalSample } from "./schema.js"
 import { expectedKind } from "./schema.js"
-import type { EvalScore } from "./score.js"
+import { scoreRun, type EvalScore } from "./score.js"
 import { checkReviewTrace, sourcePreparationFromPrompt } from "./evidence.js"
 
-export function formatReport(run: EvalRun, score: EvalScore): string {
-  const traceProblems = traceProblemCount(run)
+export function formatReport(savedRun: EvalRun): string {
+  // A review that broke the rules is excluded from the counts like a review
+  // that never finished; the other reviews in the run remain comparable.
+  const { run, excluded: traceProblems } = excludeRuleBreakingReviews(savedRun)
+  const score = scoreRun(run)
   const usesCurrentRules = run.reviewer.protocol?.startsWith("research-enabled-target-frozen") ?? false
   const lines = usesCurrentRules
     ? [
         "Review evaluation: PUBLIC RESEARCH ALLOWED",
-        `Recorded result: ${reportVerdict(score, traceProblems)}`,
+        `Recorded result: ${reportVerdict(score)}`,
         "The reviewer could research anything public except this pull request and another copy or later version of the target repository.",
         `Reviewer: Amp mode ${run.reviewer.mode}. Model: ${run.reviewer.model ?? "not pinned"}. SDK: ${run.reviewer.sdkVersion}. CLI: ${run.reviewer.cliVersion ?? "not recorded"}.`,
-        modelSentence(run),
+        modelSentence(savedRun),
         "",
       ]
     : [
         "Review evaluation: HISTORICAL RESULT",
-        `Recorded result: ${reportVerdict(score, traceProblems)}`,
+        `Recorded result: ${reportVerdict(score)}`,
         "This older run allowed access to the target pull request and repository history. Use its counts for investigation, not comparison.",
         "",
       ]
@@ -31,7 +34,7 @@ export function formatReport(run: EvalRun, score: EvalScore): string {
   )
   if (traceProblems > 0) {
     lines.push(
-      `${traceProblems} review ${traceProblems === 1 ? "did" : "runs did"} not follow the review rules. This run is not valid for comparison.`,
+      `${traceProblems} review ${traceProblems === 1 ? "did" : "runs did"} not follow the review rules and ${traceProblems === 1 ? "is" : "are"} excluded from these counts.`,
     )
   }
 
@@ -172,8 +175,7 @@ function droppedFindingsText(dropped: number): string {
   return `; ${dropped} raw ${dropped === 1 ? "finding" : "findings"} dropped for not pointing at a changed line`
 }
 
-function reportVerdict(score: EvalScore, traceProblems: number): string {
-  if (traceProblems > 0) return "INVALID FOR COMPARISON"
+function reportVerdict(score: EvalScore): string {
   if (score.seeds.length === 0) return "INCOMPLETE"
   if (
     score.operationalCompletion < 1 ||
@@ -192,14 +194,15 @@ function bottomLine(
   traceProblems: number,
   usesCurrentRules: boolean,
 ): string {
-  if (traceProblems > 0) {
-    return usesCurrentRules
-      ? `${traceProblems} review ${traceProblems === 1 ? "did" : "runs did"} not follow the source setup or target repository rules, so this run cannot be compared with other runs.`
-      : `This historical run is for investigation only. Its trace also shows that ${traceProblems} review ${traceProblems === 1 ? "did" : "runs did"} not follow the current rules.`
-  }
   const scopePrefix = usesCurrentRules
     ? "Under these review rules,"
     : "For investigation only;"
+  if (!usesCurrentRules && traceProblems > 0) {
+    return `This historical run is for investigation only. Its trace also shows that ${traceProblems} review ${traceProblems === 1 ? "did" : "runs did"} not follow the current rules.`
+  }
+  if (traceProblems > 0) {
+    return `${scopePrefix} ${traceProblems} review ${traceProblems === 1 ? "did" : "runs did"} not follow the source setup or target repository rules and ${traceProblems === 1 ? "was" : "were"} excluded, so the recorded counts are incomplete.`
+  }
   if (score.operationalCompletion < 1) {
     return `${scopePrefix} some reviews did not finish, so the recorded counts are incomplete.`
   }
@@ -269,13 +272,14 @@ function bottomLine(
     : `${scopePrefix} the reviewer handled every recorded example correctly.`
 }
 
-function traceProblemCount(run: EvalRun): number {
+function excludeRuleBreakingReviews(run: EvalRun): { run: EvalRun; excluded: number } {
   const cases = new Map(run.cases.map((evalCase) => [evalCase.id, evalCase]))
-  // The stored trace is the evidence; the saved violation list is only a cache
-  // of an earlier check and is used when the trace was not kept.
-  return run.samples.filter((sample) => {
+  let excluded = 0
+  const samples = run.samples.map((sample): EvalSample => {
     const evalCase = cases.get(sample.caseId)!
-    const current =
+    // The stored trace is the evidence; the saved violation list is only a cache
+    // of an earlier check and is used when the trace was not kept.
+    const problems =
       sample.trace === undefined || sample.prompt === undefined
         ? (sample.evidenceBoundaryViolations ?? [])
         : checkReviewTrace(
@@ -296,8 +300,26 @@ function traceProblemCount(run: EvalRun): number {
                 ? "plugin"
                 : undefined,
           )
-    return current.length > 0
-  }).length
+    if (problems.length === 0) return sample
+    excluded += 1
+    if (sample.status === "error") return sample
+    const {
+      rawResult: _rawResult,
+      parsedResult: _parsedResult,
+      retainedResult: _retainedResult,
+      omitted: _omitted,
+      conclusion: _conclusion,
+      judgements: _judgements,
+      judgementErrors: _judgementErrors,
+      ...common
+    } = sample
+    return {
+      ...common,
+      status: "error",
+      error: `did not follow the review rules: ${problems.join("; ")}`,
+    }
+  })
+  return { run: { ...run, samples }, excluded }
 }
 
 function rateCount(rate: number | null, total: number): number {
