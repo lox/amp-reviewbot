@@ -40,7 +40,7 @@ async function main(): Promise<void> {
     input.timeoutMs,
   )
   const trace: StreamMessage[] = []
-  let threadId: string | null = null
+  const threadIds: string[] = []
 
   try {
     try {
@@ -52,7 +52,10 @@ async function main(): Promise<void> {
         signal: controller.signal,
         logger: pino({ level: "silent" }),
         onThread: async (id) => {
-          threadId = id
+          // A restart in a fresh thread abandons the earlier thread; only the
+          // thread that produced the result is evidence for the review.
+          if (threadIds.length > 0) keepThreadTrace(trace, id)
+          threadIds.push(id)
         },
         beforeRetry: async () => {},
         onMessage: (message) => {
@@ -61,19 +64,26 @@ async function main(): Promise<void> {
         executeAmp: executeAmpWithPluginReady,
       })
       process.stdout.write(
-        `${JSON.stringify({ status: "completed", rawResult, threadId, models: modelsFromTrace(trace), trace })}\n`,
+        `${JSON.stringify({ status: "completed", rawResult, threadId: threadIds.at(-1) ?? null, models: modelsFromTrace(trace), trace })}\n`,
       )
     } catch (error) {
       process.stdout.write(
-        `${JSON.stringify({ status: "error", error: errorMessage(error), threadId, models: modelsFromTrace(trace), trace })}\n`,
+        `${JSON.stringify({ status: "error", error: errorMessage(error), threadId: threadIds.at(-1) ?? null, models: modelsFromTrace(trace), trace })}\n`,
       )
     }
   } finally {
     clearTimeout(timeout)
     process.removeListener("SIGTERM", abort)
     process.removeListener("SIGINT", abort)
-    if (threadId) await archiveThread(threadId)
+    for (const id of threadIds) await archiveThread(id)
   }
+}
+
+export function keepThreadTrace(trace: StreamMessage[], threadId: string): void {
+  const kept = trace.filter(
+    (message) => !("session_id" in message) || message.session_id === threadId,
+  )
+  trace.splice(0, trace.length, ...kept)
 }
 
 export async function* executeAmpWithPluginReady({

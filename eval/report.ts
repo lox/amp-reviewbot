@@ -271,12 +271,13 @@ function bottomLine(
 
 function traceProblemCount(run: EvalRun): number {
   const cases = new Map(run.cases.map((evalCase) => [evalCase.id, evalCase]))
+  // The stored trace is the evidence; the saved violation list is only a cache
+  // of an earlier check and is used when the trace was not kept.
   return run.samples.filter((sample) => {
-    const saved = sample.evidenceBoundaryViolations ?? []
     const evalCase = cases.get(sample.caseId)!
     const current =
       sample.trace === undefined || sample.prompt === undefined
-        ? []
+        ? (sample.evidenceBoundaryViolations ?? [])
         : checkReviewTrace(
             sample.trace,
             sourcePreparationFromPrompt(sample.sourceSetupPrompt ?? sample.prompt),
@@ -295,7 +296,7 @@ function traceProblemCount(run: EvalRun): number {
                 ? "plugin"
                 : undefined,
           )
-    return saved.length > 0 || current.length > 0
+    return current.length > 0
   }).length
 }
 

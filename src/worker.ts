@@ -58,7 +58,8 @@ export async function executeReviewWithRetries({
     let assistantFallback: string | undefined
     try {
       const continuing = threadId !== undefined
-      const executionPrompt = !continuing || firstExecution ? prompt : retryPrompt
+      const retryingInThread = continuing && !firstExecution
+      const executionPrompt = retryingInThread ? retryPrompt : prompt
       firstExecution = false
       for await (const message of executeAmp({
         prompt: executionPrompt,
@@ -81,6 +82,14 @@ export async function executeReviewWithRetries({
         onMessage?.(message)
         if (message.type === "system") {
           if (agentModeFromMessage(message) !== reviewMode) {
+            // Amp has been seen to resume a retried thread in its default mode
+            // rather than the pinned one. The work in that thread cannot be
+            // trusted, so restart the review in a fresh thread instead.
+            if (retryingInThread) {
+              throw new ContinuedThreadModeError(
+                `Amp continued thread ${threadId} in an unexpected mode; expected ${reviewMode}`,
+              )
+            }
             throw new Error(`Amp started in an unexpected mode; expected ${reviewMode}`)
           }
           if (threadId && message.session_id !== threadId) {
@@ -123,7 +132,12 @@ export async function executeReviewWithRetries({
       const delayMs = retryDelaysMs[attempt]
       if (delayMs === undefined) throw error
       await beforeRetry()
-      logger.warn({ err: error, attempt: attempt + 1, delayMs }, "retrying Amp review")
+      if (error instanceof ContinuedThreadModeError) {
+        logger.warn({ err: error, attempt: attempt + 1, delayMs }, "restarting Amp review in a fresh thread")
+        threadId = undefined
+      } else {
+        logger.warn({ err: error, attempt: attempt + 1, delayMs }, "retrying Amp review")
+      }
       await sleep(delayMs, signal)
     }
   }
@@ -152,6 +166,7 @@ function isValidReviewResult(text: string): boolean {
 }
 
 class TransientAmpError extends Error {}
+class ContinuedThreadModeError extends TransientAmpError {}
 class ReviewCallbackError extends Error {}
 class AmpReviewCancelledError extends Error {}
 
@@ -163,7 +178,9 @@ export function isTransientAmpError(error: unknown): boolean {
   if (error instanceof TransientAmpError) return true
   const message = errorMessage(error)
   return [
+    /websocket closed/i,
     /websocket.*\b(?:1006|1011|1012|1013)\b/i,
+    /unexpected error inside amp cli/i,
     /\b(?:ECONNRESET|EPIPE|ETIMEDOUT|EAI_AGAIN)\b/i,
     /socket hang up|premature|truncated stream/i,
     /\bHTTP\s+(?:408|429|5\d\d)\b/i,
@@ -261,6 +278,8 @@ export class ReviewWorkers {
   private async review(initialJob: ReviewJob, logger: Logger): Promise<void> {
     let job = initialJob
     let checkRunId = job.checkRunId
+    // Every thread this review used, including one abandoned by a fresh restart.
+    const threadIds = new Set(job.ampThreadId ? [job.ampThreadId] : [])
     const controller = new AbortController()
     const log = logger.child({ jobId: job.id, repository: job.repositoryFullName, pr: job.pullNumber })
     this.active.add(controller)
@@ -302,6 +321,7 @@ export class ReviewWorkers {
         visibility: this.config.ampThreadVisibility,
         logger: log,
         onThread: async (threadId) => {
+          threadIds.add(threadId)
           job = { ...job, ampThreadId: threadId }
           await this.database.setThread(job.id, threadId)
           try {
@@ -373,15 +393,15 @@ export class ReviewWorkers {
       }
       if (!cancelled) await this.database.finish(job.id, "failed", reason)
     } finally {
-      if (job.ampThreadId) {
+      for (const threadId of threadIds) {
         try {
           await execFileAsync(
             resolve("node_modules", ".bin", "amp"),
-            ["threads", "archive", job.ampThreadId],
+            ["threads", "archive", threadId],
             { timeout: 30_000 },
           )
         } catch (error) {
-          log.warn({ err: error, threadId: job.ampThreadId }, "failed to archive Amp review thread")
+          log.warn({ err: error, threadId }, "failed to archive Amp review thread")
         }
       }
       clearTimeout(timeout)
