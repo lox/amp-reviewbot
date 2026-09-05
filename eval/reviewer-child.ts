@@ -15,7 +15,6 @@ import { z } from "zod"
 import { reviewMode } from "../src/amp.js"
 import { executeReviewWithRetries } from "../src/worker.js"
 import { modelsFromTrace } from "./evidence.js"
-import type { ThreadUsage } from "./schema.js"
 
 const execFileAsync = promisify(execFile)
 const inputSchema = z.object({
@@ -65,11 +64,11 @@ async function main(): Promise<void> {
         executeAmp: executeAmpWithPluginReady,
       })
       process.stdout.write(
-        `${JSON.stringify({ status: "completed", rawResult, ...(await reviewEvidence(threadIds, trace, controller.signal)) })}\n`,
+        `${JSON.stringify({ status: "completed", rawResult, threadId: threadIds.at(-1) ?? null, models: modelsFromTrace(trace), trace })}\n`,
       )
     } catch (error) {
       process.stdout.write(
-        `${JSON.stringify({ status: "error", error: errorMessage(error), ...(await reviewEvidence(threadIds, trace, controller.signal)) })}\n`,
+        `${JSON.stringify({ status: "error", error: errorMessage(error), threadId: threadIds.at(-1) ?? null, models: modelsFromTrace(trace), trace })}\n`,
       )
     }
   } finally {
@@ -175,81 +174,6 @@ async function readStdin(): Promise<string> {
   const chunks: Buffer[] = []
   for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk))
   return Buffer.concat(chunks).toString("utf8")
-}
-
-async function reviewEvidence(
-  threadIds: string[],
-  trace: StreamMessage[],
-  signal: AbortSignal,
-): Promise<{ threadId: string | null; models: string[]; trace: StreamMessage[]; usage: ThreadUsage | null }> {
-  // Every thread the review used was paid for, including one abandoned by a
-  // restart, so the usage sums all of them. A cancelled or timed-out review
-  // skips the lookup: the parent force-kills this process a few seconds after
-  // the abort, and the trace must reach it first.
-  const usages: ThreadUsage[] = []
-  for (const id of signal.aborted ? [] : threadIds) {
-    const usage = await threadUsage(id)
-    if (usage !== null) usages.push(usage)
-  }
-  return {
-    threadId: threadIds.at(-1) ?? null,
-    models: modelsFromTrace(trace),
-    trace,
-    usage: usages.length === 0 ? null : sumThreadUsage(usages),
-  }
-}
-
-async function threadUsage(threadId: string): Promise<ThreadUsage | null> {
-  try {
-    const { stdout } = await execFileAsync(
-      resolve("node_modules", ".bin", "amp"),
-      ["threads", "usage", "--details", threadId],
-      { timeout: 30_000, maxBuffer: 4 * 1024 * 1024 },
-    )
-    return parseThreadUsage(stdout)
-  } catch {
-    process.stderr.write("Warning: usage for an evaluation review thread could not be read.\n")
-    return null
-  }
-}
-
-/**
- * Reads the summary lines of `amp threads usage --details`, which has no
- * machine-readable form. Returns null when the summary lines are missing so a
- * changed CLI format is recorded as "not available" instead of as zero cost.
- */
-export function parseThreadUsage(report: string): ThreadUsage | null {
-  const costUsd = numberAfter(report, /^Cost: \$([\d,]+(?:\.\d+)?)$/m)
-  const inputTokens = numberAfter(report, /^Input tokens: ([\d,]+)/m)
-  const outputTokens = numberAfter(report, /^Output tokens: ([\d,]+)/m)
-  const requests = numberAfter(report, /^Requests: ([\d,]+)$/m)
-  if (costUsd === undefined || inputTokens === undefined || outputTokens === undefined || requests === undefined) {
-    return null
-  }
-  return {
-    costUsd,
-    inputTokens,
-    outputTokens,
-    requests,
-    threads: 1,
-    subscriptionUsed: /subscription was used for some inference/.test(report),
-  }
-}
-
-function numberAfter(report: string, pattern: RegExp): number | undefined {
-  const match = pattern.exec(report)
-  return match === null ? undefined : Number(match[1]!.replaceAll(",", ""))
-}
-
-export function sumThreadUsage(usages: ThreadUsage[]): ThreadUsage {
-  return usages.reduce((total, usage) => ({
-    costUsd: total.costUsd + usage.costUsd,
-    inputTokens: total.inputTokens + usage.inputTokens,
-    outputTokens: total.outputTokens + usage.outputTokens,
-    requests: total.requests + usage.requests,
-    threads: total.threads + usage.threads,
-    subscriptionUsed: total.subscriptionUsed || usage.subscriptionUsed,
-  }))
 }
 
 async function archiveThread(threadId: string): Promise<void> {

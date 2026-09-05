@@ -238,8 +238,8 @@ const judgementFields = {
 const judgementSchema = z.object(judgementFields).strict()
 
 /**
- * What Amp billed for the review, as reported by `amp threads usage` for every
- * thread the review used. Unlike the trace, this includes subagent threads.
+ * What Amp billed for the thread that produced the review, as reported by
+ * `amp threads usage`. Unlike the trace, this includes subagent threads.
  * `costUsd` is Amp credits only; it is 0 when a subscription covered the
  * inference, which `subscriptionUsed` records.
  */
@@ -249,7 +249,6 @@ export const threadUsageSchema = z
     inputTokens: z.number().int().nonnegative(),
     outputTokens: z.number().int().nonnegative(),
     requests: z.number().int().nonnegative(),
-    threads: z.number().int().positive(),
     subscriptionUsed: z.boolean(),
   })
   .strict()

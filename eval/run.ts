@@ -19,6 +19,7 @@ import { judgeIssue, type AmpVersions } from "./judge.js"
 import { checkPack, describePack, loadPack } from "./pack.js"
 import { formatReport } from "./report.js"
 import {
+  readThreadUsage,
   reviewAuthentication,
   runEvaluationReview,
   type ReviewAuthentication,
@@ -371,9 +372,12 @@ async function runReviewSample(
     })
     threadId = review.threadId
     trace = review.trace
-    usage = review.usage ?? undefined
     models = [...new Set([...review.models, ...modelsFromTrace(trace)])]
     const reviewDurationMs = Date.now() - startedAt
+    // The review is over and its deadline no longer applies; the usage lookup
+    // is bookkeeping that must not change the review's status or duration.
+    clearTimeout(timeout)
+    if (threadId !== null) usage = (await readThreadUsage(threadId, options.reviewerApiKey)) ?? undefined
     const evidenceBoundaryViolations = checkReviewTrace(
       trace,
       sourcePreparation,

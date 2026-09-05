@@ -14,11 +14,12 @@ import { checkReviewTrace, modelsFromTrace } from "../eval/evidence.js"
 import { judgeIssue, resolveMatchingVotes } from "../eval/judge.js"
 import { checkPack, exampleSchema, loadPack } from "../eval/pack.js"
 import { formatReport, reviewResources } from "../eval/report.js"
-import { evaluationAmpArgs, keepThreadTrace, parseThreadUsage, sumThreadUsage } from "../eval/reviewer-child.js"
+import { evaluationAmpArgs, keepThreadTrace } from "../eval/reviewer-child.js"
 import {
   reviewAuthentication,
   reviewerEnvironment,
   runEvaluationReview,
+  parseThreadUsage,
 } from "../eval/reviewer.js"
 import {
   finishJudgements,
@@ -755,7 +756,6 @@ describe("eval example packs", () => {
         threadId: "thread-1",
         models: ["test-model"],
         trace,
-        usage: null,
       }),
     )
     child.emit("close", 0, null)
@@ -766,7 +766,6 @@ describe("eval example packs", () => {
       threadId: "thread-1",
       models: ["test-model"],
       trace,
-      usage: null,
     })
     await assert.rejects(stat(submitted.cwd))
   })
@@ -1591,7 +1590,6 @@ describe("eval scoring", () => {
       inputTokens: 1_000_000,
       outputTokens: 5_000,
       requests: 10,
-      threads: 1,
       subscriptionUsed,
     })
     const run = makeRun(cases, 3, [
@@ -1653,19 +1651,12 @@ describe("eval scoring", () => {
       inputTokens: 37_008_927,
       outputTokens: 175_767,
       requests: 366,
-      threads: 1,
       subscriptionUsed: true,
     })
-    assert.equal(parseThreadUsage(report.replace("Cost: $1,234.56", "Cost: $0"))!.costUsd, 0)
-    assert.equal(parseThreadUsage(report.replace("Cost: $1,234.56", "Cost: $0"))!.subscriptionUsed, true)
+    const covered = parseThreadUsage(report.replace("Cost: $1,234.56", "Cost: $0"))!
+    assert.equal(covered.costUsd, 0)
+    assert.equal(covered.subscriptionUsed, true)
     assert.equal(parseThreadUsage("# Thread Usage\n\nSomething else entirely\n"), null)
-    assert.deepEqual(
-      sumThreadUsage([
-        parseThreadUsage(report)!,
-        { costUsd: 0.5, inputTokens: 1, outputTokens: 2, requests: 3, threads: 1, subscriptionUsed: false },
-      ]),
-      { costUsd: 1235.06, inputTokens: 37_008_928, outputTokens: 175_769, requests: 369, threads: 2, subscriptionUsed: true },
-    )
   })
 
   it("reports dropped raw findings and counts missed chances, not reviews", () => {
