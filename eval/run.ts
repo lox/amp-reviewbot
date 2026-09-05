@@ -348,6 +348,7 @@ async function runReviewSample(
   let models: string[] = []
   let trace: unknown[] = []
   let usage: ThreadUsage | undefined
+  let reviewDurationMs: number | undefined
   const job = evalJob(evalCase, sample)
   const target = {
     repository: evalCase.repositoryFullName,
@@ -373,7 +374,7 @@ async function runReviewSample(
     threadId = review.threadId
     trace = review.trace
     models = [...new Set([...review.models, ...modelsFromTrace(trace)])]
-    const reviewDurationMs = Date.now() - startedAt
+    reviewDurationMs = Date.now() - startedAt
     // The review is over and its deadline no longer applies; the usage lookup
     // is bookkeeping that must not change the review's status or duration.
     clearTimeout(timeout)
@@ -431,7 +432,7 @@ async function runReviewSample(
       judgementErrors: [],
     }
   } catch (error) {
-    const reviewDurationMs = Date.now() - startedAt
+    reviewDurationMs ??= Date.now() - startedAt
     return {
       caseId: evalCase.id,
       sample,

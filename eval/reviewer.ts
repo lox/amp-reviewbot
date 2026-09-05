@@ -236,8 +236,9 @@ function hashId(userId: string): string {
  * missing number is recorded as "not available" instead of as zero cost.
  */
 export async function readThreadUsage(threadId: string, apiKey?: string): Promise<ThreadUsage | null> {
-  const home = apiKey ? await mkdtemp(join(tmpdir(), "amp-reviewbot-usage-")) : undefined
+  let home: string | undefined
   try {
+    if (apiKey) home = await mkdtemp(join(tmpdir(), "amp-reviewbot-usage-"))
     const { stdout } = await execFileAsync(
       resolve("node_modules", ".bin", "amp"),
       ["threads", "usage", "--details", threadId],
@@ -247,7 +248,7 @@ export async function readThreadUsage(threadId: string, apiKey?: string): Promis
   } catch {
     return null
   } finally {
-    if (home) await rm(home, { recursive: true, force: true })
+    if (home) await rm(home, { recursive: true, force: true }).catch(() => {})
   }
 }
 
