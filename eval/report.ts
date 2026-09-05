@@ -37,6 +37,7 @@ export function formatReport(savedRun: EvalRun): string {
       `${traceProblems} review ${traceProblems === 1 ? "did" : "runs did"} not follow the review rules and ${traceProblems === 1 ? "is" : "are"} excluded from these counts.`,
     )
   }
+  lines.push(...resourceLines(savedRun))
 
   const scores = new Map(score.cases.map((caseScore) => [caseScore.caseId, caseScore]))
   const samples = new Map<string, EvalSample[]>()
@@ -94,6 +95,134 @@ function modelSentence(run: EvalRun): string {
   return models.size === 0
     ? "Exact model IDs: not reported by Amp."
     : `Reported model IDs: ${[...models].sort().join(", ")}.`
+}
+
+export interface ReviewResources {
+  reviews: number
+  totalReviewMs: number
+  medianReviewMs: number
+  longestReviewMs: number
+  /** What Amp billed, from `amp threads usage`; absent when no review recorded it. */
+  billed?: {
+    reviews: number
+    costUsd: number
+    medianCostUsd: number
+    inputTokens: number
+    outputTokens: number
+    requests: number
+    subscriptionUsed: boolean
+  }
+  /** Tokens summed from the assistant turns in the saved traces (no subagent turns, no cost). */
+  traced?: {
+    reviews: number
+    inputTokens: number
+    outputTokens: number
+    medianInputTokens: number
+  }
+}
+
+/**
+ * Time, cost, and tokens spent by the reviewer across every saved review,
+ * including reviews later excluded from the counts, which still cost money.
+ */
+export function reviewResources(run: EvalRun): ReviewResources | undefined {
+  const durations = run.samples.flatMap((sample) => sample.reviewDurationMs ?? [])
+  if (durations.length === 0) return undefined
+  const usages = run.samples.flatMap((sample) => sample.usage ?? [])
+  // An empty trace means Amp never started, so there is no usage to count.
+  const traced = run.samples.flatMap((sample) =>
+    sample.trace === undefined || sample.trace.length === 0 ? [] : [sumTraceUsage(sample.trace)],
+  )
+  return {
+    reviews: durations.length,
+    totalReviewMs: durations.reduce((sum, ms) => sum + ms, 0),
+    medianReviewMs: median(durations),
+    longestReviewMs: Math.max(...durations),
+    ...(usages.length === 0
+      ? {}
+      : {
+          billed: {
+            reviews: usages.length,
+            costUsd: usages.reduce((sum, usage) => sum + usage.costUsd, 0),
+            medianCostUsd: median(usages.map((usage) => usage.costUsd)),
+            inputTokens: usages.reduce((sum, usage) => sum + usage.inputTokens, 0),
+            outputTokens: usages.reduce((sum, usage) => sum + usage.outputTokens, 0),
+            requests: usages.reduce((sum, usage) => sum + usage.requests, 0),
+            subscriptionUsed: usages.some((usage) => usage.subscriptionUsed),
+          },
+        }),
+    ...(traced.length === 0
+      ? {}
+      : {
+          traced: {
+            reviews: traced.length,
+            inputTokens: traced.reduce((sum, usage) => sum + usage.input, 0),
+            outputTokens: traced.reduce((sum, usage) => sum + usage.output, 0),
+            medianInputTokens: median(traced.map((usage) => usage.input)),
+          },
+        }),
+  }
+}
+
+function resourceLines(run: EvalRun): string[] {
+  const resources = reviewResources(run)
+  if (resources === undefined) return []
+  const lines = [
+    `Review time: ${countLabel(resources.reviews, "review")} took ${hours(resources.totalReviewMs)} in total; median ${minutes(resources.medianReviewMs)}, longest ${minutes(resources.longestReviewMs)}.`,
+  ]
+  const { billed, traced } = resources
+  if (billed !== undefined) {
+    const coverage = billed.reviews === resources.reviews ? "" : ` (${billed.reviews} of ${resources.reviews} reviews reported usage)`
+    lines.push(
+      `Amp usage${coverage}: $${billed.costUsd.toFixed(2)} in credits, ${millions(billed.inputTokens)} input tokens, ${millions(billed.outputTokens)} output tokens, ${countLabel(billed.requests, "model request")}; median $${billed.medianCostUsd.toFixed(2)} per review. Subagent threads are included.${billed.subscriptionUsed ? " A subscription covered some inference, so credits understate the cost." : ""}`,
+    )
+  } else if (traced !== undefined) {
+    lines.push(
+      `Reviewer tokens from ${countLabel(traced.reviews, "trace")}: ${millions(traced.inputTokens)} input tokens (including cache reads and writes), ${millions(traced.outputTokens)} output tokens; median ${millions(traced.medianInputTokens)} input tokens per review. This run recorded no Amp usage, so cost is unknown and tokens spent by delegated subagents are not counted.`,
+    )
+  }
+  return lines
+}
+
+function sumTraceUsage(trace: unknown[]): { input: number; output: number } {
+  const usage = { input: 0, output: 0 }
+  for (const message of trace) {
+    if (!message || typeof message !== "object" || !("message" in message)) continue
+    const body = message.message
+    if (!body || typeof body !== "object" || !("usage" in body)) continue
+    const counts = body.usage
+    if (!counts || typeof counts !== "object") continue
+    usage.input +=
+      tokenCount(counts, "input_tokens") +
+      tokenCount(counts, "cache_creation_input_tokens") +
+      tokenCount(counts, "cache_read_input_tokens")
+    usage.output += tokenCount(counts, "output_tokens")
+  }
+  return usage
+}
+
+function tokenCount(usage: object, key: string): number {
+  const value = (usage as Record<string, unknown>)[key]
+  return typeof value === "number" && Number.isFinite(value) ? value : 0
+}
+
+function median(values: number[]): number {
+  if (values.length === 0) return 0
+  const sorted = [...values].sort((a, b) => a - b)
+  const middle = Math.floor(sorted.length / 2)
+  return sorted.length % 2 === 1 ? sorted[middle]! : (sorted[middle - 1]! + sorted[middle]!) / 2
+}
+
+function minutes(ms: number): string {
+  return `${(ms / 60_000).toFixed(1)} min`
+}
+
+function hours(ms: number): string {
+  return ms < 3_600_000 ? minutes(ms) : `${(ms / 3_600_000).toFixed(1)} hours`
+}
+
+function millions(tokens: number): string {
+  return tokens < 1_000_000 ? `${Math.round(tokens / 1_000)}k` : `${(tokens / 1_000_000).toFixed(1)}M`
 }
 
 function countSeedOutcomes(score: EvalScore): Record<"pass" | "unstable" | "fail", number> {

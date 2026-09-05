@@ -109,13 +109,15 @@ Exact model IDs: not reported by Amp.
 2 pull-request examples: 1 pass, 1 unstable, 0 fail.
 1 version with no recorded issues, 1 version with recorded non-blocking issues, and 1 version with recorded blocking issues.
 Each was reviewed 3 times. All 9 reviews completed.
+Review time: 9 reviews took 24.3 min in total; median 2.5 min, longest 6.1 min.
+Amp usage: $7.20 in credits, 4.4M input tokens, 31k output tokens, 63 model requests; median $0.80 per review. Subagent threads are included.
 
 Example 1 (pull request #1234): PASS (3/3 repeats passed)
   Baseline, no recorded issues: 3 of 3 completed reviews raised no alert
   Introduced-issue version, recorded blocking issues: found in 3 of 3; response matched the recorded issues in 3 of 3
 ```
 
-The saved file keeps enough detail to reproduce and inspect the counts: exact commits and context, prompts, full tool traces, Amp mode, exact SDK and CLI versions, model IDs when Amp reports them, raw and filtered findings, matching decisions, timing, execution order, source checks, and errors. A report re-applies the latest trace checks to the stored traces without changing the original file, so a fixed check changes what an older report says. Treat the file as private and potentially sensitive.
+The saved file keeps enough detail to reproduce and inspect the counts: exact commits and context, prompts, full tool traces, Amp mode, exact SDK and CLI versions, model IDs when Amp reports them, raw and filtered findings, matching decisions, timing, what Amp billed for the review thread (`amp threads usage`, read after the review returns; subagent threads are included, a thread abandoned by a restart is not), execution order, source checks, and errors. Usage totals cover every review including excluded ones, since they still cost money. Credits are $0 when a subscription covered the inference; the report says so. A run recorded before usage was captured falls back to tokens summed from the traces, which omit subagent turns and cost. A report re-applies the latest trace checks to the stored traces without changing the original file, so a fixed check changes what an older report says. Treat the file as private and potentially sensitive.
 
 Each source pull request is one example. For a synthetic before-and-after pair, one repeat passes only when the reviewer gets both versions right. Three repeats support a development check, not a broad accuracy claim: 3 of 3 is a provisional pass, 2 of 3 is unstable, and 0 or 1 needs work. If five repeats were chosen before the run, require at least 4 of 5. Never add only favorable reruns.
 

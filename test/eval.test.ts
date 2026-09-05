@@ -13,12 +13,13 @@ import { AmpOptionsSchema, type StreamMessage } from "@ampcode/sdk"
 import { checkReviewTrace, modelsFromTrace } from "../eval/evidence.js"
 import { judgeIssue, resolveMatchingVotes } from "../eval/judge.js"
 import { checkPack, exampleSchema, loadPack } from "../eval/pack.js"
-import { formatReport } from "../eval/report.js"
+import { formatReport, reviewResources } from "../eval/report.js"
 import { evaluationAmpArgs, keepThreadTrace } from "../eval/reviewer-child.js"
 import {
   reviewAuthentication,
   reviewerEnvironment,
   runEvaluationReview,
+  parseThreadUsage,
 } from "../eval/reviewer.js"
 import {
   finishJudgements,
@@ -1541,6 +1542,121 @@ describe("eval scoring", () => {
     const score = scoreRun(run)
     assert.equal(score.cases[0]!.frozenLabelMatchFraction, 1 / 2)
     assert.match(formatReport(run), /1 unmatched finding needs source checking/)
+  })
+
+  it("reports review time and reviewer tokens from the saved traces", () => {
+    const cases = [evalCase("blocking", blocking)]
+    const usage = (input: number, cached: number, output: number) => ({
+      type: "assistant",
+      message: { usage: { input_tokens: input, cache_read_input_tokens: cached, output_tokens: output } },
+    })
+    const run = makeRun(cases, 3, [
+      {
+        ...completed("blocking", 1, blocking, "failure", [highFinding], [judgement([0], false)]),
+        reviewDurationMs: 60_000,
+        trace: [{ type: "system" }, usage(1_000, 0, 100), usage(500, 2_000, 400)],
+      },
+      {
+        ...completed("blocking", 2, blocking, "failure", [highFinding], [judgement([0], false)]),
+        reviewDurationMs: 180_000,
+        trace: [usage(300_000, 0, 500)],
+      },
+      { ...failed("blocking", 3, blocking), reviewDurationMs: 300_000, trace: [] },
+    ])
+
+    assert.deepEqual(reviewResources(run), {
+      reviews: 3,
+      totalReviewMs: 540_000,
+      medianReviewMs: 180_000,
+      longestReviewMs: 300_000,
+      traced: { reviews: 2, inputTokens: 303_500, outputTokens: 1_000, medianInputTokens: 151_750 },
+    })
+    const report = formatReport(run)
+    assert.match(report, /Review time: 3 reviews took 9\.0 min in total; median 3\.0 min, longest 5\.0 min\./)
+    assert.match(report, /Reviewer tokens from 2 traces: 304k input tokens .*, 1k output tokens; median 152k input tokens per review\./)
+    assert.match(report, /recorded no Amp usage, so cost is unknown/)
+
+    const withoutTimings = makeRun(cases, 1, [
+      completed("blocking", 1, blocking, "failure", [highFinding], [judgement([0], false)]),
+    ])
+    assert.equal(reviewResources(withoutTimings), undefined)
+    assert.doesNotMatch(formatReport(withoutTimings), /Review time/)
+  })
+
+  it("prefers the usage Amp billed over tokens summed from the trace", () => {
+    const cases = [evalCase("blocking", blocking)]
+    const usage = (costUsd: number, subscriptionUsed = false) => ({
+      costUsd,
+      inputTokens: 1_000_000,
+      outputTokens: 5_000,
+      requests: 10,
+      subscriptionUsed,
+    })
+    const run = makeRun(cases, 3, [
+      {
+        ...completed("blocking", 1, blocking, "failure", [highFinding], [judgement([0], false)]),
+        reviewDurationMs: 60_000,
+        trace: [{ type: "assistant", message: { usage: { input_tokens: 5, output_tokens: 1 } } }],
+        usage: usage(1.25),
+      },
+      {
+        ...completed("blocking", 2, blocking, "failure", [highFinding], [judgement([0], false)]),
+        reviewDurationMs: 60_000,
+        usage: usage(0.75, true),
+      },
+      { ...failed("blocking", 3, blocking), reviewDurationMs: 60_000, trace: [] },
+    ])
+
+    assert.deepEqual(reviewResources(run)!.billed, {
+      reviews: 2,
+      costUsd: 2,
+      medianCostUsd: 1,
+      inputTokens: 2_000_000,
+      outputTokens: 10_000,
+      requests: 20,
+      subscriptionUsed: true,
+    })
+    const report = formatReport(run)
+    assert.match(
+      report,
+      /Amp usage \(2 of 3 reviews reported usage\): \$2\.00 in credits, 2\.0M input tokens, 10k output tokens, 20 model requests; median \$1\.00 per review\. Subagent threads are included\. A subscription covered some inference/,
+    )
+    assert.doesNotMatch(report, /Reviewer tokens from/)
+  })
+
+  it("reads cost and tokens from the amp threads usage report", () => {
+    const report = [
+      "# Thread Usage",
+      "",
+      "## Review buildkite/agent#3238",
+      "",
+      "Scope: Entire lifetime of this thread, including 2 subagent threads.",
+      "",
+      "Cost: $1,234.56",
+      "Total tokens: 37,184,694",
+      "Input tokens: 37,008,927 (35,168,961 cache reads)",
+      "Output tokens: 175,767",
+      "Requests: 366",
+      "Orb runtime: 2h31m16.141s (9,076,141 ms)",
+      "Your ChatGPT subscription was used for some inference.",
+      "",
+      "## Credits",
+      "",
+      "| Type | Cost |",
+      "| --- | ---: |",
+      "| Personal paid credits | $21.57 |",
+    ].join("\n")
+    assert.deepEqual(parseThreadUsage(report), {
+      costUsd: 1234.56,
+      inputTokens: 37_008_927,
+      outputTokens: 175_767,
+      requests: 366,
+      subscriptionUsed: true,
+    })
+    const covered = parseThreadUsage(report.replace("Cost: $1,234.56", "Cost: $0"))!
+    assert.equal(covered.costUsd, 0)
+    assert.equal(covered.subscriptionUsed, true)
+    assert.equal(parseThreadUsage("# Thread Usage\n\nSomething else entirely\n"), null)
   })
 
   it("reports dropped raw findings and counts missed chances, not reviews", () => {

@@ -1,10 +1,14 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
 import { createHash } from "node:crypto"
 import { mkdir, mkdtemp, rm, stat } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
+import { promisify } from "node:util"
 import { z } from "zod"
+import type { ThreadUsage } from "./schema.js"
+
+const execFileAsync = promisify(execFile)
 
 const outputFields = {
   threadId: z.string().nullable(),
@@ -222,4 +226,50 @@ async function ampUserId(
 
 function hashId(userId: string): string {
   return `sha256:${createHash("sha256").update(userId).digest("hex")}`
+}
+
+/**
+ * What Amp billed for a review thread, read with `amp threads usage --details`
+ * under the same account that ran the review. Works on archived threads, so
+ * it runs after the review has returned and its deadline no longer applies.
+ * Returns null when the lookup fails or the CLI output changed shape, so a
+ * missing number is recorded as "not available" instead of as zero cost.
+ */
+export async function readThreadUsage(threadId: string, apiKey?: string): Promise<ThreadUsage | null> {
+  let home: string | undefined
+  try {
+    if (apiKey) home = await mkdtemp(join(tmpdir(), "amp-reviewbot-usage-"))
+    const { stdout } = await execFileAsync(
+      resolve("node_modules", ".bin", "amp"),
+      ["threads", "usage", "--details", threadId],
+      { env: reviewerEnvironment(apiKey, home), timeout: 30_000, maxBuffer: 4 * 1024 * 1024 },
+    )
+    return parseThreadUsage(stdout)
+  } catch {
+    return null
+  } finally {
+    if (home) await rm(home, { recursive: true, force: true }).catch(() => {})
+  }
+}
+
+export function parseThreadUsage(report: string): ThreadUsage | null {
+  const costUsd = numberAfter(report, /^Cost: \$([\d,]+(?:\.\d+)?)$/m)
+  const inputTokens = numberAfter(report, /^Input tokens: ([\d,]+)/m)
+  const outputTokens = numberAfter(report, /^Output tokens: ([\d,]+)/m)
+  const requests = numberAfter(report, /^Requests: ([\d,]+)$/m)
+  if (costUsd === undefined || inputTokens === undefined || outputTokens === undefined || requests === undefined) {
+    return null
+  }
+  return {
+    costUsd,
+    inputTokens,
+    outputTokens,
+    requests,
+    subscriptionUsed: /subscription was used for some inference/.test(report),
+  }
+}
+
+function numberAfter(report: string, pattern: RegExp): number | undefined {
+  const match = pattern.exec(report)
+  return match === null ? undefined : Number(match[1]!.replaceAll(",", ""))
 }

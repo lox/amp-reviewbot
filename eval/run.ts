@@ -19,6 +19,7 @@ import { judgeIssue, type AmpVersions } from "./judge.js"
 import { checkPack, describePack, loadPack } from "./pack.js"
 import { formatReport } from "./report.js"
 import {
+  readThreadUsage,
   reviewAuthentication,
   runEvaluationReview,
   type ReviewAuthentication,
@@ -31,6 +32,7 @@ import {
   type EvalCase,
   type EvalRun,
   type EvalSample,
+  type ThreadUsage,
 } from "./schema.js"
 import { scoreRun, type EvalScore } from "./score.js"
 
@@ -345,6 +347,8 @@ async function runReviewSample(
   let threadId: string | null = null
   let models: string[] = []
   let trace: unknown[] = []
+  let usage: ThreadUsage | undefined
+  let reviewDurationMs: number | undefined
   const job = evalJob(evalCase, sample)
   const target = {
     repository: evalCase.repositoryFullName,
@@ -370,7 +374,11 @@ async function runReviewSample(
     threadId = review.threadId
     trace = review.trace
     models = [...new Set([...review.models, ...modelsFromTrace(trace)])]
-    const reviewDurationMs = Date.now() - startedAt
+    reviewDurationMs = Date.now() - startedAt
+    // The review is over and its deadline no longer applies; the usage lookup
+    // is bookkeeping that must not change the review's status or duration.
+    clearTimeout(timeout)
+    if (threadId !== null) usage = (await readThreadUsage(threadId, options.reviewerApiKey)) ?? undefined
     const evidenceBoundaryViolations = checkReviewTrace(
       trace,
       sourcePreparation,
@@ -392,6 +400,7 @@ async function runReviewSample(
         matchingDurationMs: 0,
         trace,
         evidenceBoundaryViolations,
+        usage,
         status: "error",
         error: review.error,
       }
@@ -412,6 +421,7 @@ async function runReviewSample(
       matchingDurationMs: 0,
       trace,
       evidenceBoundaryViolations,
+      usage,
       status: "completed",
       rawResult: review.rawResult,
       parsedResult,
@@ -422,7 +432,7 @@ async function runReviewSample(
       judgementErrors: [],
     }
   } catch (error) {
-    const reviewDurationMs = Date.now() - startedAt
+    reviewDurationMs ??= Date.now() - startedAt
     return {
       caseId: evalCase.id,
       sample,
@@ -442,6 +452,7 @@ async function runReviewSample(
         reviewMode,
         "plugin",
       ),
+      usage,
       status: "error",
       error: errorMessage(error),
     }
