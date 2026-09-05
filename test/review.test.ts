@@ -56,6 +56,33 @@ describe("buildReviewPrompt", () => {
     assert.match(prompt, /Return only JSON matching this exact shape/)
   })
 
+  it("tells the reviewer that findings must anchor on an added or modified line", () => {
+    const job: ReviewJob = {
+      id: "job-1",
+      sourceDeliveryId: "delivery-1",
+      eventType: "pull_request.opened",
+      installationId: "1",
+      repositoryId: "2",
+      repositoryFullName: "lox/example",
+      pullNumber: 42,
+      baseSha: "base-sha",
+      headSha: "head-sha",
+      ampProject: "lox/example",
+      pullRequestContext: null,
+      checkRunId: null,
+      ampThreadId: null,
+      status: "queued",
+      attempts: 0,
+    }
+
+    const prompt = buildReviewPrompt(job)
+
+    assert.match(prompt, /startLine must be a line this pull request added or modified \(a "\+" line in the diff\)/)
+    assert.match(prompt, /anchor the finding on the added or modified line that causes it/)
+    assert.match(prompt, /Findings anchored on unchanged lines are discarded/)
+    assert.doesNotMatch(prompt, /point to a line in a changed file/)
+  })
+
   it("omits the context block for legacy queued jobs", () => {
     const job: ReviewJob = {
       id: "job-1",
