@@ -35,6 +35,9 @@ export function checkReviewTrace(
   expectedMode?: string,
   sourceSetup?: "separate-turn" | "plugin",
 ): string[] {
+  // An empty trace means Amp never started; the sample is already an error and
+  // there is no reviewer behaviour to judge.
+  if (trace.length === 0) return []
   const problems = new Set<string>()
   const requiredPreparation =
     sourcePreparation === undefined ? undefined : sourcePreparationCommand(sourcePreparation)
@@ -138,8 +141,12 @@ export function checkReviewTrace(
       ) {
         continue
       }
+      // A research request that explicitly tells the subagent to stay away from
+      // the target ("do not inspect example/repository or PR #42") is the reviewer
+      // following the rules, not breaking them.
       const canAccessExternalEvidence =
-        isResearchTool(tool) || (command !== undefined && runsNetworkCommand(command))
+        (isResearchTool(tool) && !explicitlyExcludesTarget(serializedInput, target)) ||
+        (command !== undefined && runsNetworkCommand(command))
       if (canAccessExternalEvidence && refersToTargetPullRequest(serializedInput, target)) {
         problems.add("accessed the target pull request")
       } else if (canAccessExternalEvidence && refersToTargetRepository(serializedInput, target)) {
@@ -227,6 +234,24 @@ function refersToTargetRepository(value: string, target: ReviewTarget): boolean 
   )
 }
 
+function explicitlyExcludesTarget(value: string, target: ReviewTarget): boolean {
+  const pull = target.pullNumber.toString()
+  // A clause runs from the negation to the end of the sentence. Inputs are
+  // JSON-serialized, so an escaped newline also ends the clause.
+  const clauses = value.matchAll(
+    /\b(?:do not|don't|never|not|without|other than|except(?:ing)?|excluding|rather than|instead of|outside(?: of)?|avoid(?:ing)?)\b((?:(?![.;](?:\s|$)|\\n)[^\n])*)/gi,
+  )
+  for (const [, clause = ""] of clauses) {
+    if (
+      refersToTargetRepository(clause, target) ||
+      new RegExp(`(?:pull(?:\\s+request)?|pr)\\s*#?${pull}(?:\\D|$)`, "i").test(clause)
+    ) {
+      return true
+    }
+  }
+  return false
+}
+
 function runsNetworkCommand(command: string): boolean {
   return (
     /https?:\/\//i.test(command) ||
@@ -240,8 +265,11 @@ function runsNetworkCommand(command: string): boolean {
 }
 
 function updatesPreparedRepository(command: string): boolean {
-  return /(?:^|[\n;&|])\s*(?:(?:command|env|exec|sudo)\s+)*(?:\S*\/)?git\b[^\n;&|]*\b(?:fetch|pull)\b/im.test(
-    command,
+  // Ignore quoted text such as search patterns, and git invocations aimed at
+  // another repository through -C, --git-dir, or --work-tree.
+  const unquoted = command.replace(/"[^"\n]*"|'[^'\n]*'/g, "")
+  return /(?:^|[\n;&|])\s*(?:(?:command|env|exec|sudo)\s+)*(?:\S*\/)?git\b(?![^\n;&|]*\s(?:-C|--git-dir|--work-tree)\b)[^\n;&|]*\b(?:fetch|pull)\b/im.test(
+    unquoted,
   )
 }
 

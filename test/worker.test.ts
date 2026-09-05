@@ -2,6 +2,7 @@ import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 import type { ExecuteOptions, StreamMessage } from "@ampcode/sdk"
 import pino from "pino"
+import { reviewMode } from "../src/amp.js"
 import {
   executeReviewWithRetries,
   isAmpCancellationError,
@@ -131,6 +132,39 @@ describe("executeReviewWithRetries", () => {
     assert.match(String(fake.calls[1]?.prompt), /return only the final review JSON/i)
   })
 
+  it("restarts in a fresh thread when the continued thread resumes in another mode", async () => {
+    const secondThreadId = "T-00000000-0000-0000-0000-000000000002"
+    const fake = fakeExecute([
+      [systemMessage(), errorMessage("OpenAI WebSocket closed: 1006")],
+      [systemMessage("medium")],
+      [systemMessage(reviewMode, secondThreadId), successMessage(validResult, secondThreadId)],
+    ])
+    const threads: string[] = []
+
+    const result = await executeReviewWithRetries({
+      prompt: "Review this pull request",
+      title: "Review lox/example#42",
+      project: "lox/example",
+      visibility: "private",
+      signal: new AbortController().signal,
+      logger: pino({ level: "silent" }),
+      onThread: async (id) => {
+        threads.push(id)
+      },
+      beforeRetry: async () => {},
+      executeAmp: fake.execute,
+      retryDelaysMs: [0, 0],
+    })
+
+    assert.equal(result, validResult)
+    assert.deepEqual(threads, [threadId, secondThreadId])
+    assert.equal(fake.calls[1]?.options?.continue, threadId)
+    assert.equal(fake.calls[2]?.options?.continue, undefined)
+    assert.equal(fake.calls[2]?.options?.mode, reviewMode)
+    assert.equal(fake.calls[2]?.options?.title, "Review lox/example#42")
+    assert.equal(fake.calls[2]?.prompt, "Review this pull request")
+  })
+
   it("stops after three transiently failed executions", async () => {
     const fake = fakeExecute([
       [systemMessage(), errorMessage("OpenAI WebSocket closed: 1006")],
@@ -211,6 +245,13 @@ describe("isTransientAmpError", () => {
     assert.equal(isTransientAmpError(new Error("HTTP 429 from provider")), true)
     assert.equal(isTransientAmpError(new Error("provider temporarily unavailable")), true)
     assert.equal(isTransientAmpError(new Error("thread is still running")), true)
+    assert.equal(isTransientAmpError(new Error("OpenAI WebSocket closed: 1000 .")), true)
+    assert.equal(
+      isTransientAmpError(
+        new Error("Amp CLI exited with status 1: Error: Unexpected error inside Amp CLI."),
+      ),
+      true,
+    )
     assert.equal(isTransientAmpError(new Error("error_max_turns")), false)
     assert.equal(isTransientAmpError(new Error("invalid project")), false)
   })
@@ -263,11 +304,11 @@ function fakeExecute(attempts: StreamMessage[][], beforeResult?: () => void): {
   }
 }
 
-function systemMessage(agentMode = "reviewbot-v1"): StreamMessage {
+function systemMessage(agentMode: string = reviewMode, sessionId = threadId): StreamMessage {
   return {
     type: "system",
     subtype: "init",
-    session_id: threadId,
+    session_id: sessionId,
     cwd: "/workspace",
     agent_mode: agentMode,
     tools: [],
@@ -292,11 +333,11 @@ function assistantMessage(text: string): StreamMessage {
   }
 }
 
-function successMessage(result: string): StreamMessage {
+function successMessage(result: string, sessionId = threadId): StreamMessage {
   return {
     type: "result",
     subtype: "success",
-    session_id: threadId,
+    session_id: sessionId,
     is_error: false,
     result,
     duration_ms: 1,

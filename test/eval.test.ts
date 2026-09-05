@@ -9,12 +9,12 @@ import { PassThrough } from "node:stream"
 import { describe, it } from "node:test"
 import { pathToFileURL } from "node:url"
 import { promisify } from "node:util"
-import { AmpOptionsSchema } from "@ampcode/sdk"
+import { AmpOptionsSchema, type StreamMessage } from "@ampcode/sdk"
 import { checkReviewTrace, modelsFromTrace } from "../eval/evidence.js"
 import { judgeIssue, resolveMatchingVotes } from "../eval/judge.js"
 import { checkPack, exampleSchema, loadPack } from "../eval/pack.js"
 import { formatReport } from "../eval/report.js"
-import { evaluationAmpArgs } from "../eval/reviewer-child.js"
+import { evaluationAmpArgs, keepThreadTrace } from "../eval/reviewer-child.js"
 import {
   reviewAuthentication,
   reviewerEnvironment,
@@ -618,6 +618,22 @@ describe("eval example packs", () => {
     ])
   })
 
+  it("keeps only the fresh thread's trace after a restart", () => {
+    const trace = [
+      traceSystemMessage("thread-1", "/workspace", reviewMode),
+      toolMessage("shell_command", { command: "git status" }, "abandoned"),
+      traceSystemMessage("thread-2", "/workspace", reviewMode),
+    ].map((message, index) => ({
+      ...message,
+      session_id: index < 2 ? "thread-1" : "thread-2",
+    })) as unknown as StreamMessage[]
+
+    keepThreadTrace(trace, "thread-2")
+
+    assert.equal(trace.length, 1)
+    assert.equal(trace[0]?.session_id, "thread-2")
+  })
+
   it("uses local CLI authentication unless a dedicated review key is provided", () => {
     const previousApiKey = process.env.AMP_API_KEY
     const previousReviewerApiKey = process.env.AMP_EVAL_REVIEWER_API_KEY
@@ -1087,10 +1103,7 @@ Use only this checked-out source.`
       ),
       [],
     )
-    assert.deepEqual(checkReviewTrace([], sourcePreparation), [
-      "did not start in a clean review workspace",
-      "did not complete the required source setup",
-    ])
+    assert.deepEqual(checkReviewTrace([], sourcePreparation), [])
     assert.deepEqual(
       checkReviewTrace(
         [
@@ -1212,6 +1225,90 @@ Use only this checked-out source.`
         target,
       ),
       [],
+    )
+  })
+
+  it("does not flag research that explicitly avoids the target or scratch git repositories", () => {
+    const target = {
+      repository: "example/repository",
+      pullNumber: 42,
+      baseSha: "b".repeat(40),
+      headSha: "a".repeat(40),
+    }
+    const compliantQueries = [
+      "In dependency/library v1.2, inspect Parse. Do not inspect example/repository or PR #42.",
+      "Inspect github.com/dependency/library at v0.1.1. Do not inspect github.com/example/repository.",
+      "In example/server (server, not example/repository), inspect the API. Do not inspect example/repository or GitHub PR #42.",
+      "Compare tags v1.0.0 and v1.0.1 of dependency/library relevant to downstream github.com/example/repository/v3. Do not inspect example/repository or PR #42.",
+      "Research for a local PR review; do not inspect example/repository or its PR.\nCite exact files.",
+    ]
+    for (const query of compliantQueries) {
+      assert.deepEqual(
+        checkReviewTrace([toolMessage("librarian", { query })], undefined, target),
+        [],
+        query,
+      )
+    }
+    assert.deepEqual(
+      checkReviewTrace(
+        [toolMessage("librarian", { query: "Inspect example/repository, not the dependency." })],
+        undefined,
+        target,
+      ),
+      ["accessed the target repository outside the supplied copy"],
+    )
+    assert.deepEqual(
+      checkReviewTrace(
+        [
+          toolMessage("librarian", {
+            query: "Read PR #42 in example/repository. Do not inspect other repositories.",
+          }),
+        ],
+        undefined,
+        target,
+      ),
+      ["accessed the target pull request"],
+    )
+    const scratchCommands = [
+      'rg -n "GitFetchFlags|git fetch" internal/job/*_test.go | head -200',
+      "rg -n 'git-fetch-flags|GIT_FETCH_FLAGS' . | head",
+      'tmp=$(mktemp -d)\ngit init -q "$tmp/work"\ngit -C "$tmp/work" fetch --filter=blob:none origin "$sha"',
+      "git --git-dir=/tmp/scratch/.git fetch origin main",
+    ]
+    for (const command of scratchCommands) {
+      assert.deepEqual(
+        checkReviewTrace(
+          [
+            traceSystemMessage(),
+            toolMessage("shell_command", { command: "git status", workdir: "/workspace" }, "first"),
+            toolResultMessage("first"),
+            toolMessage("shell_command", { command, workdir: "/workspace" }, "scratch"),
+            toolResultMessage("scratch"),
+          ],
+          undefined,
+          target,
+        ),
+        [],
+        command,
+      )
+    }
+    assert.deepEqual(
+      checkReviewTrace(
+        [
+          traceSystemMessage(),
+          toolMessage("shell_command", { command: "git status", workdir: "/workspace" }, "first"),
+          toolResultMessage("first"),
+          toolMessage(
+            "shell_command",
+            { command: 'git fetch origin "refs/pull/42/head"', workdir: "/workspace" },
+            "update",
+          ),
+          toolResultMessage("update"),
+        ],
+        undefined,
+        target,
+      ),
+      ["accessed the target repository outside the supplied copy"],
     )
   })
 
