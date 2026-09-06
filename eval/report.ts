@@ -186,17 +186,24 @@ function resourceLines(run: EvalRun): string[] {
     const why =
       usageUnavailable === undefined
         ? "This run recorded no Amp usage"
-        : `Amp reported no usage for ${countLabel(usageUnavailable.reviews, "review thread")} (${usageUnavailable.reasons.join("; ")})`
+        : `Amp reported no usage for ${countLabel(usageUnavailable.reviews, "review thread")} (${reasonList(usageUnavailable.reasons)})`
     lines.push(
       `Reviewer tokens from ${countLabel(traced.reviews, "trace")}: ${millions(traced.inputTokens)} input tokens (including cache reads and writes), ${millions(traced.outputTokens)} output tokens; median ${millions(traced.medianInputTokens)} input tokens per review. ${why}, so cost is unknown and tokens spent by delegated subagents are not counted.`,
     )
   }
   if (billed !== undefined && usageUnavailable !== undefined) {
     lines.push(
-      `Amp reported no usage for ${countLabel(usageUnavailable.reviews, "review thread")} (${usageUnavailable.reasons.join("; ")}); their cost is not in the total.`,
+      `Amp reported no usage for ${countLabel(usageUnavailable.reviews, "review thread")} (${reasonList(usageUnavailable.reasons)}); their cost is not in the total.`,
     )
   }
   return lines
+}
+
+/** The first few distinct reasons; a run with many different failures should not flood the summary. */
+function reasonList(reasons: string[]): string {
+  const shown = reasons.slice(0, 3)
+  const more = reasons.length - shown.length
+  return more > 0 ? `${shown.join("; ")}; and ${countLabel(more, "other reason")}` : shown.join("; ")
 }
 
 function sumTraceUsage(trace: unknown[]): { input: number; output: number } {

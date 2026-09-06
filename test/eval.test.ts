@@ -19,6 +19,7 @@ import {
   reviewAuthentication,
   reviewerEnvironment,
   runEvaluationReview,
+  execFailureReason,
   parseThreadUsage,
   usageUnavailableReason,
 } from "../eval/reviewer.js"
@@ -1705,6 +1706,15 @@ describe("eval scoring", () => {
     assert.equal(parseThreadUsage(withheld), null)
     assert.equal(usageUnavailableReason(withheld), "Usage information is currently unavailable for this thread.")
     assert.equal(usageUnavailableReason("# Thread Usage\n"), "amp threads usage printed no cost or token counts")
+
+    const failed = Object.assign(new Error("Command failed: node_modules/.bin/amp threads usage --details T-1"), {
+      code: 1,
+      stderr: "\nError: Thread not found\n",
+    })
+    assert.equal(execFailureReason(failed), "Error: Thread not found")
+    assert.equal(execFailureReason(Object.assign(new Error("Command failed"), { killed: true, stderr: "" })), "timed out")
+    assert.equal(execFailureReason(Object.assign(new Error("Command failed"), { code: 2, stderr: "" })), "exited with 2")
+    assert.equal(execFailureReason("boom"), "unknown error")
   })
 
   it("reports dropped raw findings and counts missed chances, not reviews", () => {

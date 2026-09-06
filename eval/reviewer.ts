@@ -249,8 +249,7 @@ export async function readThreadUsage(threadId: string, apiKey?: string): Promis
     const usage = parseThreadUsage(stdout)
     return usage === null ? { unavailable: usageUnavailableReason(stdout) } : { usage }
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    return { unavailable: `amp threads usage failed: ${firstLine(message)}` }
+    return { unavailable: `amp threads usage failed: ${execFailureReason(error)}` }
   } finally {
     if (home) await rm(home, { recursive: true, force: true }).catch(() => {})
   }
@@ -269,8 +268,21 @@ export function usageUnavailableReason(report: string): string {
   return explanation ?? "amp threads usage printed no cost or token counts"
 }
 
-function firstLine(text: string): string {
-  return text.split("\n")[0]?.trim() || "unknown error"
+/**
+ * A short, thread-independent reason for a failed `amp threads usage` call:
+ * the CLI's first stderr line when it printed one, otherwise the timeout or
+ * exit status. The exec error message itself is avoided because it repeats
+ * the command line, which would make every thread's reason unique.
+ */
+export function execFailureReason(error: unknown): string {
+  if (typeof error !== "object" || error === null) return "unknown error"
+  const { stderr, killed, code } = error as { stderr?: unknown; killed?: unknown; code?: unknown }
+  const stderrLine =
+    typeof stderr === "string" ? stderr.split("\n").find((line) => line.trim() !== "")?.trim() : undefined
+  if (stderrLine) return stderrLine
+  if (killed === true) return "timed out"
+  if (code !== undefined && code !== null) return `exited with ${String(code)}`
+  return "unknown error"
 }
 
 export function parseThreadUsage(report: string): ThreadUsage | null {
