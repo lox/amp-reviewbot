@@ -270,6 +270,8 @@ const sampleFields = {
   trace: z.array(z.unknown()).optional(),
   evidenceBoundaryViolations: z.array(z.string().min(1)).optional(),
   usage: threadUsageSchema.optional(),
+  /** Why `usage` is missing, when the lookup ran: Amp's explanation or the lookup error. */
+  usageUnavailable: z.string().min(1).optional(),
 }
 
 const completedSampleSchema = z

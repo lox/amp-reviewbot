@@ -19,7 +19,9 @@ import {
   reviewAuthentication,
   reviewerEnvironment,
   runEvaluationReview,
+  execFailureReason,
   parseThreadUsage,
+  usageUnavailableReason,
 } from "../eval/reviewer.js"
 import {
   finishJudgements,
@@ -1583,6 +1585,42 @@ describe("eval scoring", () => {
     assert.doesNotMatch(formatReport(withoutTimings), /Review time/)
   })
 
+  it("says why Amp reported no usage instead of implying the lookup never ran", () => {
+    const cases = [evalCase("blocking", blocking)]
+    const unavailable = "Usage information is currently unavailable for this thread."
+    const trace = [{ type: "assistant", message: { usage: { input_tokens: 1_000, output_tokens: 10 } } }]
+    const run = makeRun(cases, 3, [
+      {
+        ...completed("blocking", 1, blocking, "failure", [highFinding], [judgement([0], false)]),
+        reviewDurationMs: 60_000,
+        trace,
+        usageUnavailable: unavailable,
+      },
+      {
+        ...completed("blocking", 2, blocking, "failure", [highFinding], [judgement([0], false)]),
+        reviewDurationMs: 60_000,
+        trace,
+        usageUnavailable: unavailable,
+      },
+      {
+        ...failed("blocking", 3, blocking),
+        reviewDurationMs: 60_000,
+        trace,
+        usageUnavailable: "amp threads usage failed: Command failed",
+      },
+    ])
+
+    assert.deepEqual(reviewResources(run)!.usageUnavailable, {
+      reviews: 3,
+      reasons: ["Usage information is currently unavailable for this thread.", "amp threads usage failed: Command failed"],
+    })
+    assert.match(
+      formatReport(run),
+      /Amp reported no usage for 3 review threads \(Usage information is currently unavailable for this thread\.; amp threads usage failed: Command failed\), so cost is unknown/,
+    )
+    assert.doesNotMatch(formatReport(run), /recorded no Amp usage/)
+  })
+
   it("prefers the usage Amp billed over tokens summed from the trace", () => {
     const cases = [evalCase("blocking", blocking)]
     const usage = (costUsd: number, subscriptionUsed = false) => ({
@@ -1657,6 +1695,26 @@ describe("eval scoring", () => {
     assert.equal(covered.costUsd, 0)
     assert.equal(covered.subscriptionUsed, true)
     assert.equal(parseThreadUsage("# Thread Usage\n\nSomething else entirely\n"), null)
+
+    const withheld = [
+      "Review buildkite/agent#3907",
+      "Usage information is currently unavailable for this thread.",
+      "Details: https://ampcode.com/threads/T-1/usage",
+      "",
+      "## Orb System Metrics",
+    ].join("\n")
+    assert.equal(parseThreadUsage(withheld), null)
+    assert.equal(usageUnavailableReason(withheld), "Usage information is currently unavailable for this thread.")
+    assert.equal(usageUnavailableReason("# Thread Usage\n"), "amp threads usage printed no cost or token counts")
+
+    const failed = Object.assign(new Error("Command failed: node_modules/.bin/amp threads usage --details T-1"), {
+      code: 1,
+      stderr: "\nError: Thread not found\n",
+    })
+    assert.equal(execFailureReason(failed), "Error: Thread not found")
+    assert.equal(execFailureReason(Object.assign(new Error("Command failed"), { killed: true, stderr: "" })), "timed out")
+    assert.equal(execFailureReason(Object.assign(new Error("Command failed"), { code: 2, stderr: "" })), "exited with 2")
+    assert.equal(execFailureReason("boom"), "unknown error")
   })
 
   it("reports dropped raw findings and counts missed chances, not reviews", () => {

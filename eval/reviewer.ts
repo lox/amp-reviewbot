@@ -232,10 +232,12 @@ function hashId(userId: string): string {
  * What Amp billed for a review thread, read with `amp threads usage --details`
  * under the same account that ran the review. Works on archived threads, so
  * it runs after the review has returned and its deadline no longer applies.
- * Returns null when the lookup fails or the CLI output changed shape, so a
- * missing number is recorded as "not available" instead of as zero cost.
+ * When the numbers are missing, the result says why, so a run without cost
+ * figures can show whether Amp declined to report them or the lookup failed.
  */
-export async function readThreadUsage(threadId: string, apiKey?: string): Promise<ThreadUsage | null> {
+export type ThreadUsageLookup = { usage: ThreadUsage } | { unavailable: string }
+
+export async function readThreadUsage(threadId: string, apiKey?: string): Promise<ThreadUsageLookup> {
   let home: string | undefined
   try {
     if (apiKey) home = await mkdtemp(join(tmpdir(), "amp-reviewbot-usage-"))
@@ -244,12 +246,43 @@ export async function readThreadUsage(threadId: string, apiKey?: string): Promis
       ["threads", "usage", "--details", threadId],
       { env: reviewerEnvironment(apiKey, home), timeout: 30_000, maxBuffer: 4 * 1024 * 1024 },
     )
-    return parseThreadUsage(stdout)
-  } catch {
-    return null
+    const usage = parseThreadUsage(stdout)
+    return usage === null ? { unavailable: usageUnavailableReason(stdout) } : { usage }
+  } catch (error) {
+    return { unavailable: `amp threads usage failed: ${execFailureReason(error)}` }
   } finally {
     if (home) await rm(home, { recursive: true, force: true }).catch(() => {})
   }
+}
+
+/**
+ * Why a usage report had no numbers: Amp's own explanation when it printed
+ * one (for example "Usage information is currently unavailable for this
+ * thread."), otherwise a note that the output lacked the expected lines.
+ */
+export function usageUnavailableReason(report: string): string {
+  const explanation = report
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => /usage information/i.test(line))
+  return explanation ?? "amp threads usage printed no cost or token counts"
+}
+
+/**
+ * A short, thread-independent reason for a failed `amp threads usage` call:
+ * the CLI's first stderr line when it printed one, otherwise the timeout or
+ * exit status. The exec error message itself is avoided because it repeats
+ * the command line, which would make every thread's reason unique.
+ */
+export function execFailureReason(error: unknown): string {
+  if (typeof error !== "object" || error === null) return "unknown error"
+  const { stderr, killed, code } = error as { stderr?: unknown; killed?: unknown; code?: unknown }
+  const stderrLine =
+    typeof stderr === "string" ? stderr.split("\n").find((line) => line.trim() !== "")?.trim() : undefined
+  if (stderrLine) return stderrLine
+  if (killed === true) return "timed out"
+  if (code !== undefined && code !== null) return `exited with ${String(code)}`
+  return "unknown error"
 }
 
 export function parseThreadUsage(report: string): ThreadUsage | null {
