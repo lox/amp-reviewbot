@@ -1793,10 +1793,48 @@ describe("eval scoring", () => {
     ])
 
     const comparison = formatComparison({ name: "a.json", run: a }, { name: "b.json", run: b })
-    assert.match(comparison, /Compared on 2 shared code versions\. 1 version in only one run is left out\./)
+    assert.match(comparison, /Compared on 2 shared code versions\. Left out: 1 version in only one run\./)
+    assert.doesNotMatch(comparison, /Incomplete:/)
+    assert.match(comparison, /older rules/)
+    // The extra control in A is left out of A's scorecard, not just the per-version lists.
+    assert.match(comparison, /A:\n  Bad PRs blocked:.*\n  OK PRs wrongly blocked: 1 of 2 \(50%\) across 1 version without one/)
     assert.match(comparison, /Bad PRs blocked:\n  A 0 of 2 \(0%\), B 1 of 2 \(50%\)\.\n  B better on 1 version, A better on 0, same on 0\. Only 1 version differs: too few to tell from chance\.\n  B better:\n    #42 version: A 0 of 2 → B 1 of 2/)
     assert.match(comparison, /OK PRs wrongly blocked:\n  A 1 of 2 \(50%\), B 0 of 2 \(0%\)\.\n  B better on 1 version/)
     assert.match(comparison, /Right call on every version and repeat: A 0, B 1 of 2 versions\./)
+  })
+
+  it("leaves out a version whose commits or recorded issues changed between runs, and discloses missing reviews", () => {
+    const cases = [evalCase("control", control), evalCase("blocking", blocking)]
+    const a = makeRun(cases, 2, [
+      completed("control", 1, control, "success", [], []),
+      completed("control", 2, control, "success", [], []),
+      completed("blocking", 1, blocking, "failure", [highFinding], [judgement([0], false)]),
+      completed("blocking", 2, blocking, "failure", [highFinding], [judgement([0], false)]),
+    ])
+    const relabelled = evalCase("blocking", {
+      issues: [{ ...blocking.issues[0]!, severity: "medium" }],
+    })
+    const b = makeRun([cases[0]!, relabelled], 2, [
+      completed("control", 1, control, "success", [], []),
+      failed("control", 2, control),
+      completed("blocking", 1, relabelled.expected, "neutral", [mediumFinding], [judgement([0], false)]),
+      completed("blocking", 2, relabelled.expected, "neutral", [mediumFinding], [judgement([0], false)]),
+    ])
+
+    const comparison = formatComparison({ name: "a.json", run: a }, { name: "b.json", run: b })
+    assert.match(
+      comparison,
+      /Compared on 1 shared code version\. Left out: 1 version with different commits or recorded issues in the two runs \(the runs used different example packs\)\./,
+    )
+    assert.match(comparison, /Incomplete: B: 1 of 2 reviews count \(1 did not finish\)\. Missing reviews can tilt every number below/)
+    assert.match(comparison, /Bad PRs blocked:\n  no versions to compare/)
+    assert.match(comparison, /Clean PRs left alone:\n  A 2 of 2 \(100%\), B 1 of 1 \(100%\)\./)
+
+    const moved = makeRun([cases[0]!, { ...cases[1]!, headSha: "c".repeat(40) }], 2, a.samples)
+    assert.match(
+      formatComparison({ name: "a.json", run: a }, { name: "moved.json", run: moved }),
+      /Compared on 1 shared code version\. Left out: 1 version with different commits/,
+    )
 
     assert.equal(chanceSentence(0, 0), "No difference to weigh.")
     assert.match(chanceSentence(4, 1), /Only 5 versions differ: too few to tell from chance\./)
@@ -1909,7 +1947,10 @@ describe("eval scoring", () => {
       /Reviewer: Amp mode medium\. Model: not pinned\. SDK: test\. CLI: test-cli\./,
     )
     assert.match(researchReport, /Reported model IDs: test-judge, test-reviewer\./)
-    assert.doesNotMatch(researchReport, /HISTORICAL RESULT/)
+    assert.doesNotMatch(researchReport, /OLDER RULES/)
+    const olderReport = formatReport(evalRunSchema.parse(run))
+    assert.match(olderReport, /Review evaluation: OLDER RULES/)
+    assert.match(olderReport, /Use its counts for investigation, not comparison\./)
     const unreportedModelsRun = structuredClone(researchRun)
     unreportedModelsRun.samples[0]!.models = []
     if (unreportedModelsRun.samples[0]!.status !== "completed") {

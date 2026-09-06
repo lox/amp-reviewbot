@@ -12,36 +12,60 @@ type NamedRun = { name: string; run: EvalRun }
 
 /**
  * Puts two saved runs side by side. Each version is compared with itself, so
- * an easier or harder version cannot tilt the result, and versions present in
- * only one run are left out.
+ * an easier or harder version cannot tilt the result. A version counts as
+ * shared only when both runs reviewed the same commits against the same
+ * recorded issues; everything else is left out of every number shown.
  */
 export function formatComparison(a: NamedRun, b: NamedRun): string {
-  const scoreA = scoreRun(excludeRuleBreakingReviews(a.run).run)
-  const scoreB = scoreRun(excludeRuleBreakingReviews(b.run).run)
   const casesA = new Map(a.run.cases.map((evalCase) => [evalCase.id, evalCase]))
-  const shared = b.run.cases.filter((evalCase) => casesA.has(evalCase.id))
-  const onlyOne = a.run.cases.length + b.run.cases.length - 2 * shared.length
-  const differentIssues = shared.filter(
-    (evalCase) => casesA.get(evalCase.id)!.expected.issues.length !== evalCase.expected.issues.length,
-  ).length
+  const shared: EvalCase[] = []
+  let changed = 0
+  for (const evalCase of b.run.cases) {
+    const other = casesA.get(evalCase.id)
+    if (!other) continue
+    if (sameVersion(other, evalCase)) shared.push(evalCase)
+    else changed += 1
+  }
+  const onlyOne = a.run.cases.length + b.run.cases.length - 2 * (shared.length + changed)
+  const sharedIds = new Set(shared.map((evalCase) => evalCase.id))
+  const scoredA = scoreShared(a.run, sharedIds)
+  const scoredB = scoreShared(b.run, sharedIds)
 
+  const leftOut = [
+    onlyOne > 0 ? `${countLabel(onlyOne, "version")} in only one run` : "",
+    changed > 0
+      ? `${countLabel(changed, "version")} with different commits or recorded issues in the two runs (the runs used different example packs)`
+      : "",
+  ].filter((part) => part !== "")
   const lines = [
     `A: ${a.name}`,
     `   reviewer ${describeReviewer(a.run)}`,
     `B: ${b.name}`,
     `   reviewer ${describeReviewer(b.run)}`,
     "",
-    `Compared on ${countLabel(shared.length, "shared code version")}.${onlyOne > 0 ? ` ${countLabel(onlyOne, "version")} in only one run ${onlyOne === 1 ? "is" : "are"} left out.` : ""}${differentIssues > 0 ? ` ${countLabel(differentIssues, "version")} ${differentIssues === 1 ? "has" : "have"} a different recorded-issue count in the two runs; the runs used different example packs.` : ""}`,
+    `Compared on ${countLabel(shared.length, "shared code version")}.${leftOut.length > 0 ? ` Left out: ${leftOut.join("; ")}.` : ""}`,
+  ]
+  const gaps = [...gapSentences("A", scoredA), ...gapSentences("B", scoredB)]
+  if (gaps.length > 0) {
+    lines.push(
+      `Incomplete: ${gaps.join(" ")} Missing reviews can tilt every number below, so treat any difference as tentative.`,
+    )
+  }
+  if (a.run.reviewer.protocol === undefined || b.run.reviewer.protocol === undefined) {
+    lines.push(
+      "At least one run used older rules that allowed access to the target pull request and repository history; its numbers are not comparable.",
+    )
+  }
+  lines.push(
     "",
     "A:",
-    ...scorecardLines(scoreA.scorecard).map((line) => `  ${line}`),
+    ...scorecardLines(scoredA.score.scorecard).map((line) => `  ${line}`),
     "B:",
-    ...scorecardLines(scoreB.scorecard).map((line) => `  ${line}`),
-  ]
+    ...scorecardLines(scoredB.score.scorecard).map((line) => `  ${line}`),
+  )
 
-  const sharedIds = new Set(shared.map((evalCase) => evalCase.id))
-  const scoresA = new Map(scoreA.cases.map((item) => [item.caseId, item]))
-  const scoresB = new Map(scoreB.cases.map((item) => [item.caseId, item]))
+  const scoresA = new Map(scoredA.score.cases.map((item) => [item.caseId, item]))
+  const scoresB = new Map(scoredB.score.cases.map((item) => [item.caseId, item]))
   const versions = shared.map((evalCase) => ({
     evalCase,
     a: scoresA.get(evalCase.id),
@@ -77,12 +101,58 @@ export function formatComparison(a: NamedRun, b: NamedRun): string {
   for (const metric of metrics) {
     lines.push("", `${metric.title}:`, ...metricComparison(versions, metric).map((line) => `  ${line}`))
   }
+  const cardA = scoredA.score.scorecard
+  const cardB = scoredB.score.scorecard
   lines.push(
     "",
-    `Right call on every version and repeat: A ${rightEveryTime(scoreA, sharedIds)}, B ${rightEveryTime(scoreB, sharedIds)} of ${shared.length} versions.`,
-    `Recorded advisory issues found: A ${fraction(scoreA.scorecard.advisoryIssues.found, scoreA.scorecard.advisoryIssues.chances)}, B ${fraction(scoreB.scorecard.advisoryIssues.found, scoreB.scorecard.advisoryIssues.chances)}. The recorded list is incomplete, so read this as a relative signal only.`,
+    `Right call on every version and repeat: A ${rightEveryTime(scoredA.score)}, B ${rightEveryTime(scoredB.score)} of ${shared.length} versions.`,
+    `Recorded advisory issues found: A ${fraction(cardA.advisoryIssues.found, cardA.advisoryIssues.chances)}, B ${fraction(cardB.advisoryIssues.found, cardB.advisoryIssues.chances)}. The recorded list is incomplete, so read this as a relative signal only.`,
   )
   return lines.join("\n")
+}
+
+/** Same code and same recorded issues, so a score difference is down to the reviewer. */
+function sameVersion(a: EvalCase, b: EvalCase): boolean {
+  return (
+    a.repositoryFullName === b.repositoryFullName &&
+    a.pullNumber === b.pullNumber &&
+    a.baseSha === b.baseSha &&
+    a.headSha === b.headSha &&
+    issueKey(a) === issueKey(b)
+  )
+}
+
+function issueKey(evalCase: EvalCase): string {
+  return JSON.stringify(
+    evalCase.expected.issues
+      .map(({ id, severity, path, changedLine }) => ({ id, severity, path, changedLine }))
+      .sort((left, right) => left.id.localeCompare(right.id)),
+  )
+}
+
+type ScoredRun = { score: EvalScore; excluded: number }
+
+/** Scores only the shared versions, after dropping reviews that broke the rules. */
+function scoreShared(run: EvalRun, ids: Set<string>): ScoredRun {
+  const { run: checked, excluded } = excludeRuleBreakingReviews({
+    ...run,
+    cases: run.cases.filter((evalCase) => ids.has(evalCase.id)),
+    samples: run.samples.filter((sample) => ids.has(sample.caseId)),
+  })
+  return { score: scoreRun(checked), excluded }
+}
+
+function gapSentences(name: string, { score, excluded }: ScoredRun): string[] {
+  const unfinished = score.reviews - score.completedReviews - excluded
+  const parts = [
+    excluded > 0 ? `${excluded} broke the review rules` : "",
+    unfinished > 0 ? `${unfinished} did not finish` : "",
+    score.uncheckedIssues > 0
+      ? `${countLabel(score.uncheckedIssues, "recorded issue")} ${score.uncheckedIssues === 1 ? "was" : "were"} not checked against the findings`
+      : "",
+  ].filter((part) => part !== "")
+  if (parts.length === 0) return []
+  return [`${name}: ${score.completedReviews} of ${score.reviews} reviews count (${parts.join("; ")}).`]
 }
 
 function metricComparison(
@@ -148,10 +218,8 @@ function binomial(n: number, k: number): number {
   return result
 }
 
-function rightEveryTime(score: EvalScore, ids: Set<string>): number {
-  return score.cases.filter(
-    (item) => ids.has(item.caseId) && item.completed > 0 && item.rightCalls === item.completed,
-  ).length
+function rightEveryTime(score: EvalScore): number {
+  return score.cases.filter((item) => item.completed > 0 && item.rightCalls === item.completed).length
 }
 
 function describeReviewer(run: EvalRun): string {

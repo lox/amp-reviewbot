@@ -40,7 +40,7 @@ This is a rule plus a trace check, not a secure sandbox. A reviewer trying to ch
 
 The example data, recorded issues, focused tests, paired versions, and previous results remain private. Review calls require `AMP_EVAL_REVIEWER_API_KEY` from a separate identity that cannot access them. The review process receives only that key, an empty home directory, one prepared source copy, the pull-request context captured before the run, and the normal review instructions. A trusted local login is used later to compare findings with the recorded issues.
 
-Result files from before the current access rules are no longer reported separately; do not compare them with current runs.
+Result files from before the current access rules are labelled `OLDER RULES` in the report and flagged by `compare`; do not compare them with current runs.
 
 ## Amp mode and model
 
@@ -149,7 +149,7 @@ Three repeats support a development check, not a broad accuracy claim: 3 of 3 is
 
 ## Comparing two runs
 
-`compare` puts a baseline and a candidate side by side. It matches each version with itself, so a hard version cannot tilt the result, and leaves out versions present in only one run. For each of the three scorecard numbers it lists the versions where the candidate did better and where the baseline did better:
+`compare` puts a baseline and a candidate side by side. It matches each version with itself, so a hard version cannot tilt the result. A version counts as shared only when both runs reviewed the same commits against the same recorded issues (same IDs, severities, and lines); versions present in only one run, or changed between packs, are left out of every number shown, including the two scorecards. If either run has reviews that did not finish, broke the rules, or left recorded issues unchecked, an `Incomplete` line says how many and warns that the difference is tentative. For each of the three scorecard numbers it lists the versions where the candidate did better and where the baseline did better:
 
 ```text
 Bad PRs blocked:

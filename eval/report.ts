@@ -7,10 +7,13 @@ export function formatReport(savedRun: EvalRun): string {
   // that never finished; the other reviews in the run remain comparable.
   const { run, excluded: traceProblems } = excludeRuleBreakingReviews(savedRun)
   const score = scoreRun(run)
+  const usesCurrentRules = run.reviewer.protocol !== undefined
   const lines = [
-    "Review evaluation: PUBLIC RESEARCH ALLOWED",
+    `Review evaluation: ${usesCurrentRules ? "PUBLIC RESEARCH ALLOWED" : "OLDER RULES"}`,
     `Recorded result: ${reportVerdict(score, traceProblems)}`,
-    "The reviewer could research anything public except this pull request and another copy or later version of the target repository.",
+    usesCurrentRules
+      ? "The reviewer could research anything public except this pull request and another copy or later version of the target repository."
+      : "This older run allowed access to the target pull request and repository history. Use its counts for investigation, not comparison.",
     `Reviewer: Amp mode ${run.reviewer.mode}. Model: ${run.reviewer.model ?? "not pinned"}. SDK: ${run.reviewer.sdkVersion}. CLI: ${run.reviewer.cliVersion ?? "not recorded"}.`,
     modelSentence(savedRun),
     "",
