@@ -112,6 +112,8 @@ export interface ReviewResources {
     requests: number
     subscriptionUsed: boolean
   }
+  /** Reviews whose usage lookup ran but returned no numbers, grouped by the reason recorded. */
+  usageUnavailable?: { reviews: number; reasons: string[] }
   /** Tokens summed from the assistant turns in the saved traces (no subagent turns, no cost). */
   traced?: {
     reviews: number
@@ -129,6 +131,7 @@ export function reviewResources(run: EvalRun): ReviewResources | undefined {
   const durations = run.samples.flatMap((sample) => sample.reviewDurationMs ?? [])
   if (durations.length === 0) return undefined
   const usages = run.samples.flatMap((sample) => sample.usage ?? [])
+  const unavailable = run.samples.flatMap((sample) => sample.usageUnavailable ?? [])
   // An empty trace means Amp never started, so there is no usage to count.
   const traced = run.samples.flatMap((sample) =>
     sample.trace === undefined || sample.trace.length === 0 ? [] : [sumTraceUsage(sample.trace)],
@@ -151,6 +154,9 @@ export function reviewResources(run: EvalRun): ReviewResources | undefined {
             subscriptionUsed: usages.some((usage) => usage.subscriptionUsed),
           },
         }),
+    ...(unavailable.length === 0
+      ? {}
+      : { usageUnavailable: { reviews: unavailable.length, reasons: [...new Set(unavailable)].sort() } }),
     ...(traced.length === 0
       ? {}
       : {
@@ -170,15 +176,24 @@ function resourceLines(run: EvalRun): string[] {
   const lines = [
     `Review time: ${countLabel(resources.reviews, "review")} took ${hours(resources.totalReviewMs)} in total; median ${minutes(resources.medianReviewMs)}, longest ${minutes(resources.longestReviewMs)}.`,
   ]
-  const { billed, traced } = resources
+  const { billed, traced, usageUnavailable } = resources
   if (billed !== undefined) {
     const coverage = billed.reviews === resources.reviews ? "" : ` (${billed.reviews} of ${resources.reviews} reviews reported usage)`
     lines.push(
       `Amp usage${coverage}: $${billed.costUsd.toFixed(2)} in credits, ${millions(billed.inputTokens)} input tokens, ${millions(billed.outputTokens)} output tokens, ${countLabel(billed.requests, "model request")}; median $${billed.medianCostUsd.toFixed(2)} per review. Subagent threads are included.${billed.subscriptionUsed ? " A subscription covered some inference, so credits understate the cost." : ""}`,
     )
   } else if (traced !== undefined) {
+    const why =
+      usageUnavailable === undefined
+        ? "This run recorded no Amp usage"
+        : `Amp reported no usage for ${countLabel(usageUnavailable.reviews, "review thread")} (${usageUnavailable.reasons.join("; ")})`
     lines.push(
-      `Reviewer tokens from ${countLabel(traced.reviews, "trace")}: ${millions(traced.inputTokens)} input tokens (including cache reads and writes), ${millions(traced.outputTokens)} output tokens; median ${millions(traced.medianInputTokens)} input tokens per review. This run recorded no Amp usage, so cost is unknown and tokens spent by delegated subagents are not counted.`,
+      `Reviewer tokens from ${countLabel(traced.reviews, "trace")}: ${millions(traced.inputTokens)} input tokens (including cache reads and writes), ${millions(traced.outputTokens)} output tokens; median ${millions(traced.medianInputTokens)} input tokens per review. ${why}, so cost is unknown and tokens spent by delegated subagents are not counted.`,
+    )
+  }
+  if (billed !== undefined && usageUnavailable !== undefined) {
+    lines.push(
+      `Amp reported no usage for ${countLabel(usageUnavailable.reviews, "review thread")} (${usageUnavailable.reasons.join("; ")}); their cost is not in the total.`,
     )
   }
   return lines

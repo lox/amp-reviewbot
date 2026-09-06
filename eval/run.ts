@@ -348,6 +348,7 @@ async function runReviewSample(
   let models: string[] = []
   let trace: unknown[] = []
   let usage: ThreadUsage | undefined
+  let usageUnavailable: string | undefined
   let reviewDurationMs: number | undefined
   const job = evalJob(evalCase, sample)
   const target = {
@@ -378,7 +379,11 @@ async function runReviewSample(
     // The review is over and its deadline no longer applies; the usage lookup
     // is bookkeeping that must not change the review's status or duration.
     clearTimeout(timeout)
-    if (threadId !== null) usage = (await readThreadUsage(threadId, options.reviewerApiKey)) ?? undefined
+    if (threadId !== null) {
+      const lookup = await readThreadUsage(threadId, options.reviewerApiKey)
+      if ("usage" in lookup) usage = lookup.usage
+      else usageUnavailable = lookup.unavailable
+    }
     const evidenceBoundaryViolations = checkReviewTrace(
       trace,
       sourcePreparation,
@@ -401,6 +406,7 @@ async function runReviewSample(
         trace,
         evidenceBoundaryViolations,
         usage,
+        usageUnavailable,
         status: "error",
         error: review.error,
       }
@@ -422,6 +428,7 @@ async function runReviewSample(
       trace,
       evidenceBoundaryViolations,
       usage,
+      usageUnavailable,
       status: "completed",
       rawResult: review.rawResult,
       parsedResult,
@@ -453,6 +460,7 @@ async function runReviewSample(
         "plugin",
       ),
       usage,
+      usageUnavailable,
       status: "error",
       error: errorMessage(error),
     }

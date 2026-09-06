@@ -232,10 +232,12 @@ function hashId(userId: string): string {
  * What Amp billed for a review thread, read with `amp threads usage --details`
  * under the same account that ran the review. Works on archived threads, so
  * it runs after the review has returned and its deadline no longer applies.
- * Returns null when the lookup fails or the CLI output changed shape, so a
- * missing number is recorded as "not available" instead of as zero cost.
+ * When the numbers are missing, the result says why, so a run without cost
+ * figures can show whether Amp declined to report them or the lookup failed.
  */
-export async function readThreadUsage(threadId: string, apiKey?: string): Promise<ThreadUsage | null> {
+export type ThreadUsageLookup = { usage: ThreadUsage } | { unavailable: string }
+
+export async function readThreadUsage(threadId: string, apiKey?: string): Promise<ThreadUsageLookup> {
   let home: string | undefined
   try {
     if (apiKey) home = await mkdtemp(join(tmpdir(), "amp-reviewbot-usage-"))
@@ -244,12 +246,31 @@ export async function readThreadUsage(threadId: string, apiKey?: string): Promis
       ["threads", "usage", "--details", threadId],
       { env: reviewerEnvironment(apiKey, home), timeout: 30_000, maxBuffer: 4 * 1024 * 1024 },
     )
-    return parseThreadUsage(stdout)
-  } catch {
-    return null
+    const usage = parseThreadUsage(stdout)
+    return usage === null ? { unavailable: usageUnavailableReason(stdout) } : { usage }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    return { unavailable: `amp threads usage failed: ${firstLine(message)}` }
   } finally {
     if (home) await rm(home, { recursive: true, force: true }).catch(() => {})
   }
+}
+
+/**
+ * Why a usage report had no numbers: Amp's own explanation when it printed
+ * one (for example "Usage information is currently unavailable for this
+ * thread."), otherwise a note that the output lacked the expected lines.
+ */
+export function usageUnavailableReason(report: string): string {
+  const explanation = report
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => /usage information/i.test(line))
+  return explanation ?? "amp threads usage printed no cost or token counts"
+}
+
+function firstLine(text: string): string {
+  return text.split("\n")[0]?.trim() || "unknown error"
 }
 
 export function parseThreadUsage(report: string): ThreadUsage | null {
