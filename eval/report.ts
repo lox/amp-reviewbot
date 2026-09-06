@@ -1,6 +1,5 @@
 import type { EvalCase, EvalRun, EvalSample } from "./schema.js"
-import { expectedKind } from "./schema.js"
-import { scoreRun, type EvalScore } from "./score.js"
+import { scoreRun, type CaseScore, type EvalScore, type Scorecard } from "./score.js"
 import { checkReviewTrace, sourcePreparationFromPrompt } from "./evidence.js"
 
 export function formatReport(savedRun: EvalRun): string {
@@ -8,49 +7,51 @@ export function formatReport(savedRun: EvalRun): string {
   // that never finished; the other reviews in the run remain comparable.
   const { run, excluded: traceProblems } = excludeRuleBreakingReviews(savedRun)
   const score = scoreRun(run)
-  const usesCurrentRules = run.reviewer.protocol?.startsWith("research-enabled-target-frozen") ?? false
-  const lines = usesCurrentRules
-    ? [
-        "Review evaluation: PUBLIC RESEARCH ALLOWED",
-        `Recorded result: ${reportVerdict(score)}`,
-        "The reviewer could research anything public except this pull request and another copy or later version of the target repository.",
-        `Reviewer: Amp mode ${run.reviewer.mode}. Model: ${run.reviewer.model ?? "not pinned"}. SDK: ${run.reviewer.sdkVersion}. CLI: ${run.reviewer.cliVersion ?? "not recorded"}.`,
-        modelSentence(savedRun),
-        "",
-      ]
-    : [
-        "Review evaluation: HISTORICAL RESULT",
-        `Recorded result: ${reportVerdict(score)}`,
-        "This older run allowed access to the target pull request and repository history. Use its counts for investigation, not comparison.",
-        "",
-      ]
-  const counts = countKinds(run.cases)
-  const seedCounts = countSeedOutcomes(score)
-  lines.push(
-    `${countLabel(score.seeds.length, "pull-request example")}: ${seedCounts.pass} pass, ${seedCounts.unstable} unstable, ${seedCounts.fail} fail.`,
-    `${versionCount(counts.control, "with no recorded issues")}, ${versionCount(counts.advisory, "with recorded non-blocking issues")}, and ${versionCount(counts.blocking, "with recorded blocking issues")}.`,
-    `Each was reviewed ${run.requestedSamplesPerCase} ${run.requestedSamplesPerCase === 1 ? "time" : "times"}. ${completionSentence(run, score)}`,
-    "One repeat passes only when every version finds every recorded issue with the right urgency and raises no alert on a version with no recorded issues.",
-  )
+  const lines = [
+    "Review evaluation: PUBLIC RESEARCH ALLOWED",
+    `Recorded result: ${reportVerdict(score, traceProblems)}`,
+    "The reviewer could research anything public except this pull request and another copy or later version of the target repository.",
+    `Reviewer: Amp mode ${run.reviewer.mode}. Model: ${run.reviewer.model ?? "not pinned"}. SDK: ${run.reviewer.sdkVersion}. CLI: ${run.reviewer.cliVersion ?? "not recorded"}.`,
+    modelSentence(savedRun),
+    "",
+    `Scorecard: ${countLabel(run.cases.length, "code version")} from ${countLabel(score.seeds.length, "pull request")}, each reviewed ${run.requestedSamplesPerCase} ${run.requestedSamplesPerCase === 1 ? "time" : "times"}; ${completionSentence(score)}`,
+    ...scorecardLines(score.scorecard).map((line) => `  ${line}`),
+    "Right call: a version with a recorded blocking bug is blocked for that bug at blocking urgency; every other version is not blocked.",
+    `${countLabel(score.seeds.length, "pull-request example")}: ${seedOutcomeSentence(score)}.`,
+  ]
   if (traceProblems > 0) {
     lines.push(
       `${traceProblems} review ${traceProblems === 1 ? "did" : "runs did"} not follow the review rules and ${traceProblems === 1 ? "is" : "are"} excluded from these counts.`,
     )
   }
+  if (score.uncheckedIssues > 0) {
+    lines.push(
+      `${countLabel(score.uncheckedIssues, "recorded issue")} could not be checked against the findings; run \`finish\` to complete the comparison.`,
+    )
+  }
   lines.push(...resourceLines(savedRun))
 
   const scores = new Map(score.cases.map((caseScore) => [caseScore.caseId, caseScore]))
-  const samples = new Map<string, EvalSample[]>()
-  for (const sample of run.samples) {
-    const caseSamples = samples.get(sample.caseId) ?? []
-    caseSamples.push(sample)
-    samples.set(sample.caseId, caseSamples)
-  }
   const examples = new Map<string, EvalCase[]>()
   for (const evalCase of run.cases) {
     const cases = examples.get(evalCase.seedId) ?? []
     cases.push(evalCase)
     examples.set(evalCase.seedId, cases)
+  }
+
+  const wronglyBlocked = run.cases
+    .map((evalCase) => ({ evalCase, score: scores.get(evalCase.id) }))
+    .filter((item) => item.score !== undefined && item.score.wronglyBlocked > 0)
+    .sort((left, right) => right.score!.wronglyBlocked - left.score!.wronglyBlocked)
+  if (wronglyBlocked.length > 0) {
+    lines.push(
+      "",
+      "Wrongly blocked (check the source; a justified block means the recorded issues are incomplete):",
+      ...wronglyBlocked.map(
+        ({ evalCase, score }) =>
+          `  #${evalCase.pullNumber} ${versionLabel(evalCase).toLowerCase()}: blocked in ${score!.wronglyBlocked} of ${score!.completed}`,
+      ),
+    )
   }
 
   let exampleNumber = 0
@@ -60,26 +61,36 @@ export function formatReport(savedRun: EvalRun): string {
     const seed = seedScores.get(cases[0]!.seedId)!
     lines.push(
       "",
-      `Example ${exampleNumber} (pull request #${cases[0]!.pullNumber}): ${seed.outcome.toUpperCase()} (${seed.passedSamples}/${seed.samples} repeats passed)`,
+      `Example ${exampleNumber} (pull request #${cases[0]!.pullNumber}): ${seed.outcome.toUpperCase()} (right call in ${seed.passedSamples}/${seed.samples} repeats)`,
     )
     for (const evalCase of cases) {
       const caseScore = scores.get(evalCase.id)
       if (!caseScore) continue
-      lines.push(`  ${caseResult(evalCase, caseScore, samples.get(evalCase.id) ?? [])}`)
+      lines.push(`  ${caseResult(evalCase, caseScore)}`)
     }
   }
 
   lines.push(
     "",
-    "Bottom line",
-    `  ${bottomLine(run, score, traceProblems, usesCurrentRules)}`,
-    "",
-  )
-  lines.push(
     `Evidence: ${run.cases.length} code versions and ${run.samples.length} review runs.`,
     "This result covers only these examples; it is not a general quality claim.",
   )
   return lines.join("\n")
+}
+
+export function scorecardLines(card: Scorecard): string[] {
+  const { badPrs, okPrs, cleanPrs, advisoryIssues } = card
+  return [
+    `Bad PRs blocked:        ${fraction(badPrs.blocked, badPrs.reviews)} across ${countLabel(badPrs.versions, "version")} with a recorded blocking bug; ${badPrs.versionsRightEveryTime} blocked every time.${badPrs.reviews === 0 ? "" : ` Of the rest: ${badPrs.blockedForOtherReason} blocked for something else, ${badPrs.foundAtLowerUrgency} found the bug at lower urgency, ${badPrs.missed} missed it.`}`,
+    `OK PRs wrongly blocked: ${fraction(okPrs.wronglyBlocked, okPrs.reviews)} across ${countLabel(okPrs.versions, "version")} without one; ${okPrs.versionsRightEveryTime} never blocked.`,
+    `Clean PRs left alone:   ${fraction(cleanPrs.quiet, cleanPrs.reviews)} across ${countLabel(cleanPrs.versions, "version")} with no recorded issues.`,
+    `Recorded advisory issues found: ${fraction(advisoryIssues.found, advisoryIssues.chances)}.`,
+  ]
+}
+
+export function fraction(count: number, total: number): string {
+  if (total === 0) return "none to count"
+  return `${count} of ${total} (${Math.round((count / total) * 100)}%)`
 }
 
 function modelSentence(run: EvalRun): string {
@@ -247,91 +258,77 @@ function millions(tokens: number): string {
   return tokens < 1_000_000 ? `${Math.round(tokens / 1_000)}k` : `${(tokens / 1_000_000).toFixed(1)}M`
 }
 
-function countSeedOutcomes(score: EvalScore): Record<"pass" | "unstable" | "fail", number> {
+function seedOutcomeSentence(score: EvalScore): string {
   const counts = { pass: 0, unstable: 0, fail: 0 }
   for (const seed of score.seeds) counts[seed.outcome] += 1
-  return counts
+  return `${counts.pass} pass, ${counts.unstable} unstable, ${counts.fail} fail`
 }
 
-function countKinds(cases: EvalCase[]): Record<"control" | "advisory" | "blocking", number> {
-  const counts = { control: 0, advisory: 0, blocking: 0 }
-  for (const evalCase of cases) counts[expectedKind(evalCase.expected)] += 1
-  return counts
-}
-
-function countLabel(count: number, singular: string): string {
+export function countLabel(count: number, singular: string): string {
   return `${count} ${singular}${count === 1 ? "" : "s"}`
 }
 
-function versionCount(count: number, description: string): string {
-  return `${count} ${count === 1 ? "version" : "versions"} ${description}`
+function completionSentence(score: EvalScore): string {
+  return score.completedReviews === score.reviews
+    ? `all ${score.reviews} reviews completed.`
+    : `${score.completedReviews} of ${score.reviews} reviews completed.`
 }
 
-function completionSentence(run: EvalRun, score: EvalScore): string {
-  const completed = rateCount(score.operationalCompletion, run.samples.length)
-  return completed === run.samples.length
-    ? `All ${run.samples.length} reviews completed.`
-    : `${completed} of ${run.samples.length} reviews completed.`
+export function versionLabel(evalCase: EvalCase): string {
+  return evalCase.versionRole === "baseline"
+    ? "Baseline"
+    : evalCase.versionRole === "introduced-issue"
+      ? "Introduced-issue version"
+      : "Version"
 }
 
-function caseResult(
-  evalCase: EvalCase,
-  score: EvalScore["cases"][number],
-  samples: EvalSample[],
-): string {
-  const kind = expectedKind(evalCase.expected)
-  const role =
-    evalCase.versionRole === "baseline"
-      ? "Baseline"
-      : evalCase.versionRole === "introduced-issue"
-        ? "Introduced-issue version"
-        : "Version"
-  const completed = rateCount(score.operationalCompletion, score.samples)
-  if (kind === "control") {
-    if (completed === 0) return `${role}, no recorded issues: no reviews completed`
-    const cleanAlerts = rateCount(score.cleanAlertRate, completed)
-    return `${role}, no recorded issues: ${completed - cleanAlerts} of ${completed} completed reviews raised no alert${droppedFindingsText(droppedFindings(samples))}`
-  }
-  const opportunities = score.samples * score.knownIssues
-  const found = rateCount(score.issueDetectionRate, opportunities)
-  const rightResponse = rateCount(score.groundedConclusionAgreement, score.samples)
+function caseResult(evalCase: EvalCase, score: CaseScore): string {
+  const role = versionLabel(evalCase)
   const label =
-    kind === "advisory" ? "recorded non-blocking issues" : "recorded blocking issues"
-  const retainedFindings = samples.reduce(
-    (total, sample) =>
-      total + (sample.status === "completed" ? sample.retainedResult.findings.length : 0),
-    0,
-  )
-  const otherFindings = Math.max(0, retainedFindings - found)
-  const otherFindingsText =
-    otherFindings === 0
-      ? ""
-      : `; ${otherFindings} unmatched ${otherFindings === 1 ? "finding needs" : "findings need"} source checking`
-  const foundText =
-    score.knownIssues === 1
-      ? `found in ${found} of ${score.samples}`
-      : `${found} of ${opportunities} known issues found`
-  return `${role}, ${label}: ${foundText}; response matched the recorded issues in ${rightResponse} of ${score.samples}${otherFindingsText}${droppedFindingsText(droppedFindings(samples))}`
+    score.kind === "control"
+      ? "no recorded issues"
+      : score.kind === "advisory"
+        ? "recorded non-blocking issues"
+        : "recorded blocking bug"
+  if (score.completed === 0) return `${role}, ${label}: no reviews completed`
+
+  const parts: string[] = []
+  if (score.kind === "blocking") {
+    parts.push(`blocked for it in ${score.blockedForRecordedBug} of ${score.completed}`)
+    if (score.blockedForOtherReason > 0) parts.push(`blocked for something else in ${score.blockedForOtherReason}`)
+    if (score.foundAtLowerUrgency > 0) parts.push(`found it at lower urgency in ${score.foundAtLowerUrgency}`)
+    if (score.missed > 0) parts.push(`missed it in ${score.missed}`)
+  } else if (score.kind === "advisory") {
+    parts.push(`not blocked in ${score.completed - score.wronglyBlocked} of ${score.completed}`)
+    if (score.wronglyBlocked > 0) parts.push(`wrongly blocked in ${score.wronglyBlocked}`)
+  } else {
+    parts.push(`left alone in ${score.quiet} of ${score.completed}`)
+    const flagged = score.completed - score.quiet - score.wronglyBlocked
+    if (flagged > 0) parts.push(`raised a non-blocking finding in ${flagged}`)
+    if (score.wronglyBlocked > 0) parts.push(`wrongly blocked in ${score.wronglyBlocked}`)
+  }
+  if (score.advisoryChances > 0) {
+    parts.push(`${score.advisoryFound} of ${score.advisoryChances} recorded advisory issues found`)
+  }
+  if (score.unmatchedFindings > 0) {
+    parts.push(
+      `${score.unmatchedFindings} unmatched ${score.unmatchedFindings === 1 ? "finding needs" : "findings need"} source checking`,
+    )
+  }
+  if (score.droppedFindings > 0) {
+    parts.push(
+      `${score.droppedFindings} raw ${score.droppedFindings === 1 ? "finding" : "findings"} dropped for not pointing at a changed line`,
+    )
+  }
+  if (score.uncheckedIssues > 0) {
+    parts.push(`${countLabel(score.uncheckedIssues, "recorded issue")} not yet checked`)
+  }
+  return `${role}, ${label}: ${parts.join("; ")}`
 }
 
-function droppedFindings(samples: EvalSample[]): number {
-  return samples.reduce(
-    (total, sample) => total + (sample.status === "completed" ? sample.omitted : 0),
-    0,
-  )
-}
-
-function droppedFindingsText(dropped: number): string {
-  if (dropped === 0) return ""
-  return `; ${dropped} raw ${dropped === 1 ? "finding" : "findings"} dropped for not pointing at a changed line`
-}
-
-function reportVerdict(score: EvalScore): string {
+function reportVerdict(score: EvalScore, traceProblems: number): string {
   if (score.seeds.length === 0) return "INCOMPLETE"
-  if (
-    score.operationalCompletion < 1 ||
-    (score.judgeCoverage !== null && score.judgeCoverage < 1)
-  ) {
+  if (traceProblems > 0 || score.completedReviews < score.reviews || score.uncheckedIssues > 0) {
     return "INCOMPLETE"
   }
   if (score.seeds.some((seed) => seed.outcome === "fail")) return "NEEDS WORK"
@@ -339,91 +336,7 @@ function reportVerdict(score: EvalScore): string {
   return "PASSED THESE EXAMPLES"
 }
 
-function bottomLine(
-  run: EvalRun,
-  score: EvalScore,
-  traceProblems: number,
-  usesCurrentRules: boolean,
-): string {
-  const scopePrefix = usesCurrentRules
-    ? "Under these review rules,"
-    : "For investigation only;"
-  if (!usesCurrentRules && traceProblems > 0) {
-    return `This historical run is for investigation only. Its trace also shows that ${traceProblems} review ${traceProblems === 1 ? "did" : "runs did"} not follow the current rules.`
-  }
-  if (traceProblems > 0) {
-    return `${scopePrefix} ${traceProblems} review ${traceProblems === 1 ? "did" : "runs did"} not follow the source setup or target repository rules and ${traceProblems === 1 ? "was" : "were"} excluded, so the recorded counts are incomplete.`
-  }
-  if (score.operationalCompletion < 1) {
-    return `${scopePrefix} some reviews did not finish, so the recorded counts are incomplete.`
-  }
-  if (score.judgeCoverage !== null && score.judgeCoverage < 1) {
-    return `${scopePrefix} some findings could not be checked against the known issues, so the recorded counts are incomplete.`
-  }
-  const cases = new Map(run.cases.map((evalCase) => [evalCase.id, evalCase]))
-  const cleanScores = score.cases.filter(
-    (caseScore) => expectedKind(cases.get(caseScore.caseId)!.expected) === "control",
-  )
-  const bugScores = score.cases.filter(
-    (caseScore) => expectedKind(cases.get(caseScore.caseId)!.expected) !== "control",
-  )
-  const cleanAlerts = cleanScores.reduce((total, caseScore) => {
-    const completed = rateCount(caseScore.operationalCompletion, caseScore.samples)
-    return total + rateCount(caseScore.cleanAlertRate, completed)
-  }, 0)
-  const issueChances = bugScores.reduce(
-    (total, caseScore) => total + caseScore.samples * caseScore.knownIssues,
-    0,
-  )
-  const bugVersionReviews = bugScores.reduce((total, caseScore) => total + caseScore.samples, 0)
-  const bugsFound = bugScores.reduce(
-    (total, caseScore) =>
-      total + rateCount(caseScore.issueDetectionRate, caseScore.samples * caseScore.knownIssues),
-    0,
-  )
-  const rightResponses = bugScores.reduce(
-    (total, caseScore) => total + rateCount(caseScore.groundedConclusionAgreement, caseScore.samples),
-    0,
-  )
-  const retainedFindings = run.samples.reduce(
-    (total, sample) =>
-      total + (sample.status === "completed" ? sample.retainedResult.findings.length : 0),
-    0,
-  )
-  const unmatchedFindings = Math.max(0, retainedFindings - bugsFound)
-  const dropped = droppedFindings(run.samples)
-
-  const observations: string[] = []
-  if (cleanAlerts > 0) {
-    observations.push(
-      `the reviewer raised ${cleanAlerts} ${cleanAlerts === 1 ? "alert" : "alerts"} on versions with no recorded issues; check the source before deciding whether those alerts were wrong.`,
-    )
-  }
-  if (unmatchedFindings > 0) {
-    observations.push(
-      `${unmatchedFindings} unmatched ${unmatchedFindings === 1 ? "finding needs" : "findings need"} source checking.`,
-    )
-  }
-  if (bugsFound < issueChances) {
-    observations.push(
-      `the reviewer missed ${issueChances - bugsFound} of ${issueChances} chances to find a recorded issue across ${bugVersionReviews} ${bugVersionReviews === 1 ? "review" : "reviews"} of versions with issues.`,
-    )
-    if (dropped > 0) {
-      observations.push(
-        `${dropped} raw ${dropped === 1 ? "finding was" : "findings were"} dropped for not pointing at a changed line; check whether ${dropped === 1 ? "it describes" : "they describe"} the missed issues before treating this as a reviewer miss.`,
-      )
-    }
-  } else if (rightResponses < bugVersionReviews) {
-    observations.push(
-      "the reviewer found every known issue, but did not always respond with the right urgency.",
-    )
-  }
-  return observations.length > 0
-    ? `${scopePrefix} ${observations.join(" ")}`
-    : `${scopePrefix} the reviewer handled every recorded example correctly.`
-}
-
-function excludeRuleBreakingReviews(run: EvalRun): { run: EvalRun; excluded: number } {
+export function excludeRuleBreakingReviews(run: EvalRun): { run: EvalRun; excluded: number } {
   const cases = new Map(run.cases.map((evalCase) => [evalCase.id, evalCase]))
   let excluded = 0
   const samples = run.samples.map((sample): EvalSample => {
@@ -471,8 +384,4 @@ function excludeRuleBreakingReviews(run: EvalRun): { run: EvalRun; excluded: num
     }
   })
   return { run: { ...run, samples }, excluded }
-}
-
-function rateCount(rate: number | null, total: number): number {
-  return rate === null ? 0 : Math.round(rate * total)
 }

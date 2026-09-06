@@ -1,13 +1,14 @@
 # Review evaluation
 
-This evaluation answers four questions:
+Production makes one call per pull request: block it or let it through. With `FAIL_ON=high`, any high or critical finding fails the check; anything less leaves it neutral. This evaluation scores that call. Each saved run leads with a scorecard of three numbers:
 
-1. Does the reviewer leave a version with no recorded issues alone?
-2. Does it find each known issue?
-3. Does it use the right urgency?
-4. Does it give the same answer across repeated reviews?
+1. **Bad PRs blocked** — versions with a recorded blocking bug where the reviewer reported that bug at blocking urgency. Finding the bug but calling it medium does not count; production would have let the PR through.
+2. **OK PRs wrongly blocked** — versions with no recorded blocking bug where the check would have failed.
+3. **Clean PRs left alone** — versions with no recorded issues where the reviewer reported nothing.
 
-The answers are counts, not prose comparisons. A saved run keeps the exact evidence behind those counts.
+A fourth line, recorded advisory issues found, is informational. Nobody can enumerate every real nit in a pull request, so the list of non-blocking issues is always incomplete and that number only means something relative to another run on the same examples.
+
+A pull-request example passes a repeat when every one of its versions gets the right call: blocked for the recorded bug, or not blocked. The answers are counts, not prose comparisons. A saved run keeps the exact evidence behind those counts.
 
 ## Example pack
 
@@ -39,7 +40,7 @@ This is a rule plus a trace check, not a secure sandbox. A reviewer trying to ch
 
 The example data, recorded issues, focused tests, paired versions, and previous results remain private. Review calls require `AMP_EVAL_REVIEWER_API_KEY` from a separate identity that cannot access them. The review process receives only that key, an empty home directory, one prepared source copy, the pull-request context captured before the run, and the normal review instructions. A trusted local login is used later to compare findings with the recorded issues.
 
-Older result files remain readable, but their reports clearly say that they are historical results and should not be compared with runs using the current rules.
+Result files from before the current access rules are no longer reported separately; do not compare them with current runs.
 
 ## Amp mode and model
 
@@ -87,6 +88,20 @@ Read a saved result without making network or model calls:
 npm run eval -- report .eval-runs/RUN.json
 ```
 
+Compare two saved results, version by version, without network or model calls:
+
+```sh
+npm run eval -- compare .eval-runs/BASELINE.json .eval-runs/CANDIDATE.json
+```
+
+To try a prompt idea quickly, review only the versions that drive the blocking numbers (about a quarter of the reviews of a full development run):
+
+```sh
+npm run eval -- run /path/to/review-eval-pack --versions blocking,control --samples 1
+```
+
+Use that to discard ideas that clearly do not help. Confirm a promising one with the full three-repeat development run, then compare the two saved results. Run the held-back examples only when you have stopped iterating.
+
 If reviews finish but checking their findings is interrupted, finish only those checks without rerunning the reviews:
 
 ```sh
@@ -97,7 +112,7 @@ This uses the local CLI login and does not use `AMP_EVAL_REVIEWER_API_KEY`. It w
 
 ## Reading a result
 
-A report starts by saying what access was allowed and explains each repeat in plain terms:
+A report starts by saying what access was allowed, then gives the scorecard:
 
 ```text
 Review evaluation: PUBLIC RESEARCH ALLOWED
@@ -106,23 +121,52 @@ The reviewer could research anything public except this pull request and another
 Reviewer: Amp mode reviewbot-v1. Model: openai/gpt-5.6-sol. SDK: <exact SDK version>. CLI: <exact CLI version>.
 Exact model IDs: not reported by Amp.
 
-2 pull-request examples: 1 pass, 1 unstable, 0 fail.
-1 version with no recorded issues, 1 version with recorded non-blocking issues, and 1 version with recorded blocking issues.
-Each was reviewed 3 times. All 9 reviews completed.
+Scorecard: 3 code versions from 2 pull requests, each reviewed 3 times; all 9 reviews completed.
+  Bad PRs blocked:        2 of 3 (67%) across 1 version with a recorded blocking bug; 0 blocked every time. Of the rest: 0 blocked for something else, 1 found the bug at lower urgency, 0 missed it.
+  OK PRs wrongly blocked: 2 of 6 (33%) across 2 versions without one; 1 never blocked.
+  Clean PRs left alone:   3 of 3 (100%) across 1 version with no recorded issues.
+  Recorded advisory issues found: 5 of 6 (83%).
+Right call: a version with a recorded blocking bug is blocked for that bug at blocking urgency; every other version is not blocked.
+2 pull-request examples: 0 pass, 1 unstable, 1 fail.
 Review time: 9 reviews took 24.3 min in total; median 2.5 min, longest 6.1 min.
 Amp usage: $7.20 in credits, 4.4M input tokens, 31k output tokens, 63 model requests; median $0.80 per review. Subagent threads are included.
 
-Example 1 (pull request #1234): PASS (3/3 repeats passed)
-  Baseline, no recorded issues: 3 of 3 completed reviews raised no alert
-  Introduced-issue version, recorded blocking issues: found in 3 of 3; response matched the recorded issues in 3 of 3
+Wrongly blocked (check the source; a justified block means the recorded issues are incomplete):
+  #1300 version: blocked in 2 of 3
+
+Example 1 (pull request #1234): UNSTABLE (right call in 2/3 repeats)
+  Baseline, no recorded issues: left alone in 3 of 3
+  Introduced-issue version, recorded blocking bug: blocked for it in 2 of 3; found it at lower urgency in 1
+Example 2 (pull request #1300): FAIL (right call in 1/3 repeats)
+  Version, recorded non-blocking issues: not blocked in 1 of 3; wrongly blocked in 2; 5 of 6 recorded advisory issues found; 2 unmatched findings need source checking
 ```
+
+The "Of the rest" split on the first line says where blocked-PR misses come from. "Found the bug at lower urgency" means the reviewer described the recorded bug but rated it medium or low, so the fix is urgency calibration; "missed it" means the bug was never described, so the fix is detection. "Blocked for something else" means the check failed on a finding that matched no recorded blocking bug; that block may be right, but it gets no credit until the source is checked and the issue recorded.
+
+The "Wrongly blocked" list is the curation queue. Each entry is a version the reviewer would have blocked although no recorded issue justifies it. Read the finding and the source. If the block was right, record the issue in the example pack so the next run credits it; if it was wrong, the count stands.
+
+Three repeats support a development check, not a broad accuracy claim: 3 of 3 is a provisional pass, 2 of 3 is unstable, and 0 or 1 needs work. If five repeats were chosen before the run, require at least 4 of 5. Never add only favorable reruns.
+
+## Comparing two runs
+
+`compare` puts a baseline and a candidate side by side. It matches each version with itself, so a hard version cannot tilt the result, and leaves out versions present in only one run. For each of the three scorecard numbers it lists the versions where the candidate did better and where the baseline did better:
+
+```text
+Bad PRs blocked:
+  A 25 of 60 (42%), B 26 of 58 (45%).
+  B better on 3 versions, A better on 2, same on 15. Only 5 versions differ: too few to tell from chance.
+```
+
+The last sentence is a plain-language sign test: if the two reviewers were really the same, each version that differs would be equally likely to favour either side, and the sentence says how often chance alone gives a split at least this lopsided. Under 5% is reported as a real difference. Fewer than six differing versions can never clear that bar, so with the current pack a change has to be large to show up in the blocking numbers; the pack needs more versions with blocking bugs before small improvements are measurable. Synthetic before-and-after pairs are the cheapest way to add them.
+
+The advisory line compares recorded non-blocking issues found. Because that list is incomplete, treat it as a relative signal, and remember that a candidate which finds different real issues than the recorded ones gets no credit for them.
 
 The saved file keeps enough detail to reproduce and inspect the counts: exact commits and context, prompts, full tool traces, Amp mode, exact SDK and CLI versions, model IDs when Amp reports them, raw and filtered findings, matching decisions, timing, what Amp billed for the review thread (`amp threads usage`, read after the review returns; subagent threads are included, a thread abandoned by a restart is not), execution order, source checks, and errors. Usage totals cover every review including excluded ones, since they still cost money. Credits are $0 when a subscription covered the inference; the report says so. When Amp reports no usage for a thread (it currently answers "Usage information is currently unavailable for this thread" for threads run under some accounts) or the lookup fails, the file records the reason, and the report quotes it. A run without usage falls back to tokens summed from the traces, which omit subagent turns and cost. A report re-applies the latest trace checks to the stored traces without changing the original file, so a fixed check changes what an older report says. Treat the file as private and potentially sensitive.
 
-Each source pull request is one example. For a synthetic before-and-after pair, one repeat passes only when the reviewer gets both versions right. Three repeats support a development check, not a broad accuracy claim: 3 of 3 is a provisional pass, 2 of 3 is unstable, and 0 or 1 needs work. If five repeats were chosen before the run, require at least 4 of 5. Never add only favorable reruns.
+Each source pull request is one example. For a synthetic before-and-after pair, one repeat passes only when the reviewer gets both versions right.
 
 Production discards a finding whose `startLine` is not a line the pull request added, and the evaluation applies the same filter before checking findings against the recorded issues. A version line therefore also counts raw findings dropped for not pointing at a changed line. Those findings were never compared with the recorded issues, so read them in the saved file before calling a missed issue a reviewer miss.
 
-An alert on a version with no recorded issues is not automatically a false positive: the recorded list may be incomplete. A finding that does not match a recorded issue is also not automatically wrong. Check the source before classifying either. Keep those later source checks separate from the original counts. Do not call the percentage of findings that matched recorded issues “precision,” because the remaining findings have not yet been proven wrong.
+A wrongly blocked version or an alert on a version with no recorded issues is not automatically a false positive: the recorded list may be incomplete. A finding that does not match a recorded issue is also not automatically wrong. Check the source before classifying either. Keep those later source checks separate from the original counts, and do not call the share of findings that matched recorded issues “precision,” because the remaining findings have not yet been proven wrong.
 
 An open example pack helps catch the reviewer getting worse on known cases. It is not a hidden test, a representative estimate of all pull requests, or proof of general review quality.

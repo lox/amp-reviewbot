@@ -106,19 +106,19 @@ Production and evaluation therefore use the same fixed reviewer. Amp still route
 
 ## What the report means
 
-The main report answers:
+The main report scores the call production makes on each pull request: block it or let it through. It leads with three numbers:
 
-- did every review finish;
-- did versions with no recorded issues avoid alerts;
-- was each known issue found;
-- was the final response appropriately urgent; and
-- were repeated runs stable?
+- bad PRs blocked: versions with a recorded blocking bug where the reviewer reported that bug at blocking urgency, with the misses split into found-at-lower-urgency, missed, and blocked-for-something-else;
+- OK PRs wrongly blocked: versions with no recorded blocking bug where the check would have failed, listed by version as the curation queue; and
+- clean PRs left alone: versions with no recorded issues where the reviewer reported nothing.
 
-Saved JSON keeps the exact commits, context, changed lines, prompts, full tool traces, configured Amp mode and main model, exact SDK and CLI versions, any model IDs Amp reports, raw output, filtered findings, conclusions, matching decisions, code hashes, separate timing, execution order, review-rule identifier, trace checks, and errors. Re-reading it makes no model or network calls. New reports say `PUBLIC RESEARCH ALLOWED`; a review that breaks a rule is excluded from the counts and the result is marked `INCOMPLETE`. Older files are labeled `HISTORICAL RESULT`. The file is private and potentially sensitive.
+Recorded advisory issues found is reported as an informational line. That list can never be complete, so the number is only meaningful relative to another run on the same examples. A pull-request example passes a repeat when every one of its versions gets the right call. `npm run eval -- compare A.json B.json` matches two saved runs version by version and says, for each number, how many versions each side won and whether that split could be chance. `--versions blocking,control` runs only the versions behind the blocking numbers for a fast screening pass.
+
+Saved JSON keeps the exact commits, context, changed lines, prompts, full tool traces, configured Amp mode and main model, exact SDK and CLI versions, any model IDs Amp reports, raw output, filtered findings, conclusions, matching decisions, code hashes, separate timing, execution order, review-rule identifier, trace checks, and errors. Re-reading it makes no model or network calls. A review that breaks a rule is excluded from the counts and the result is marked `INCOMPLETE`. The file is private and potentially sensitive.
 
 If matching fails after reviews finish, `npm run eval -- finish RUN.json` retries only the missing matches through the local CLI login. It writes a new file, preserves the original review evidence and timing, and records the exact hash of the source file. It does not rerun reviews or use the separate review-account key.
 
-One finding can match at most one recorded issue, and one issue can be counted at most once per review. Extra findings stay visible until the source is checked. Do not call the percentage that matched recorded issues “precision,” because extra findings have not yet been proven wrong. A response counts as correct only when it finds every recorded issue for that version and uses the right urgency: high findings block, lower severities do not.
+One finding can match at most one recorded issue, and one issue can be counted at most once per review. Extra findings stay visible until the source is checked. Do not call the percentage that matched recorded issues “precision,” because extra findings have not yet been proven wrong. A review of a version with a recorded blocking bug counts as the right call only when that bug is reported at blocking urgency; a review of any other version counts as the right call when it does not block.
 
 ## Scientific limits
 
