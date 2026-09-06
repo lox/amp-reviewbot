@@ -18,7 +18,7 @@ Review one concrete target with two independent passes—ship risk first, simpli
 
 ## Pass 1: Ship Risk
 
-Try to disprove that the change is safe to ship. Assume subtle, expensive, or user-visible failures remain until the evidence rules them out. Prefer one strong finding over several weak ones, and do not give credit for intent or expected follow-up work.
+Try to disprove that the change is safe to ship. Assume subtle, expensive, or user-visible failures remain until the evidence rules them out. A change often carries several independent defects; finding one does not clear the rest of the diff, so keep going until every changed hunk has been checked. Report each grounded defect rather than a few weak suspicions, and do not give credit for intent or expected follow-up work.
 
 Work in this order unless the caller requests a different emphasis:
 
@@ -85,7 +85,7 @@ Testing and observability gaps are findings only when they allow a specific mate
 
 After completing both passes:
 
-1. Deduplicate findings with the same root cause. Retain separate findings only when they describe materially different impacts or remedies.
+1. Deduplicate findings with the same root cause. Retain separate findings only when they describe materially different impacts or remedies. Do not drop a grounded finding because a stronger one already exists; the author needs every defect, not the worst one.
 2. Resolve conflicts against the code and preserve correctness over deletion.
 3. Order the surviving findings by severity.
 4. Honor any caller-required output format. Otherwise include a verdict (`no-ship`, `needs-attention`, or `approve`) and findings with evidence, impact, and the smallest remedy.
