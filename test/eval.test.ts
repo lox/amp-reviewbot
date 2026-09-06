@@ -1865,6 +1865,30 @@ describe("eval scoring", () => {
       () => formatComparison({ name: "a.json", run: a }, { name: "once.json", run: once }),
       /cannot compare runs with different repeat counts: A reviewed each version 2 times, B 1/,
     )
+
+    // Two versions with identical content cannot be paired one-to-one with another run.
+    const twin = { ...evalCase("twin", blocking), seedId: "twin-seed" }
+    const twins = makeRun([...cases, twin], 2, [
+      ...a.samples,
+      completed("twin", 1, blocking, "failure", [highFinding], [judgement([0], false)]),
+      completed("twin", 2, blocking, "failure", [highFinding], [judgement([0], false)]),
+    ])
+    assert.throws(
+      () => formatComparison({ name: "a.json", run: a }, { name: "twins.json", run: twins }),
+      /twins\.json has two versions with identical commits, context, and recorded issues \(blocking and twin\)/,
+    )
+
+    // A different judge setup is called out, since matching decides the blocking numbers.
+    const otherJudge = structuredClone(a)
+    for (const sample of otherJudge.samples) {
+      if (sample.status !== "completed") continue
+      for (const item of sample.judgements) item.provenance.version = "4"
+    }
+    assert.match(
+      formatComparison({ name: "a.json", run: a }, { name: "judge.json", run: otherJudge }),
+      /different judge setups \(A: 3 high\/unpinned schema [0-9a-f]{7}; B: 4 high\/unpinned schema [0-9a-f]{7}\), so part of any difference may come from the matching/,
+    )
+    assert.doesNotMatch(comparison, /different judge setups/)
   })
 
   it("counts a version as right every time only when every requested repeat completed", () => {

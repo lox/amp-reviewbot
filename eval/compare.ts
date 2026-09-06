@@ -23,9 +23,9 @@ export function formatComparison(a: NamedRun, b: NamedRun): string {
     )
   }
   // Versions pair up by content, not by name: a renamed example is still the
-  // same version, and a re-recorded one is not. Head commits are unique within
-  // a run, so each key matches at most one case per side.
-  const byKeyA = new Map(a.run.cases.map((evalCase) => [versionKey(evalCase), evalCase]))
+  // same version, and a re-recorded one is not.
+  const byKeyA = casesByVersionKey(a)
+  casesByVersionKey(b)
   const shared = b.run.cases.flatMap((evalCase) => {
     const other = byKeyA.get(versionKey(evalCase))
     return other ? [{ a: other, b: evalCase }] : []
@@ -61,6 +61,13 @@ export function formatComparison(a: NamedRun, b: NamedRun): string {
   if (gaps.length > 0) {
     lines.push(
       `Incomplete: ${gaps.join(" ")} Missing reviews can tilt every number below, so treat any difference as tentative.`,
+    )
+  }
+  const judgesA = judgeSetups(a.run, pairedA)
+  const judgesB = judgeSetups(b.run, pairedB)
+  if (new Set([...judgesA, ...judgesB]).size > 1) {
+    lines.push(
+      `Findings were matched against the recorded issues with different judge setups (A: ${[...judgesA].join(", ") || "none"}; B: ${[...judgesB].join(", ") || "none"}), so part of any difference may come from the matching rather than the reviewer.`,
     )
   }
   if (a.run.reviewer.protocol === undefined || b.run.reviewer.protocol === undefined) {
@@ -128,6 +135,21 @@ export function formatComparison(a: NamedRun, b: NamedRun): string {
  * the review and the matching see. Only then is a score difference down to the
  * reviewer. Pack bookkeeping such as the version name may differ.
  */
+function casesByVersionKey({ name, run }: NamedRun): Map<string, EvalCase> {
+  const byKey = new Map<string, EvalCase>()
+  for (const evalCase of run.cases) {
+    const key = versionKey(evalCase)
+    const other = byKey.get(key)
+    if (other) {
+      throw new Error(
+        `${name} has two versions with identical commits, context, and recorded issues (${other.id} and ${evalCase.id}), so they cannot be paired with another run`,
+      )
+    }
+    byKey.set(key, evalCase)
+  }
+  return byKey
+}
+
 function versionKey(evalCase: EvalCase): string {
   const { repositoryFullName, pullNumber, baseSha, headSha, context, changedLines, expected } = evalCase
   return JSON.stringify({
@@ -139,6 +161,20 @@ function versionKey(evalCase: EvalCase): string {
     changedLines: Object.entries(changedLines).sort(([left], [right]) => left.localeCompare(right)),
     issues: [...expected.issues].sort((left, right) => left.id.localeCompare(right.id)),
   })
+}
+
+/** One label per distinct judge version, mode, model, and response schema used to match findings in these versions. */
+function judgeSetups(run: EvalRun, ids: Set<string>): Set<string> {
+  const setups = new Set<string>()
+  for (const sample of run.samples) {
+    if (!ids.has(sample.caseId) || sample.status !== "completed") continue
+    for (const { provenance } of sample.judgements) {
+      setups.add(
+        `${provenance.version} ${provenance.mode}/${provenance.model ?? "unpinned"} schema ${provenance.schemaHash.slice(0, 7)}`,
+      )
+    }
+  }
+  return setups
 }
 
 type ScoredRun = { score: EvalScore; excluded: number }
