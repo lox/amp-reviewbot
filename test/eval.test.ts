@@ -1906,6 +1906,30 @@ describe("eval scoring", () => {
     assert.equal(score.missed, 0)
   })
 
+  it("gives a shared finding to the blocking bug regardless of issue order", () => {
+    const advisory = { ...blocking.issues[0]!, id: "advisory", severity: "medium" as const }
+    const orders: ExpectedResult[] = [
+      { issues: [advisory, blocking.issues[0]!] },
+      { issues: [blocking.issues[0]!, advisory] },
+    ]
+    const scores = orders.map((expected) => {
+      const run = makeRun([evalCase("blocking", expected)], 1, [
+        completed("blocking", 1, expected, "neutral", [mediumFinding], [
+          judgement([0], false, "advisory"),
+          judgement([0], false),
+        ]),
+      ])
+      return scoreRun(run).cases[0]!
+    })
+    assert.deepEqual(
+      scores.map((score) => [score.advisoryFound, score.foundAtLowerUrgency, score.unmatchedFindings]),
+      [
+        [0, 1, 0],
+        [0, 1, 0],
+      ],
+    )
+  })
+
   it("counts a version as right every time only when every requested repeat completed", () => {
     const cases = [evalCase("blocking", blocking)]
     const run = makeRun(cases, 2, [

@@ -279,7 +279,12 @@ function assignFindings(sample: CompletedSample): Map<string, number> {
   )
   const findingToIssue = new Map<number, string>()
 
-  for (const issue of sample.expected.issues) {
+  // Fixed order so a finding shared by a blocking and an advisory issue lands on the
+  // blocking one, whichever way the pack lists them.
+  const issues = [...sample.expected.issues].sort(
+    (a, b) => Number(isBlocking(b.severity)) - Number(isBlocking(a.severity)) || a.id.localeCompare(b.id),
+  )
+  for (const issue of issues) {
     assign(issue.id, new Set())
   }
   return new Map([...findingToIssue].map(([finding, issue]) => [issue, finding]))
