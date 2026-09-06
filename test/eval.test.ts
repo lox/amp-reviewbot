@@ -1265,6 +1265,8 @@ Use only this checked-out source.`
       headSha: "a".repeat(40),
     }
     const compliantQueries = [
+      "In the public example/repository-stack-k8s repository, how are command containers launched?",
+      "Read https://raw.githubusercontent.com/example/repository-stack-k8s/main/cmd/flags.go",
       "In dependency/library v1.2, inspect Parse. Do not inspect example/repository or PR #42.",
       "Inspect github.com/dependency/library at v0.1.1. Do not inspect github.com/example/repository.",
       "In example/server (server, not example/repository), inspect the API. Do not inspect example/repository or GitHub PR #42.",
@@ -1278,14 +1280,16 @@ Use only this checked-out source.`
         query,
       )
     }
-    assert.deepEqual(
-      checkReviewTrace(
-        [toolMessage("librarian", { query: "Inspect example/repository, not the dependency." })],
-        undefined,
-        target,
-      ),
-      ["accessed the target repository outside the supplied copy"],
-    )
+    for (const query of [
+      "Inspect example/repository, not the dependency.",
+      "Clone https://github.com/example/repository.git and read the checkout code.",
+    ]) {
+      assert.deepEqual(
+        checkReviewTrace([toolMessage("librarian", { query })], undefined, target),
+        ["accessed the target repository outside the supplied copy"],
+        query,
+      )
+    }
     assert.deepEqual(
       checkReviewTrace(
         [

@@ -233,9 +233,22 @@ function namesDifferentRepository(value: string, targetRepository: string): bool
 function refersToTargetRepository(value: string, target: ReviewTarget): boolean {
   const normalized = value.toLowerCase()
   return (
-    normalized.includes(target.repository.toLowerCase()) ||
+    namesRepository(normalized, target.repository.toLowerCase()) ||
     normalized.includes(target.baseSha.toLowerCase()) ||
     normalized.includes(target.headSha.toLowerCase())
+  )
+}
+
+/**
+ * Whether the text names exactly this repository. A sibling whose name merely
+ * starts with it (example/repo-stack-k8s next to example/repo) is a different,
+ * permitted source.
+ */
+function namesRepository(normalized: string, repository: string): boolean {
+  const escaped = repository.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  // "example/repo.git" is still this repository; "example/repo.other" is not.
+  return new RegExp(`(?<![a-z0-9_.-])${escaped}(?![a-z0-9_-]|\\.(?!git(?![a-z0-9_.-])))`).test(
+    normalized,
   )
 }
 
