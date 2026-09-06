@@ -22,19 +22,26 @@ export function formatComparison(a: NamedRun, b: NamedRun): string {
       `cannot compare runs with different repeat counts: A reviewed each version ${a.run.requestedSamplesPerCase} times, B ${b.run.requestedSamplesPerCase}`,
     )
   }
-  const casesA = new Map(a.run.cases.map((evalCase) => [evalCase.id, evalCase]))
-  const shared: EvalCase[] = []
-  let changed = 0
-  for (const evalCase of b.run.cases) {
-    const other = casesA.get(evalCase.id)
-    if (!other) continue
-    if (sameVersion(other, evalCase)) shared.push(evalCase)
-    else changed += 1
-  }
-  const onlyOne = a.run.cases.length + b.run.cases.length - 2 * (shared.length + changed)
-  const sharedIds = new Set(shared.map((evalCase) => evalCase.id))
-  const scoredA = scoreShared(a.run, sharedIds)
-  const scoredB = scoreShared(b.run, sharedIds)
+  // Versions pair up by content, not by name: a renamed example is still the
+  // same version, and a re-recorded one is not. Head commits are unique within
+  // a run, so each key matches at most one case per side.
+  const byKeyA = new Map(a.run.cases.map((evalCase) => [versionKey(evalCase), evalCase]))
+  const shared = b.run.cases.flatMap((evalCase) => {
+    const other = byKeyA.get(versionKey(evalCase))
+    return other ? [{ a: other, b: evalCase }] : []
+  })
+  const pairedA = new Set(shared.map((pair) => pair.a.id))
+  const pairedB = new Set(shared.map((pair) => pair.b.id))
+  const unpaired = [
+    ...a.run.cases.filter((evalCase) => !pairedA.has(evalCase.id)),
+    ...b.run.cases.filter((evalCase) => !pairedB.has(evalCase.id)),
+  ]
+  const idsA = new Set(a.run.cases.map((evalCase) => evalCase.id))
+  const idsB = new Set(b.run.cases.map((evalCase) => evalCase.id))
+  const changed = new Set(unpaired.map((evalCase) => evalCase.id).filter((id) => idsA.has(id) && idsB.has(id))).size
+  const onlyOne = unpaired.length - 2 * changed
+  const scoredA = scoreShared(a.run, pairedA)
+  const scoredB = scoreShared(b.run, pairedB)
 
   const leftOut = [
     onlyOne > 0 ? `${countLabel(onlyOne, "version")} in only one run` : "",
@@ -71,10 +78,10 @@ export function formatComparison(a: NamedRun, b: NamedRun): string {
 
   const scoresA = new Map(scoredA.score.cases.map((item) => [item.caseId, item]))
   const scoresB = new Map(scoredB.score.cases.map((item) => [item.caseId, item]))
-  const versions = shared.map((evalCase) => ({
-    evalCase,
-    a: scoresA.get(evalCase.id),
-    b: scoresB.get(evalCase.id),
+  const versions = shared.map((pair) => ({
+    evalCase: pair.b,
+    a: scoresA.get(pair.a.id),
+    b: scoresB.get(pair.b.id),
   }))
 
   const metrics: Array<{
@@ -121,10 +128,6 @@ export function formatComparison(a: NamedRun, b: NamedRun): string {
  * the review and the matching see. Only then is a score difference down to the
  * reviewer. Pack bookkeeping such as the version name may differ.
  */
-function sameVersion(a: EvalCase, b: EvalCase): boolean {
-  return versionKey(a) === versionKey(b)
-}
-
 function versionKey(evalCase: EvalCase): string {
   const { repositoryFullName, pullNumber, baseSha, headSha, context, changedLines, expected } = evalCase
   return JSON.stringify({

@@ -26,11 +26,11 @@ import {
   type ReviewAuthentication,
 } from "./reviewer.js"
 import {
-  corpusSchema,
   corpusContentHash,
   evalRunSchema,
   expectedKind,
   type EvalCase,
+  type EvalCorpus,
   type EvalRun,
   type EvalSample,
   type ThreadUsage,
@@ -161,10 +161,12 @@ async function runEvaluation(
   const loaded = await loadPack(options.packPath, options.sourceCache)
   const cases = selectCases(loaded.corpus.cases, options.split, options.versions)
   if (cases.length === 0) throw new Error(`The example pack has no matching ${options.split} cases`)
-  const corpus = corpusSchema.parse({
+  // The full pack was validated on load; a filtered subset may hold only one
+  // half of a synthetic pair, so it is not re-checked as a pack.
+  const corpus: EvalCorpus = {
     version: `${loaded.corpus.version}-${options.split}${options.versions.length === allVersionKinds.length ? "" : `-${options.versions.join("+")}`}`,
     cases,
-  })
+  }
   const sourcePreparation = loaded.sourcePreparation
   const startedAt = new Date().toISOString()
   const reviewer = await reviewerProvenance(account)

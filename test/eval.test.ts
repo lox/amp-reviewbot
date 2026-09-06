@@ -1777,7 +1777,11 @@ describe("eval scoring", () => {
   })
 
   it("compares two runs version by version", () => {
-    const cases = [evalCase("control", control), evalCase("blocking", blocking), evalCase("extra", control)]
+    const cases = [
+      evalCase("control", control),
+      evalCase("blocking", blocking),
+      { ...evalCase("extra", control), headSha: "e".repeat(40) },
+    ]
     const a = makeRun(cases, 2, [
       completed("control", 1, control, "success", [], []),
       completed("control", 2, control, "failure", [highFinding], []),
@@ -1846,11 +1850,15 @@ describe("eval scoring", () => {
       formatComparison({ name: "a.json", run: a }, { name: "reworded.json", run: reworded }),
       /Compared on 1 shared code version\. Left out: 1 version with different commits or recorded issues/,
     )
-    const renamed = makeRun([cases[0]!, { ...cases[1]!, versionName: "renamed" }], 2, a.samples)
-    assert.match(
-      formatComparison({ name: "a.json", run: a }, { name: "renamed.json", run: renamed }),
-      /Compared on 2 shared code versions\.\n/,
+    // A renamed example gets a new case ID from the pack loader but is the same version.
+    const renamed = makeRun(
+      [cases[0]!, { ...cases[1]!, id: "renamed/bug", seedId: "renamed", versionName: "bug" }],
+      2,
+      a.samples.map((sample) => (sample.caseId === "blocking" ? { ...sample, caseId: "renamed/bug" } : sample)),
     )
+    const renamedComparison = formatComparison({ name: "a.json", run: a }, { name: "renamed.json", run: renamed })
+    assert.match(renamedComparison, /Compared on 2 shared code versions\.\n/)
+    assert.match(renamedComparison, /Bad PRs blocked:\n  A 2 of 2 \(100%\), B 2 of 2 \(100%\)\./)
 
     const once = makeRun(cases, 1, a.samples.filter((sample) => sample.sample === 1))
     assert.throws(
