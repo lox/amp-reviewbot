@@ -185,9 +185,8 @@ function scoreCase(caseId: string, samples: EvalSample[], requestedSamples: numb
     if (kind === "blocking") {
       if (blocksRecordedBug(sample)) blockedForRecordedBug += 1
       else if (sample.conclusion === "failure") blockedForOtherReason += 1
-      else if (expected.issues.some((issue) => isBlocking(issue.severity) && assignment.has(issue.id))) {
-        foundAtLowerUrgency += 1
-      } else missed += 1
+      else if (describesRecordedBug(sample)) foundAtLowerUrgency += 1
+      else missed += 1
     } else {
       if (sample.conclusion === "failure") wronglyBlocked += 1
       if (kind === "control" && sample.retainedResult.findings.length === 0) quiet += 1
@@ -235,6 +234,18 @@ function isRightCall(sample: EvalSample): boolean {
 }
 
 /** A recorded blocking issue matched a finding that itself has blocking urgency. */
+/**
+ * Some finding was judged to match a recorded blocking issue, whatever its
+ * urgency. Read from the judgements directly rather than the one-to-one
+ * assignment, so a finding shared with an advisory issue still counts.
+ */
+function describesRecordedBug(sample: CompletedSample): boolean {
+  return sample.judgements.some((judgement) => {
+    const issue = sample.expected.issues.find((candidate) => candidate.id === judgement.issueId)
+    return issue !== undefined && isBlocking(issue.severity) && judgement.matchingFindingIndices.length > 0
+  })
+}
+
 function blocksRecordedBug(sample: CompletedSample): boolean {
   const findings = sample.retainedResult.findings
   return sample.judgements.some((judgement) => {

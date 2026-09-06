@@ -163,14 +163,14 @@ function versionKey(evalCase: EvalCase): string {
   })
 }
 
-/** One label per distinct judge version, mode, model, and response schema used to match findings in these versions. */
+/** One label per distinct judge version, mode, model, response schema, and Amp runtime used to match findings in these versions. */
 function judgeSetups(run: EvalRun, ids: Set<string>): Set<string> {
   const setups = new Set<string>()
   for (const sample of run.samples) {
     if (!ids.has(sample.caseId) || sample.status !== "completed") continue
     for (const { provenance } of sample.judgements) {
       setups.add(
-        `${provenance.version} ${provenance.mode}/${provenance.model ?? "unpinned"} schema ${provenance.schemaHash.slice(0, 7)}`,
+        `${provenance.version} ${provenance.mode}/${provenance.model ?? "unpinned"} schema ${provenance.schemaHash.slice(0, 7)} sdk ${provenance.sdkVersion} cli ${provenance.cliVersion ?? "unrecorded"}`,
       )
     }
   }

@@ -1886,9 +1886,24 @@ describe("eval scoring", () => {
     }
     assert.match(
       formatComparison({ name: "a.json", run: a }, { name: "judge.json", run: otherJudge }),
-      /different judge setups \(A: 3 high\/unpinned schema [0-9a-f]{7}; B: 4 high\/unpinned schema [0-9a-f]{7}\), so part of any difference may come from the matching/,
+      /different judge setups \(A: 3 high\/unpinned schema [0-9a-f]{7} sdk test-sdk cli test-cli; B: 4 high\/unpinned schema [0-9a-f]{7} sdk test-sdk cli test-cli\), so part of any difference may come from the matching/,
     )
     assert.doesNotMatch(comparison, /different judge setups/)
+  })
+
+  it("counts a blocking bug as found at lower urgency even when its finding also matches an advisory", () => {
+    const advisoryFirst: ExpectedResult = {
+      issues: [{ ...blocking.issues[0]!, id: "advisory-first", severity: "medium" }, blocking.issues[0]!],
+    }
+    const run = makeRun([evalCase("blocking", advisoryFirst)], 1, [
+      completed("blocking", 1, advisoryFirst, "neutral", [mediumFinding], [
+        judgement([0], false, "advisory-first"),
+        judgement([0], false),
+      ]),
+    ])
+    const score = scoreRun(run).cases[0]!
+    assert.equal(score.foundAtLowerUrgency, 1)
+    assert.equal(score.missed, 0)
   })
 
   it("counts a version as right every time only when every requested repeat completed", () => {
