@@ -11,6 +11,7 @@ import { expectedKind } from "./schema.js"
 export type CaseScore = {
   caseId: string
   kind: "control" | "advisory" | "blocking"
+  /** Reviews requested for this version. */
   samples: number
   completed: number
   knownIssues: number
@@ -84,7 +85,7 @@ export function scoreRun(run: EvalRun): EvalScore {
 
   const cases = [...byCase.entries()]
     .sort(([left], [right]) => left.localeCompare(right))
-    .map(([caseId, samples]) => scoreCase(caseId, samples))
+    .map(([caseId, samples]) => scoreCase(caseId, samples, run.requestedSamplesPerCase))
   const casesBySeed = new Map<string, EvalRun["cases"]>()
   for (const evalCase of run.cases) {
     const seedCases = casesBySeed.get(evalCase.seedId) ?? []
@@ -116,8 +117,7 @@ export function scoreRun(run: EvalRun): EvalScore {
   const controls = cases.filter((item) => item.kind === "control")
   const sum = (items: CaseScore[], pick: (item: CaseScore) => number) =>
     items.reduce((total, item) => total + pick(item), 0)
-  const rightEveryTime = (items: CaseScore[]) =>
-    items.filter((item) => item.completed > 0 && item.rightCalls === item.completed).length
+  const rightEveryTime = (items: CaseScore[]) => items.filter(isRightEveryTime).length
 
   return {
     cases,
@@ -154,7 +154,12 @@ export function scoreRun(run: EvalRun): EvalScore {
   }
 }
 
-function scoreCase(caseId: string, samples: EvalSample[]): CaseScore {
+/** Every requested repeat completed and made the right call. */
+export function isRightEveryTime(item: CaseScore): boolean {
+  return item.completed === item.samples && item.rightCalls === item.samples
+}
+
+function scoreCase(caseId: string, samples: EvalSample[], requestedSamples: number): CaseScore {
   const expected = samples[0]!.expected
   const kind = expectedKind(expected)
   const completed = samples.filter((sample): sample is CompletedSample => sample.status === "completed")
@@ -192,7 +197,7 @@ function scoreCase(caseId: string, samples: EvalSample[]): CaseScore {
   return {
     caseId,
     kind,
-    samples: samples.length,
+    samples: requestedSamples,
     completed: completed.length,
     knownIssues: expected.issues.length,
     rightCalls: completed.filter((sample) => isRightCall(sample)).length,

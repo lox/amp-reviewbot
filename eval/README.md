@@ -149,7 +149,7 @@ Three repeats support a development check, not a broad accuracy claim: 3 of 3 is
 
 ## Comparing two runs
 
-`compare` puts a baseline and a candidate side by side. It matches each version with itself, so a hard version cannot tilt the result. A version counts as shared only when both runs reviewed the same commits against the same recorded issues (same IDs, severities, and lines); versions present in only one run, or changed between packs, are left out of every number shown, including the two scorecards. If either run has reviews that did not finish, broke the rules, or left recorded issues unchecked, an `Incomplete` line says how many and warns that the difference is tentative. For each of the three scorecard numbers it lists the versions where the candidate did better and where the baseline did better:
+`compare` puts a baseline and a candidate side by side. It matches each version with itself, so a hard version cannot tilt the result, and it refuses two runs with different repeat counts. A version counts as shared only when both runs reviewed the same commits against the same pull-request context and recorded issues; versions present in only one run, or changed between packs, are left out of every number shown, including the two scorecards. If either run has reviews that did not finish, broke the rules, or left recorded issues unchecked, an `Incomplete` line says how many and warns that the difference is tentative. For each of the three scorecard numbers it lists the versions where the candidate did better and where the baseline did better:
 
 ```text
 Bad PRs blocked:

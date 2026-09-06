@@ -6,7 +6,7 @@ import {
   scorecardLines,
   versionLabel,
 } from "./report.js"
-import { scoreRun, type CaseScore, type EvalScore } from "./score.js"
+import { isRightEveryTime, scoreRun, type CaseScore, type EvalScore } from "./score.js"
 
 type NamedRun = { name: string; run: EvalRun }
 
@@ -17,6 +17,11 @@ type NamedRun = { name: string; run: EvalRun }
  * recorded issues; everything else is left out of every number shown.
  */
 export function formatComparison(a: NamedRun, b: NamedRun): string {
+  if (a.run.requestedSamplesPerCase !== b.run.requestedSamplesPerCase) {
+    throw new Error(
+      `cannot compare runs with different repeat counts: A reviewed each version ${a.run.requestedSamplesPerCase} times, B ${b.run.requestedSamplesPerCase}`,
+    )
+  }
   const casesA = new Map(a.run.cases.map((evalCase) => [evalCase.id, evalCase]))
   const shared: EvalCase[] = []
   let changed = 0
@@ -111,23 +116,26 @@ export function formatComparison(a: NamedRun, b: NamedRun): string {
   return lines.join("\n")
 }
 
-/** Same code and same recorded issues, so a score difference is down to the reviewer. */
+/**
+ * Same code, same pull-request context, and same recorded issues: everything
+ * the review and the matching see. Only then is a score difference down to the
+ * reviewer. Pack bookkeeping such as the version name may differ.
+ */
 function sameVersion(a: EvalCase, b: EvalCase): boolean {
-  return (
-    a.repositoryFullName === b.repositoryFullName &&
-    a.pullNumber === b.pullNumber &&
-    a.baseSha === b.baseSha &&
-    a.headSha === b.headSha &&
-    issueKey(a) === issueKey(b)
-  )
+  return versionKey(a) === versionKey(b)
 }
 
-function issueKey(evalCase: EvalCase): string {
-  return JSON.stringify(
-    evalCase.expected.issues
-      .map(({ id, severity, path, changedLine }) => ({ id, severity, path, changedLine }))
-      .sort((left, right) => left.id.localeCompare(right.id)),
-  )
+function versionKey(evalCase: EvalCase): string {
+  const { repositoryFullName, pullNumber, baseSha, headSha, context, changedLines, expected } = evalCase
+  return JSON.stringify({
+    repositoryFullName,
+    pullNumber,
+    baseSha,
+    headSha,
+    context,
+    changedLines: Object.entries(changedLines).sort(([left], [right]) => left.localeCompare(right)),
+    issues: [...expected.issues].sort((left, right) => left.id.localeCompare(right.id)),
+  })
 }
 
 type ScoredRun = { score: EvalScore; excluded: number }
@@ -219,7 +227,7 @@ function binomial(n: number, k: number): number {
 }
 
 function rightEveryTime(score: EvalScore): number {
-  return score.cases.filter((item) => item.completed > 0 && item.rightCalls === item.completed).length
+  return score.cases.filter(isRightEveryTime).length
 }
 
 function describeReviewer(run: EvalRun): string {

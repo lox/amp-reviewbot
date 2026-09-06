@@ -1452,18 +1452,19 @@ describe("eval scoring", () => {
       versionsRightEveryTime: 0,
     })
     assert.deepEqual(score.scorecard.cleanPrs, { versions: 1, reviews: 2, quiet: 1 })
+    // The control never blocked, but one of its three repeats did not finish.
     assert.deepEqual(score.scorecard.okPrs, {
       versions: 1,
       reviews: 2,
       wronglyBlocked: 0,
-      versionsRightEveryTime: 1,
+      versionsRightEveryTime: 0,
     })
 
     const report = formatReport(run)
     assert.match(report, /Recorded result: INCOMPLETE/)
     assert.match(report, /2 code versions from 2 pull requests, each reviewed 3 times; 5 of 6 reviews completed/)
     assert.match(report, /Bad PRs blocked: +1 of 3 \(33%\) across 1 version with a recorded blocking bug; 0 blocked every time\. Of the rest: 1 blocked for something else, 1 found the bug at lower urgency, 0 missed it\./)
-    assert.match(report, /OK PRs wrongly blocked: 0 of 2 \(0%\) across 1 version without one; 1 never blocked\./)
+    assert.match(report, /OK PRs wrongly blocked: 0 of 2 \(0%\) across 1 version without one; 0 never blocked\./)
     assert.match(report, /Clean PRs left alone: +1 of 2 \(50%\) across 1 version with no recorded issues\./)
     assert.match(report, /Recorded advisory issues found: none to count\./)
     assert.match(report, /no recorded issues: left alone in 1 of 2; raised a non-blocking finding in 1/)
@@ -1834,6 +1835,42 @@ describe("eval scoring", () => {
     assert.match(
       formatComparison({ name: "a.json", run: a }, { name: "moved.json", run: moved }),
       /Compared on 1 shared code version\. Left out: 1 version with different commits/,
+    )
+    const rewordedIssues: ExpectedResult = { issues: [{ ...blocking.issues[0]!, verification: "Reworded." }] }
+    const reworded = makeRun([cases[0]!, evalCase("blocking", rewordedIssues)], 2, [
+      ...a.samples.slice(0, 2),
+      completed("blocking", 1, rewordedIssues, "failure", [highFinding], [judgement([0], false)]),
+      completed("blocking", 2, rewordedIssues, "failure", [highFinding], [judgement([0], false)]),
+    ])
+    assert.match(
+      formatComparison({ name: "a.json", run: a }, { name: "reworded.json", run: reworded }),
+      /Compared on 1 shared code version\. Left out: 1 version with different commits or recorded issues/,
+    )
+    const renamed = makeRun([cases[0]!, { ...cases[1]!, versionName: "renamed" }], 2, a.samples)
+    assert.match(
+      formatComparison({ name: "a.json", run: a }, { name: "renamed.json", run: renamed }),
+      /Compared on 2 shared code versions\.\n/,
+    )
+
+    const once = makeRun(cases, 1, a.samples.filter((sample) => sample.sample === 1))
+    assert.throws(
+      () => formatComparison({ name: "a.json", run: a }, { name: "once.json", run: once }),
+      /cannot compare runs with different repeat counts: A reviewed each version 2 times, B 1/,
+    )
+  })
+
+  it("counts a version as right every time only when every requested repeat completed", () => {
+    const cases = [evalCase("blocking", blocking)]
+    const run = makeRun(cases, 2, [
+      completed("blocking", 1, blocking, "failure", [highFinding], [judgement([0], false)]),
+      failed("blocking", 2, blocking),
+    ])
+    const score = scoreRun(run)
+    assert.equal(score.cases[0]!.samples, 2)
+    assert.equal(score.scorecard.badPrs.versionsRightEveryTime, 0)
+    assert.match(
+      formatComparison({ name: "a.json", run }, { name: "b.json", run }),
+      /Right call on every version and repeat: A 0, B 0 of 1 versions\./,
     )
 
     assert.equal(chanceSentence(0, 0), "No difference to weigh.")
