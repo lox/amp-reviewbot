@@ -15,7 +15,7 @@ import { judgeIssue, resolveMatchingVotes } from "../eval/judge.js"
 import { checkPack, exampleSchema, loadPack } from "../eval/pack.js"
 import { chanceSentence, formatComparison } from "../eval/compare.js"
 import { formatReport, reviewResources } from "../eval/report.js"
-import { evaluationAmpArgs, keepThreadTrace } from "../eval/reviewer-child.js"
+import { ampExitError, evaluationAmpArgs, keepThreadTrace } from "../eval/reviewer-child.js"
 import {
   reviewAuthentication,
   reviewerEnvironment,
@@ -45,6 +45,7 @@ import {
   reviewMode,
 } from "../src/amp.js"
 import { preparedSourceVerificationCommand } from "../src/review.js"
+import { isTransientAmpError } from "../src/worker.js"
 
 const execFileAsync = promisify(execFile)
 const lowFinding = {
@@ -622,6 +623,19 @@ describe("eval example packs", () => {
     ])
   })
 
+  it("runs the review again when the Amp CLI dies before streaming anything", () => {
+    const startup = ampExitError(1, "error: dlopen(/$bunfs/root/keyring.node): no such file\n", false)
+    assert.equal(isTransientAmpError(startup), true)
+    assert.equal(
+      startup.message,
+      "Amp CLI exited with status 1 before starting the review: error: dlopen(/$bunfs/root/keyring.node): no such file",
+    )
+
+    const midway = ampExitError(1, "", true)
+    assert.equal(isTransientAmpError(midway), false)
+    assert.equal(midway.message, "Amp CLI exited with status 1")
+  })
+
   it("keeps only the fresh thread's trace after a restart", () => {
     const trace = [
       traceSystemMessage("thread-1", "/workspace", reviewMode),
@@ -759,6 +773,7 @@ describe("eval example packs", () => {
         threadId: "thread-1",
         models: ["test-model"],
         trace,
+        retries: 1,
       }),
     )
     child.emit("close", 0, null)
@@ -769,6 +784,7 @@ describe("eval example packs", () => {
       threadId: "thread-1",
       models: ["test-model"],
       trace,
+      retries: 1,
     })
     await assert.rejects(stat(submitted.cwd))
   })
@@ -1592,8 +1608,9 @@ describe("eval scoring", () => {
         ...completed("blocking", 2, blocking, "failure", [highFinding], [judgement([0], false)]),
         reviewDurationMs: 180_000,
         trace: [usage(300_000, 0, 500)],
+        retries: 2,
       },
-      { ...failed("blocking", 3, blocking), reviewDurationMs: 300_000, trace: [] },
+      { ...failed("blocking", 3, blocking), reviewDurationMs: 300_000, trace: [], retries: 0 },
     ])
 
     assert.deepEqual(reviewResources(run), {
@@ -1601,10 +1618,12 @@ describe("eval scoring", () => {
       totalReviewMs: 540_000,
       medianReviewMs: 180_000,
       longestReviewMs: 300_000,
+      retried: { reviews: 1, runs: 2 },
       traced: { reviews: 2, inputTokens: 303_500, outputTokens: 1_000, medianInputTokens: 151_750 },
     })
     const report = formatReport(run)
     assert.match(report, /Review time: 3 reviews took 9\.0 min in total; median 3\.0 min, longest 5\.0 min\./)
+    assert.match(report, /Amp had to be run again in 1 review \(2 extra runs\); the time above includes those runs\./)
     assert.match(report, /Reviewer tokens from 2 traces: 304k input tokens .*, 1k output tokens; median 152k input tokens per review\./)
     assert.match(report, /recorded no Amp usage, so cost is unknown/)
 
@@ -1613,6 +1632,12 @@ describe("eval scoring", () => {
     ])
     assert.equal(reviewResources(withoutTimings), undefined)
     assert.doesNotMatch(formatReport(withoutTimings), /Review time/)
+
+    const withoutRetries = makeRun(cases, 1, [
+      { ...failed("blocking", 1, blocking), reviewDurationMs: 300_000, trace: [] },
+    ])
+    assert.deepEqual(reviewResources(withoutRetries)!.retried, { reviews: 0, runs: 0 })
+    assert.doesNotMatch(formatReport(withoutRetries), /run again/)
   })
 
   it("says why Amp reported no usage instead of implying the lookup never ran", () => {
