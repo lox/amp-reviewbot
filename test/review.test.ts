@@ -79,7 +79,7 @@ describe("buildReviewPrompt", () => {
 
     assert.match(prompt, /- critical: leaks secrets or credentials/)
     assert.match(prompt, /- high: shipped \(non-test\) code misbehaves for real users/)
-    assert.match(prompt, /- medium: real but contained: only tests, docs, examples, or developer tooling/)
+    assert.match(prompt, /- medium: real but contained: only tests, docs, examples, or developer tooling that does not change what ships/)
     assert.match(
       prompt,
       /Critical and high findings fail the check and block the merge; medium and low findings are shown but do not block\./,

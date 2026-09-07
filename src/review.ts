@@ -47,8 +47,8 @@ export function severityGuide(failOn: Severity): string {
   return `Severity is about what happens if this pull request merges as it is:
 - critical: leaks secrets or credentials, bypasses authentication or authorization, loses or corrupts user data, or breaks the product for everyone.
 - high: shipped (non-test) code misbehaves for real users under a realistic configuration or input: wrong results, a failure, a hang, a crash, a leak that grows, or a broken build or release. It still counts when only some users hit it, when a workaround exists, or when the fix is one line.
-- medium: real but contained: only tests, docs, examples, or developer tooling are affected; the trigger needs an unrealistic setup; the effect is recoverable degradation such as slower runs, noisier logs, or a handle the runtime eventually reclaims; or added complexity that makes the code materially harder to change safely.
-- low: a minor correctness or clarity problem worth fixing but not worth holding the change for.
+- medium: real but contained: only tests, docs, examples, or developer tooling that does not change what ships are affected; the trigger needs an unrealistic setup; the effect is recoverable degradation such as slower runs, noisier logs, or a handle the runtime eventually reclaims; or added complexity that makes the code materially harder to change safely.
+- low: a minor correctness or clarity problem with no user-visible consequence.
 
 ${blockingSentence} Rate by the consequence when the defect triggers, not by how often it triggers, how hard it was to find, or how small the fix is.`
 }
