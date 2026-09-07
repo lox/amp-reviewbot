@@ -1,6 +1,10 @@
 # Review evaluation
 
-Production makes one call per pull request: block it or let it through. With `FAIL_ON=high`, any high or critical finding fails the check; anything less leaves it neutral. This evaluation scores that call. Each saved run leads with a scorecard of three numbers:
+Production makes one call per pull request: block it or let it through. With `FAIL_ON=high`, any high or critical finding fails the check; anything less leaves it neutral.
+
+The fast A/B loop scores that binary call directly from the saved `conclusion`. The larger report also asks an LLM judge whether findings match recorded issues. That matching is useful for diagnosis and auditing, but it is not needed to decide whether production blocked a version.
+
+Each full saved run leads with a scorecard of three diagnostic numbers:
 
 1. **Bad PRs blocked** — versions with a recorded blocking bug where the reviewer reported that bug at blocking urgency. Finding the bug but calling it medium does not count; production would have let the PR through.
 2. **OK PRs wrongly blocked** — versions with no recorded blocking bug where the check would have failed.
@@ -96,13 +100,32 @@ Compare two saved results, version by version, without network or model calls:
 npm run eval -- compare .eval-runs/BASELINE.json .eval-runs/CANDIDATE.json
 ```
 
-To try a prompt idea quickly, review only the versions that drive the blocking numbers (about a quarter of the reviews of a full development run):
+### Fast prompt loop
+
+The private pack owns `sets/fast-v1.json`. It names exactly 16 settled development versions: 10 with blocking bugs, 3 clean versions, and 3 advisory-only versions. Keep disputed cases out. Once selected, do not change this set, its labels, `FAIL_ON=high`, the runner, mode, or model while iterating; only the prompt refs change.
+
+Run two production prompt versions once each. The refs may be commits, branches, or tags; `ab` reads `src/review.ts` and the embedded review methodology from each ref, while all source preparation, parsing, filtering, retries, and execution use the current runner. Reviews are paired by version, A/B order within each pair is randomized, and both sides share one concurrency limit (3 by default):
 
 ```sh
-npm run eval -- run /path/to/review-eval-pack --versions blocking,control --samples 1
+export AMP_EVAL_REVIEWER_API_KEY="separate-review-account-key"
+npm run eval -- ab /path/to/review-eval-pack fast-v1 BASELINE_REF CANDIDATE_REF
 ```
 
-Use that to discard ideas that clearly do not help. Confirm a promising one with the full three-repeat development run, then compare the two saved results. Run the held-back examples only when you have stopped iterating.
+Both artifacts are saved under the pack's `.eval-runs`. The command prints one decision page using only each completed review's deterministic `conclusion`; it does not run finding-match judges or usage lookups. Traces, exact-source setup, source isolation, reviewer identity, raw output, filtering, and conclusions are still saved for inspection.
+
+The predeclared rule is a product choice:
+
+- **PROMISING B:** B blocks at least 3 more of the 10 blocking versions, creates no new block among the 6 non-blocking versions, and has no execution failure that could change that result. Read the retained high findings behind the gains before doing anything larger.
+- **REGRESSION:** B newly blocks any non-blocking version, or loses at least 3 blocking detections that A made.
+- **KEEP A:** every other result, including an incomplete result that cannot earn PROMISING B.
+
+KEEP A is a finished experiment, not a reason to enlarge or rerun it. Use the full `run`, `finish`, `report`, and `compare` path when you need repeat stability, issue matching, advisory recall, clean-version silence, sign tests, or usage accounting.
+
+Re-scoring saved outputs after label changes is not automated yet. It is an outer-loop follow-up; do not rerun reviews merely because labels changed.
+
+### Outer loop
+
+About weekly, compare the incumbent with one candidate on the larger development set. Audit whether blocking findings are valid and inspect suspicious saved traces. Batch justified label fixes, then re-score saved outputs rather than rerunning them. Grow the pack with varied blocking mutants and hard non-blocking cases. Use the holdout only after selecting a candidate, not while tuning it.
 
 If reviews finish but checking their findings is interrupted, finish only those checks without rerunning the reviews:
 

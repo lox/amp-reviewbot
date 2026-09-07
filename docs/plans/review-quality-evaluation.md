@@ -6,7 +6,7 @@ Give us a fast, credible way to improve amp-reviewbot without pretending an LLM 
 
 **Status:** example validation, realistic review runs, complete evidence saving, scoring, and offline reports are implemented. The reviewer can use public research, as it can in production, but must use only our supplied copy of the target repository and must not inspect the target pull request. We check the saved trace for obvious breaches, but this is not a secure sandbox.
 
-For each exact code version, measure:
+For each exact code version in the full outer loop, measure:
 
 - whether the final result is `success`, `neutral`, or `failure` at `FAIL_ON=high`;
 - whether each known material issue was found;
@@ -40,6 +40,12 @@ Behavioral defects and maintainability advisories are distinct. Substantial dupl
 Approval, merge, draft status, and silence do not prove that a version is correct. A baseline must be checked directly. When an LLM checked an issue, say so rather than presenting it as certain human judgment.
 
 ## Run path
+
+There are two loops. The inner loop is deliberately small: `npm run eval -- ab PACK fast-v1 A_REF B_REF` runs one review from each prompt ref over a frozen 16-version set, interleaved under one concurrency limit. The set contains 10 settled blocking versions from varied bug mechanisms and source pull requests, 3 clean versions, and 3 undisputed advisory-only versions. It lives in the private pack. Set membership, labels, blocking policy, runner, mode, and model stay fixed; only the prompt changes.
+
+The inner loop reads the binary production decision directly from each saved `conclusion`. It does not run issue-matching judges, usage lookups, advisory scoring, repeat classification, trace gating, or sign tests. It still saves raw output and traces, uses the separate reviewer identity, prepares the exact isolated source, and applies production parsing and changed-line filtering. A candidate is **PROMISING** only when it blocks at least 3 additional blocking versions, adds no block on the 6 non-blocking versions, and no missing review could change that result. Any new non-blocking block, or a loss of at least 3 blocking detections, is a **REGRESSION**. Every other outcome is **KEEP A** and ends the experiment. These thresholds are product choices, not statistical claims. People must read the high findings behind gains before promoting a candidate.
+
+The outer loop runs about weekly: incumbent versus one selected candidate on the larger development set. It audits the validity of blocking findings and suspicious traces, batches label corrections, re-scores saved reviewer outputs after those corrections, and adds varied blocking mutants and hard non-blocking examples. Finding-match judges, advisory and silence scoring, repeat stability, and sign tests belong here. The holdout is used only after candidate selection. Automated revised-pack re-scoring remains a follow-up; until it exists, a label edit is not a reason to buy the same reviews again.
 
 The enabled run path is:
 
