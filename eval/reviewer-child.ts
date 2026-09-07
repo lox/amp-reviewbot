@@ -13,7 +13,7 @@ import {
 import pino from "pino"
 import { z } from "zod"
 import { reviewMode } from "../src/amp.js"
-import { executeReviewWithRetries } from "../src/worker.js"
+import { TransientAmpError, executeReviewWithRetries } from "../src/worker.js"
 import { modelsFromTrace } from "./evidence.js"
 
 const execFileAsync = promisify(execFile)
@@ -41,6 +41,11 @@ async function main(): Promise<void> {
   )
   const trace: StreamMessage[] = []
   const threadIds: string[] = []
+  // The worker's retry log is silent here, so this count is the only record of
+  // how many times Amp was run for this review. Counting runs as they start
+  // keeps a cancellation during the retry delay from counting as a run.
+  let ampRuns = 0
+  const retries = () => Math.max(0, ampRuns - 1)
 
   try {
     try {
@@ -61,14 +66,17 @@ async function main(): Promise<void> {
         onMessage: (message) => {
           trace.push(message)
         },
-        executeAmp: executeAmpWithPluginReady,
+        executeAmp: (options) => {
+          ampRuns += 1
+          return executeAmpWithPluginReady(options)
+        },
       })
       process.stdout.write(
-        `${JSON.stringify({ status: "completed", rawResult, threadId: threadIds.at(-1) ?? null, models: modelsFromTrace(trace), trace })}\n`,
+        `${JSON.stringify({ status: "completed", rawResult, threadId: threadIds.at(-1) ?? null, models: modelsFromTrace(trace), trace, retries: retries() })}\n`,
       )
     } catch (error) {
       process.stdout.write(
-        `${JSON.stringify({ status: "error", error: errorMessage(error), threadId: threadIds.at(-1) ?? null, models: modelsFromTrace(trace), trace })}\n`,
+        `${JSON.stringify({ status: "error", error: errorMessage(error), threadId: threadIds.at(-1) ?? null, models: modelsFromTrace(trace), trace, retries: retries() })}\n`,
       )
     }
   } finally {
@@ -118,11 +126,14 @@ export async function* executeAmpWithPluginReady({
 
   child.stdin.end(`${prompt}\n`)
   const lines = createInterface({ input: child.stdout, crlfDelay: Number.POSITIVE_INFINITY })
+  let streamed = false
   try {
     for await (const line of lines) {
       if (!line.trim()) continue
       try {
-        yield JSON.parse(line) as StreamMessage
+        const message = JSON.parse(line) as StreamMessage
+        streamed = true
+        yield message
       } catch (error) {
         throw new Error(`Amp returned invalid stream JSON: ${line.slice(0, 500)}`, {
           cause: error,
@@ -133,13 +144,25 @@ export async function* executeAmpWithPluginReady({
     if (signal?.aborted) throw signal.reason
     if (childError) throw childError
     if (code === null) throw new Error(`Amp CLI was killed by ${processSignal ?? "an unknown signal"}`)
-    if (code !== 0) {
-      throw new Error(`Amp CLI exited with status ${code}${stderr.trim() ? `: ${stderr.trim()}` : ""}`)
-    }
+    if (code !== 0) throw ampExitError(code, stderr, streamed)
   } finally {
     lines.close()
     if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM")
   }
+}
+
+/**
+ * A failed CLI exit before any stream message means Amp never started the
+ * review: no thread was reported and there is no partial result to salvage,
+ * so the review is simply run again. A macOS build of the pinned CLI has been
+ * seen to fail this way when Bun could not extract its bundled keyring module.
+ * An exit after streaming began is a failed review and left for the worker's
+ * own retry rules.
+ */
+export function ampExitError(code: number, stderr: string, streamed: boolean): Error {
+  const detail = stderr.trim() ? `: ${stderr.trim()}` : ""
+  if (streamed) return new Error(`Amp CLI exited with status ${code}${detail}`)
+  return new TransientAmpError(`Amp CLI exited with status ${code} before starting the review${detail}`)
 }
 
 export function evaluationAmpArgs(options: ResolvedAmpOptions): string[] {

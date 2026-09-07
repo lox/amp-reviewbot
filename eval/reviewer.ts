@@ -14,6 +14,8 @@ const outputFields = {
   threadId: z.string().nullable(),
   models: z.array(z.string()),
   trace: z.array(z.unknown()),
+  /** How many times Amp was run again for this review, in the same or a fresh thread. */
+  retries: z.number().int().nonnegative(),
 }
 const outputSchema = z.discriminatedUnion("status", [
   z.object({ ...outputFields, status: z.literal("completed"), rawResult: z.string() }).strict(),
@@ -112,6 +114,7 @@ export async function runEvaluationReview(
                     threadId: parsed.threadId,
                     models: parsed.models,
                     trace: parsed.trace,
+                    retries: parsed.retries,
                   }
                 : parsed,
             )

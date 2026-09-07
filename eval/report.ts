@@ -116,6 +116,8 @@ export interface ReviewResources {
   totalReviewMs: number
   medianReviewMs: number
   longestReviewMs: number
+  /** Reviews in which Amp had to be run again, and how many extra runs that took. */
+  retried: { reviews: number; runs: number }
   /** What Amp billed, from `amp threads usage`; absent when no review recorded it. */
   billed?: {
     reviews: number
@@ -150,11 +152,16 @@ export function reviewResources(run: EvalRun): ReviewResources | undefined {
   const traced = run.samples.flatMap((sample) =>
     sample.trace === undefined || sample.trace.length === 0 ? [] : [sumTraceUsage(sample.trace)],
   )
+  const retries = run.samples.flatMap((sample) => sample.retries ?? [])
   return {
     reviews: durations.length,
     totalReviewMs: durations.reduce((sum, ms) => sum + ms, 0),
     medianReviewMs: median(durations),
     longestReviewMs: Math.max(...durations),
+    retried: {
+      reviews: retries.filter((count) => count > 0).length,
+      runs: retries.reduce((sum, count) => sum + count, 0),
+    },
     ...(usages.length === 0
       ? {}
       : {
@@ -190,7 +197,12 @@ function resourceLines(run: EvalRun): string[] {
   const lines = [
     `Review time: ${countLabel(resources.reviews, "review")} took ${hours(resources.totalReviewMs)} in total; median ${minutes(resources.medianReviewMs)}, longest ${minutes(resources.longestReviewMs)}.`,
   ]
-  const { billed, traced, usageUnavailable } = resources
+  const { retried, billed, traced, usageUnavailable } = resources
+  if (retried.reviews > 0) {
+    lines.push(
+      `Amp had to be run again in ${countLabel(retried.reviews, "review")} (${countLabel(retried.runs, "extra run")}); the time above includes those runs.`,
+    )
+  }
   if (billed !== undefined) {
     const coverage = billed.reviews === resources.reviews ? "" : ` (${billed.reviews} of ${resources.reviews} reviews reported usage)`
     lines.push(

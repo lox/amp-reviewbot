@@ -268,6 +268,8 @@ const sampleFields = {
   reviewDurationMs: z.number().int().nonnegative().optional(),
   matchingDurationMs: z.number().int().nonnegative().optional(),
   trace: z.array(z.unknown()).optional(),
+  /** How many times Amp was run again for this review; absent when the reviewer never reported. */
+  retries: z.number().int().nonnegative().optional(),
   evidenceBoundaryViolations: z.array(z.string().min(1)).optional(),
   usage: threadUsageSchema.optional(),
   /** Why `usage` is missing, when the lookup ran: Amp's explanation or the lookup error. */

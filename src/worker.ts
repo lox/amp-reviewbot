@@ -165,7 +165,8 @@ function isValidReviewResult(text: string): boolean {
   }
 }
 
-class TransientAmpError extends Error {}
+/** An Amp failure worth retrying: the review can be run again in the same or a fresh thread. */
+export class TransientAmpError extends Error {}
 class ContinuedThreadModeError extends TransientAmpError {}
 class ReviewCallbackError extends Error {}
 class AmpReviewCancelledError extends Error {}
