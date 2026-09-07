@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process"
 import { createHash, randomBytes } from "node:crypto"
 import { mkdir, open, readFile, rename, unlink } from "node:fs/promises"
-import { dirname, resolve } from "node:path"
+import { dirname, relative, resolve, sep } from "node:path"
 import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
 import { z } from "zod"
@@ -11,10 +11,12 @@ import {
   finalizeReview,
   parseReviewResult,
   reviewThreadTitle,
+  severityGuide,
 } from "../src/review.js"
 import type { ReviewFinding, ReviewJob } from "../src/types.js"
 import { pinnedModel, reviewMode } from "../src/amp.js"
 import { checkReviewTrace, modelsFromTrace } from "./evidence.js"
+import { formatAbDecision, interleavedAbTasks, loadFrozenSet, type AbVariant } from "./ab.js"
 import { judgeIssue, type AmpVersions } from "./judge.js"
 import { checkPack, describePack, loadPack } from "./pack.js"
 import { formatReport } from "./report.js"
@@ -63,6 +65,20 @@ type FinishOptions = {
   timeoutMs: number
 }
 
+type AbOptions = {
+  packPath: string
+  setName: string
+  promptVariantA: string
+  promptVariantB: string
+  reviewerApiKey: string
+  concurrency: number
+  timeoutMs: number
+  orderSeed: string
+  sourceCache: string
+  outputA: string
+  outputB: string
+}
+
 type FinishProgress = (finished: number, total: number, succeeded: boolean) => void
 
 async function main(): Promise<void> {
@@ -93,6 +109,13 @@ async function main(): Promise<void> {
       await output.close()
       if (!complete && !checkpointed) await unlink(options.outputPath).catch(() => {})
     }
+    return
+  }
+  if (command === "ab") {
+    const options = abOptions(process.argv.slice(3))
+    const result = await runAb(options)
+    console.log(`\n${result.decision}`)
+    console.log(`\nA results: ${options.outputA}\nB results: ${options.outputB}`)
     return
   }
   if (command === "finish") {
@@ -169,7 +192,7 @@ async function runEvaluation(
   }
   const sourcePreparation = loaded.sourcePreparation
   const startedAt = new Date().toISOString()
-  const reviewer = await reviewerProvenance(account)
+  const reviewer = await reviewerProvenance(account, [options.outputPath])
   const tasks = orderedReviewTasks(corpus.cases, options.samplesPerCase, options.orderSeed).map(
     ({ evalCase, sample }) => ({
       evalCase,
@@ -243,6 +266,82 @@ async function runEvaluation(
   )
   const run = evalRunSchema.parse({ ...judgedRun, completedAt: new Date().toISOString() })
   return { run, score: scoreRun(run) }
+}
+
+async function runAb(options: AbOptions): Promise<{ runA: EvalRun; runB: EvalRun; decision: string }> {
+  const wallStarted = Date.now()
+  console.log("Checking the separate review account key...")
+  const account = await reviewAuthentication(options.reviewerApiKey)
+  console.log("Checking source commits, changed lines, and the frozen set...")
+  const loaded = await loadPack(options.packPath, options.sourceCache)
+  const frozen = await loadFrozenSet(options.packPath, options.setName, loaded.corpus.cases)
+  const [variantA, variantB] = await Promise.all([
+    loadPromptVariant(options.promptVariantA),
+    loadPromptVariant(options.promptVariantB),
+  ])
+  const promptA = new Map(frozen.cases.map((evalCase) => [evalCase.id, variantA.build(evalJob(evalCase, 1))]))
+  const promptB = new Map(frozen.cases.map((evalCase) => [evalCase.id, variantB.build(evalJob(evalCase, 1))]))
+  const reviewer = await reviewerProvenance(account, [options.outputA, options.outputB])
+  const startedAt = new Date().toISOString()
+  const tasks = interleavedAbTasks(frozen.cases, options.orderSeed)
+  let finished = 0
+  console.log(`Running ${tasks.length} interleaved reviews, up to ${options.concurrency} at a time...`)
+  const results = await mapConcurrent(tasks, options.concurrency, async ({ evalCase, variant }) => {
+    const reviewPrompt = (variant === "A" ? promptA : promptB).get(evalCase.id)
+    if (!reviewPrompt) throw new Error(`Prompt ${variant} was not built for ${evalCase.id}`)
+    const sample = await runReviewSample(
+      evalCase,
+      loaded.sourcePreparation.get(evalCase.id),
+      1,
+      options,
+      { reviewPrompt, collectUsage: false },
+    )
+    finished += 1
+    console.log(
+      `[${finished}/${tasks.length}] ${evalCase.id}, prompt ${variant}: ${sample.status === "completed" ? "completed" : "did not complete"} (${formatDuration(sample.durationMs)})`,
+    )
+    return { variant, sample }
+  })
+  const completedAt = new Date().toISOString()
+  const makeRun = (variant: AbVariant): EvalRun => {
+    const samples = results.filter((result) => result.variant === variant).map((result) => result.sample)
+    const cases = frozen.cases
+    return evalRunSchema.parse({
+      schemaVersion: 3,
+      corpusVersion: `${loaded.corpus.version}-${frozen.identifier}`,
+      corpusHash: corpusContentHash({ version: `${loaded.corpus.version}-${frozen.identifier}`, cases }),
+      startedAt,
+      reviewsCompletedAt: completedAt,
+      completedAt,
+      requestedSamplesPerCase: 1,
+      concurrency: options.concurrency,
+      timeoutMs: options.timeoutMs,
+      judgeTimeoutMs: options.timeoutMs,
+      orderSeed: options.orderSeed,
+      executionOrder: samples.map((sample) => ({ caseId: sample.caseId, sample: sample.sample })),
+      reviewer,
+      cases,
+      samples,
+    })
+  }
+  const runA = makeRun("A")
+  const runB = makeRun("B")
+  await Promise.all([
+    writeNewRun(options.outputA, runA),
+    writeNewRun(options.outputB, runB),
+  ])
+  return {
+    runA,
+    runB,
+    decision: formatAbDecision({
+      setIdentifier: frozen.identifier,
+      promptA: variantA.identifier,
+      promptB: variantB.identifier,
+      runA,
+      runB,
+      wallTimeMs: Date.now() - wallStarted,
+    }),
+  }
 }
 
 export function orderedReviewTasks(
@@ -359,7 +458,8 @@ async function runReviewSample(
   evalCase: EvalCase,
   sourcePreparation: string | undefined,
   sample: number,
-  options: RunOptions,
+  options: Pick<RunOptions, "reviewerApiKey" | "timeoutMs">,
+  fast: { reviewPrompt?: string; collectUsage?: boolean } = {},
 ): Promise<EvalSample> {
   const startedAt = Date.now()
   const controller = new AbortController()
@@ -380,7 +480,9 @@ async function runReviewSample(
     baseSha: evalCase.baseSha,
     headSha: evalCase.headSha,
   }
-  const reviewPrompt = buildReviewPrompt(job, { failOn, preparedSource: sourcePreparation !== undefined })
+  const reviewPrompt =
+    fast.reviewPrompt ??
+    buildReviewPrompt(job, { failOn, preparedSource: sourcePreparation !== undefined })
   const sourceSetupPrompt =
     sourcePreparation === undefined ? undefined : buildSourceSetupPrompt(sourcePreparation)
   const prompt =
@@ -402,7 +504,7 @@ async function runReviewSample(
     // The review is over and its deadline no longer applies; the usage lookup
     // is bookkeeping that must not change the review's status or duration.
     clearTimeout(timeout)
-    if (threadId !== null) {
+    if (threadId !== null && fast.collectUsage !== false) {
       const lookup = await readThreadUsage(threadId, options.reviewerApiKey)
       if ("usage" in lookup) usage = lookup.usage
       else usageUnavailable = lookup.unavailable
@@ -522,7 +624,15 @@ function changedLineMap(evalCase: EvalCase): Map<string, Set<number>> {
 
 async function reviewerProvenance(
   account: ReviewAuthentication,
+  ignoredPaths: string[] = [],
 ): Promise<Omit<EvalRun["reviewer"], "cliVersion"> & { cliVersion: string }> {
+  const statusArgs = ["status", "--porcelain", "--untracked-files=all", "--", "."]
+  for (const path of ignoredPaths) {
+    const local = relative(resolve("."), resolve(path))
+    if (local !== "" && local !== ".." && !local.startsWith(`..${sep}`)) {
+      statusArgs.push(`:(exclude)${local}`)
+    }
+  }
   const [
     { stdout: gitCommit },
     { stdout: status },
@@ -537,7 +647,7 @@ async function reviewerProvenance(
     methodology,
   ] = await Promise.all([
     execFileAsync("git", ["rev-parse", "HEAD"]),
-    execFileAsync("git", ["status", "--porcelain"]),
+    execFileAsync("git", statusArgs),
     readFile(resolve("node_modules", "@ampcode", "sdk", "package.json"), "utf8"),
     readFile(resolve("node_modules", "@ampcode", "cli", "package.json"), "utf8"),
     readFile(resolve("src", "review.ts"), "utf8"),
@@ -645,6 +755,48 @@ function runOptions(args: string[]): RunOptions {
   }
 }
 
+function abOptions(args: string[]): AbOptions {
+  const [packPath, setName, promptVariantA, promptVariantB] = positionalArgs(args)
+  if (!packPath || !setName || !promptVariantA || !promptVariantB) {
+    throw new Error("ab needs PACK, SET, A_VARIANT, and B_VARIANT: ab PACK SET A_VARIANT B_VARIANT")
+  }
+  if (process.env.AMP_API_KEY) {
+    throw new Error("Unset AMP_API_KEY; A/B reviews require the separate reviewer account")
+  }
+  const reviewerApiKey = process.env.AMP_EVAL_REVIEWER_API_KEY
+  delete process.env.AMP_EVAL_REVIEWER_API_KEY
+  if (!reviewerApiKey) {
+    throw new Error("Set AMP_EVAL_REVIEWER_API_KEY to a separate account that cannot access the example pack")
+  }
+  const concurrency = positiveInteger(flag(args, "--concurrency") ?? "3", "--concurrency", 10)
+  const timeoutMinutes = positiveInteger(flag(args, "--timeout-minutes") ?? "30", "--timeout-minutes", 120)
+  const stamp = new Date().toISOString().replaceAll(/[:.]/g, "-")
+  const outputDirectory = resolve(packPath, ".eval-runs")
+  const cacheRoot = flag(args, "--cache") ?? resolve(packPath, ".eval-cache")
+  return {
+    packPath,
+    setName,
+    promptVariantA,
+    promptVariantB,
+    reviewerApiKey,
+    concurrency,
+    timeoutMs: timeoutMinutes * 60_000,
+    orderSeed: flag(args, "--order-seed") ?? randomBytes(16).toString("hex"),
+    sourceCache: resolve(cacheRoot, "source"),
+    outputA: resolve(outputDirectory, `${stamp}-${setName}-A.json`),
+    outputB: resolve(outputDirectory, `${stamp}-${setName}-B.json`),
+  }
+}
+
+function positionalArgs(args: string[]): string[] {
+  const values: string[] = []
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index]!.startsWith("--")) index += 1
+    else values.push(args[index]!)
+  }
+  return values
+}
+
 function finishOptions(args: string[]): FinishOptions {
   const runPath = requiredInput(args, "--run")
   if (process.env.AMP_API_KEY) {
@@ -748,6 +900,62 @@ async function replaceRunArtifact(path: string, run: EvalRun): Promise<void> {
   }
 }
 
+async function writeNewRun(path: string, run: EvalRun): Promise<void> {
+  await mkdir(dirname(path), { recursive: true })
+  const output = await createRunArtifact(path)
+  try {
+    await writeRunArtifact(output, run)
+  } finally {
+    await output.close()
+  }
+}
+
+export async function loadPromptVariant(input: string): Promise<{
+  identifier: string
+  build: (job: ReviewJob) => string
+}> {
+  if (input === "current") {
+    return promptVariant("current", (job) =>
+      buildReviewPrompt(job, { failOn, preparedSource: true }),
+    )
+  }
+  if (input === "pre-severity-guide") {
+    const guide = `\n${severityGuide(failOn)}\n`
+    return promptVariant("pre-severity-guide", (job) =>
+      buildReviewPrompt(job, { failOn, preparedSource: true }).replace(guide, "\n"),
+    )
+  }
+  const instructions = (await readFile(resolve(input), "utf8")).trim()
+  if (!instructions) throw new Error(`Prompt variant file is empty: ${input}`)
+  return promptVariant(input, (job) =>
+    buildReviewPrompt(job, { failOn, preparedSource: true, additionalInstructions: instructions }),
+  )
+}
+
+function promptVariant(name: string, build: (job: ReviewJob) => string) {
+  const identifyingJob: ReviewJob = {
+    id: "prompt-identifier",
+    sourceDeliveryId: "prompt-identifier",
+    eventType: "eval.prompt-identifier",
+    installationId: "0",
+    repositoryId: "0",
+    repositoryFullName: "example/repository",
+    pullNumber: 1,
+    baseSha: "0".repeat(40),
+    headSha: "1".repeat(40),
+    ampProject: "no-project",
+    pullRequestContext: null,
+    checkRunId: null,
+    ampThreadId: null,
+    status: "running",
+    attempts: 1,
+  }
+  return {
+    identifier: `${name}@${hash(build(identifyingJob)).slice(0, 12)}`,
+    build,
+  }
+}
+
 async function installedAmpVersions(): Promise<AmpVersions> {
   const [sdkPackage, cliPackage] = await Promise.all([
     readFile(resolve("node_modules", "@ampcode", "sdk", "package.json"), "utf8"),
@@ -775,11 +983,12 @@ function printHelp(): void {
   console.log(`Usage:
   npm run eval -- check PACK
   npm run eval -- run PACK [--samples 3] [--concurrency 2] [--split development|holdout] [--versions blocking,control]
+  npm run eval -- ab PACK SET A_VARIANT B_VARIANT [--concurrency 3]
   npm run eval -- finish RUN.json [--concurrency 2]
   npm run eval -- report RUN.json
   npm run eval -- compare A.json B.json
 
-Run reviews with public research against a fixed copy of the target repository, validate an example pack, finish interrupted comparisons, read a saved report, or compare two saved results version by version. Running reviews requires AMP_EVAL_REVIEWER_API_KEY for a separate account that cannot access the example pack.`)
+Run reviews with public research against a fixed copy of the target repository, compare two prompt versions on a frozen set, validate an example pack, finish interrupted comparisons, read a saved report, or compare two saved results version by version. Running reviews requires AMP_EVAL_REVIEWER_API_KEY for a separate account that cannot access the example pack.`)
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {

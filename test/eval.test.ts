@@ -11,6 +11,7 @@ import { pathToFileURL } from "node:url"
 import { promisify } from "node:util"
 import { AmpOptionsSchema, type StreamMessage } from "@ampcode/sdk"
 import { checkReviewTrace, modelsFromTrace } from "../eval/evidence.js"
+import { formatAbDecision, interleavedAbTasks, loadFrozenSet } from "../eval/ab.js"
 import { judgeIssue, resolveMatchingVotes } from "../eval/judge.js"
 import { checkPack, exampleSchema, loadPack } from "../eval/pack.js"
 import { chanceSentence, formatComparison } from "../eval/compare.js"
@@ -26,6 +27,7 @@ import {
 } from "../eval/reviewer.js"
 import {
   finishJudgements,
+  loadPromptVariant,
   orderedReviewTasks,
   recordFinishedRun,
   selectCases,
@@ -36,6 +38,7 @@ import {
   evalRunSchema,
   evalSampleSchema,
   expectedConclusion,
+  type EvalCase,
   type ExpectedResult,
 } from "../eval/schema.js"
 import { scoreRun } from "../eval/score.js"
@@ -816,7 +819,7 @@ describe("eval example packs", () => {
   })
 
   it("can run only the versions that drive the blocking numbers", () => {
-    const cases = [
+    const cases: EvalCase[] = [
       evalCase("control", control),
       evalCase("advisory", { issues: [{ ...blocking.issues[0]!, severity: "medium" }] }),
       evalCase("blocking", blocking),
@@ -843,6 +846,79 @@ describe("eval example packs", () => {
         new Set(cases.map((item) => item.id)),
       )
     }
+  })
+
+  it("interleaves A/B pairs with reproducible order", () => {
+    const cases = [evalCase("one", control), evalCase("two", control), evalCase("three", control)]
+    const tasks = interleavedAbTasks(cases, "fixed-seed")
+    assert.deepEqual(tasks, interleavedAbTasks(cases, "fixed-seed"))
+    for (let index = 0; index < tasks.length; index += 2) {
+      assert.equal(tasks[index]!.evalCase.id, tasks[index + 1]!.evalCase.id)
+      assert.deepEqual(new Set([tasks[index]!.variant, tasks[index + 1]!.variant]), new Set(["A", "B"]))
+    }
+  })
+
+  it("loads an exact 10/3/3 frozen set from the private pack", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "reviewbot-frozen-set-"))
+    const advisory: ExpectedResult = {
+      issues: [{ ...blocking.issues[0]!, severity: "medium" }],
+    }
+    const cases: EvalCase[] = [
+      ...Array.from({ length: 10 }, (_, index) => evalCase(`blocking-${index}/version`, blocking)),
+      ...Array.from({ length: 3 }, (_, index) => evalCase(`clean-${index}/version`, control)),
+      ...Array.from({ length: 3 }, (_, index) => evalCase(`advisory-${index}/version`, advisory)),
+    ]
+    try {
+      await mkdir(join(directory, "sets"))
+      await writeFile(
+        join(directory, "sets", "fast-v1.json"),
+        JSON.stringify({
+          formatVersion: 1,
+          name: "fast-v1",
+          cases: cases.map((evalCase) => {
+            const [example, version] = evalCase.id.split("/")
+            return { example, version }
+          }),
+        }),
+      )
+
+      const frozen = await loadFrozenSet(directory, "fast-v1", cases)
+      assert.deepEqual(frozen.cases.map((evalCase) => evalCase.id), cases.map((evalCase) => evalCase.id))
+      assert.match(frozen.identifier, /^fast-v1@[0-9a-f]{12}$/)
+
+      cases[0]!.split = "holdout"
+      await assert.rejects(loadFrozenSet(directory, "fast-v1", cases), /must not contain holdout/)
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  it("builds safe built-in prompt variants without loading code from refs", async () => {
+    const job = {
+      id: "eval-prompt-1",
+      sourceDeliveryId: "eval-prompt-1",
+      eventType: "eval.replay",
+      installationId: "0",
+      repositoryId: "0",
+      repositoryFullName: "example/repository",
+      pullNumber: 42,
+      baseSha: "b".repeat(40),
+      headSha: "a".repeat(40),
+      ampProject: "no-project",
+      pullRequestContext: null,
+      checkRunId: null,
+      ampThreadId: null,
+      status: "running",
+      attempts: 1,
+    } as const
+    const [beforeGuide, current] = await Promise.all([
+      loadPromptVariant("pre-severity-guide"),
+      loadPromptVariant("current"),
+    ])
+
+    assert.doesNotMatch(beforeGuide.build(job), /Severity is about what happens/)
+    assert.match(current.build(job), /Severity is about what happens/)
+    assert.match(current.identifier, /^current@[0-9a-f]{12}$/)
   })
 
   it("allows public research but flags access to the target source", () => {
@@ -1432,6 +1508,66 @@ Use only this checked-out source.`
 })
 
 describe("eval scoring", () => {
+  it("prints the predeclared fast A/B decision from binary conclusions", () => {
+    const advisory: ExpectedResult = {
+      issues: [{ ...blocking.issues[0]!, severity: "medium" }],
+    }
+    const cases = [
+      ...Array.from({ length: 10 }, (_, index) => evalCase(`blocking-${index}`, blocking)),
+      ...Array.from({ length: 3 }, (_, index) => evalCase(`clean-${index}`, control)),
+      ...Array.from({ length: 3 }, (_, index) => evalCase(`advisory-${index}`, advisory)),
+    ]
+    const run = (blocked: number) =>
+      makeRun(
+        cases,
+        1,
+        cases.map((evalCase, index) =>
+          completed(
+            evalCase.id,
+            1,
+            evalCase.expected,
+            index < blocked ? "failure" : "success",
+            index < blocked ? [highFinding] : [],
+            [],
+          ),
+        ),
+      )
+    const decision = formatAbDecision({
+      setIdentifier: "fast-v1@abc",
+      promptA: "old@aaa",
+      promptB: "new@bbb",
+      runA: run(5),
+      runB: run(8),
+      wallTimeMs: 65_000,
+    })
+
+    assert.match(decision, /Blocking versions blocked: +A 5\/10 +B 8\/10/)
+    assert.match(decision, /Non-blocking versions blocked: A 0\/6 +B 0\/6/)
+    assert.match(decision, /Recommendation: PROMISING B/)
+    assert.match(decision, /Wall time: 1m 5s/)
+
+    const incompleteB = makeRun(
+      cases,
+      1,
+      cases.map((evalCase, index) =>
+        index < 3
+          ? failed(evalCase.id, 1, evalCase.expected)
+          : completed(evalCase.id, 1, evalCase.expected, "success", [], []),
+      ),
+    )
+    const incomplete = formatAbDecision({
+      setIdentifier: "fast-v1@abc",
+      promptA: "old@aaa",
+      promptB: "new@bbb",
+      runA: run(5),
+      runB: incompleteB,
+      wallTimeMs: 65_000,
+    })
+    assert.match(incomplete, /Execution failures: 3/)
+    assert.match(incomplete, /Recommendation: KEEP A/)
+    assert.doesNotMatch(incomplete, /Recommendation: REGRESSION/)
+  })
+
   it("scores each review by whether it made the right call", () => {
     const cases = [evalCase("control", control), evalCase("blocking", blocking)]
     const run = makeRun(cases, 3, [
