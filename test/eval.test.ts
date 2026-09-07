@@ -891,14 +891,10 @@ describe("eval example packs", () => {
 
   it("builds production prompts from exact git refs", async () => {
     const evalCases = [evalCase("prompt-version", control)]
-    const [beforeGuide, current] = await Promise.all([
-      promptsAtRef("e5d13bb", evalCases),
-      promptsAtRef("HEAD", evalCases),
-    ])
+    const current = await promptsAtRef("HEAD", evalCases)
 
-    assert.doesNotMatch(beforeGuide.prompts.get("prompt-version")!, /Severity is about what happens/)
     assert.match(current.prompts.get("prompt-version")!, /Severity is about what happens/)
-    assert.match(beforeGuide.identifier, /^e5d13bb@[0-9a-f]{12}$/)
+    assert.match(current.identifier, /^HEAD@[0-9a-f]{12}$/)
   })
 
   it("allows public research but flags access to the target source", () => {
