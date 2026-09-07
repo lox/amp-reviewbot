@@ -41,9 +41,11 @@ async function main(): Promise<void> {
   )
   const trace: StreamMessage[] = []
   const threadIds: string[] = []
-  // The worker's retry log is silent here, so the count is the only record of
-  // how many times Amp had to be run again for this review.
-  let retries = 0
+  // The worker's retry log is silent here, so this count is the only record of
+  // how many times Amp was run for this review. Counting runs as they start
+  // keeps a cancellation during the retry delay from counting as a run.
+  let ampRuns = 0
+  const retries = () => Math.max(0, ampRuns - 1)
 
   try {
     try {
@@ -60,20 +62,21 @@ async function main(): Promise<void> {
           if (threadIds.length > 0) keepThreadTrace(trace, id)
           threadIds.push(id)
         },
-        beforeRetry: async () => {
-          retries += 1
-        },
+        beforeRetry: async () => {},
         onMessage: (message) => {
           trace.push(message)
         },
-        executeAmp: executeAmpWithPluginReady,
+        executeAmp: (options) => {
+          ampRuns += 1
+          return executeAmpWithPluginReady(options)
+        },
       })
       process.stdout.write(
-        `${JSON.stringify({ status: "completed", rawResult, threadId: threadIds.at(-1) ?? null, models: modelsFromTrace(trace), trace, retries })}\n`,
+        `${JSON.stringify({ status: "completed", rawResult, threadId: threadIds.at(-1) ?? null, models: modelsFromTrace(trace), trace, retries: retries() })}\n`,
       )
     } catch (error) {
       process.stdout.write(
-        `${JSON.stringify({ status: "error", error: errorMessage(error), threadId: threadIds.at(-1) ?? null, models: modelsFromTrace(trace), trace, retries })}\n`,
+        `${JSON.stringify({ status: "error", error: errorMessage(error), threadId: threadIds.at(-1) ?? null, models: modelsFromTrace(trace), trace, retries: retries() })}\n`,
       )
     }
   } finally {
