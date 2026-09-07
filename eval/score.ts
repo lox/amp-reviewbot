@@ -1,22 +1,43 @@
 import { isBlockingSeverity } from "../src/review.js"
 import type { EvalRun, EvalSample, ExpectedIssue } from "./schema.js"
-import { expectedConclusion, expectedKind } from "./schema.js"
+import { expectedKind } from "./schema.js"
 
+/**
+ * The reviewer's job, as production sees it, is one call per pull request:
+ * block it or let it through. A version with a recorded blocking bug gets the
+ * right call when the reviewer blocks it for that bug at blocking urgency.
+ * Every other version gets the right call when the reviewer does not block it.
+ */
 export type CaseScore = {
   caseId: string
+  kind: "control" | "advisory" | "blocking"
+  /** Reviews requested for this version. */
   samples: number
+  completed: number
   knownIssues: number
-  operationalCompletion: number
-  conclusionAgreement: number
-  groundedConclusionAgreement: number
-  cleanAlertRate: number | null
-  issueDetectionRate: number | null
-  frozenLabelMatchFraction: number | null
-  severityAgreement: number | null
-  severityThresholdAgreement: number | null
-  judgeCoverage: number | null
-  judgeDisagreementRate: number | null
-  conclusions: Record<"success" | "neutral" | "failure" | "error", number>
+  /** Completed reviews that made the right call. */
+  rightCalls: number
+  /** Blocking versions: blocked because a recorded blocking bug was reported at blocking urgency. */
+  blockedForRecordedBug: number
+  /** Blocking versions: blocked, but no recorded blocking bug was reported at blocking urgency. */
+  blockedForOtherReason: number
+  /** Blocking versions: a recorded blocking bug was reported, but below blocking urgency. */
+  foundAtLowerUrgency: number
+  /** Blocking versions: no recorded blocking bug was reported at all. */
+  missed: number
+  /** Non-blocking versions: reviews whose check would have failed. */
+  wronglyBlocked: number
+  /** Control versions: reviews with no findings at all. */
+  quiet: number
+  /** Recorded non-blocking issues, counted once per completed review. */
+  advisoryChances: number
+  advisoryFound: number
+  /** Retained findings that matched no recorded issue. Unverified, not wrong. */
+  unmatchedFindings: number
+  /** Raw findings dropped for not pointing at a changed line. */
+  droppedFindings: number
+  /** Recorded issues whose comparison with the findings never finished. */
+  uncheckedIssues: number
 }
 
 export type SeedScore = {
@@ -28,19 +49,28 @@ export type SeedScore = {
   outcome: "pass" | "unstable" | "fail"
 }
 
+export type Scorecard = {
+  badPrs: {
+    versions: number
+    reviews: number
+    blocked: number
+    blockedForOtherReason: number
+    foundAtLowerUrgency: number
+    missed: number
+    versionsRightEveryTime: number
+  }
+  okPrs: { versions: number; reviews: number; wronglyBlocked: number; versionsRightEveryTime: number }
+  cleanPrs: { versions: number; reviews: number; quiet: number }
+  advisoryIssues: { chances: number; found: number }
+}
+
 export type EvalScore = {
   cases: CaseScore[]
   seeds: SeedScore[]
-  operationalCompletion: number
-  conclusionAgreement: number
-  groundedConclusionAgreement: number
-  cleanAlertRate: number | null
-  issueDetectionRate: number | null
-  frozenLabelMatchFraction: number | null
-  severityAgreement: number | null
-  severityThresholdAgreement: number | null
-  judgeCoverage: number | null
-  judgeDisagreementRate: number | null
+  scorecard: Scorecard
+  reviews: number
+  completedReviews: number
+  uncheckedIssues: number
 }
 
 type CompletedSample = Extract<EvalSample, { status: "completed" }>
@@ -55,7 +85,7 @@ export function scoreRun(run: EvalRun): EvalScore {
 
   const cases = [...byCase.entries()]
     .sort(([left], [right]) => left.localeCompare(right))
-    .map(([caseId, samples]) => scoreCase(caseId, samples))
+    .map(([caseId, samples]) => scoreCase(caseId, samples, run.requestedSamplesPerCase))
   const casesBySeed = new Map<string, EvalRun["cases"]>()
   for (const evalCase of run.cases) {
     const seedCases = casesBySeed.get(evalCase.seedId) ?? []
@@ -69,7 +99,7 @@ export function scoreRun(run: EvalRun): EvalScore {
     ).filter((sampleNumber) =>
       seedCases.every((evalCase) => {
         const sample = byCase.get(evalCase.id)?.find((candidate) => candidate.sample === sampleNumber)
-        return sample !== undefined && isGroundedConclusion(sample)
+        return sample !== undefined && isRightCall(sample)
       }),
     ).length
     return {
@@ -82,89 +112,105 @@ export function scoreRun(run: EvalRun): EvalScore {
     }
   })
 
+  const blocking = cases.filter((item) => item.kind === "blocking")
+  const nonBlocking = cases.filter((item) => item.kind !== "blocking")
+  const controls = cases.filter((item) => item.kind === "control")
+  const sum = (items: CaseScore[], pick: (item: CaseScore) => number) =>
+    items.reduce((total, item) => total + pick(item), 0)
+  const rightEveryTime = (items: CaseScore[]) => items.filter(isRightEveryTime).length
+
   return {
     cases,
     seeds,
-    operationalCompletion: mean(cases.map((item) => item.operationalCompletion))!,
-    conclusionAgreement: mean(cases.map((item) => item.conclusionAgreement))!,
-    groundedConclusionAgreement: mean(cases.map((item) => item.groundedConclusionAgreement))!,
-    cleanAlertRate: mean(cases.map((item) => item.cleanAlertRate)),
-    issueDetectionRate: mean(cases.map((item) => item.issueDetectionRate)),
-    frozenLabelMatchFraction: mean(cases.map((item) => item.frozenLabelMatchFraction)),
-    severityAgreement: mean(cases.map((item) => item.severityAgreement)),
-    severityThresholdAgreement: mean(cases.map((item) => item.severityThresholdAgreement)),
-    judgeCoverage: mean(cases.map((item) => item.judgeCoverage)),
-    judgeDisagreementRate: mean(cases.map((item) => item.judgeDisagreementRate)),
+    scorecard: {
+      badPrs: {
+        versions: blocking.length,
+        reviews: sum(blocking, (item) => item.completed),
+        blocked: sum(blocking, (item) => item.blockedForRecordedBug),
+        blockedForOtherReason: sum(blocking, (item) => item.blockedForOtherReason),
+        foundAtLowerUrgency: sum(blocking, (item) => item.foundAtLowerUrgency),
+        missed: sum(blocking, (item) => item.missed),
+        versionsRightEveryTime: rightEveryTime(blocking),
+      },
+      okPrs: {
+        versions: nonBlocking.length,
+        reviews: sum(nonBlocking, (item) => item.completed),
+        wronglyBlocked: sum(nonBlocking, (item) => item.wronglyBlocked),
+        versionsRightEveryTime: rightEveryTime(nonBlocking),
+      },
+      cleanPrs: {
+        versions: controls.length,
+        reviews: sum(controls, (item) => item.completed),
+        quiet: sum(controls, (item) => item.quiet),
+      },
+      advisoryIssues: {
+        chances: sum(cases, (item) => item.advisoryChances),
+        found: sum(cases, (item) => item.advisoryFound),
+      },
+    },
+    reviews: run.samples.length,
+    completedReviews: sum(cases, (item) => item.completed),
+    uncheckedIssues: sum(cases, (item) => item.uncheckedIssues),
   }
 }
 
-function scoreCase(caseId: string, samples: EvalSample[]): CaseScore {
+/** Every requested repeat completed and made the right call. */
+export function isRightEveryTime(item: CaseScore): boolean {
+  return item.completed === item.samples && item.rightCalls === item.samples
+}
+
+function scoreCase(caseId: string, samples: EvalSample[], requestedSamples: number): CaseScore {
   const expected = samples[0]!.expected
   const kind = expectedKind(expected)
   const completed = samples.filter((sample): sample is CompletedSample => sample.status === "completed")
-  const assignments = new Map(completed.map((sample) => [sample.sample, assignFindings(sample)]))
-  const detected = [...assignments.values()].reduce((total, assignment) => total + assignment.size, 0)
-  const severityMatches = completed.reduce(
-    (total, sample) => total + assignFindings(sample, matchedSeverity).size,
-    0,
-  )
-  const thresholdMatches = completed.reduce(
-    (total, sample) => total + assignFindings(sample, matchedThreshold).size,
-    0,
-  )
-  const reportedFindings = completed.reduce(
-    (total, sample) => total + sample.retainedResult.findings.length,
-    0,
-  )
-  const eligibleJudgements = completed.reduce(
-    (total, sample) =>
-      total + (sample.retainedResult.findings.length > 0 ? expected.issues.length : 0),
-    0,
-  )
-  const judgements = completed.flatMap((sample) => sample.judgements)
-  const conclusions = { success: 0, neutral: 0, failure: 0, error: 0 }
+  const advisoryIssues = expected.issues.filter((issue) => !isBlocking(issue.severity))
 
-  for (const sample of samples) {
-    if (sample.status === "error") conclusions.error += 1
-    else conclusions[sample.conclusion] += 1
+  let blockedForRecordedBug = 0
+  let blockedForOtherReason = 0
+  let foundAtLowerUrgency = 0
+  let missed = 0
+  let wronglyBlocked = 0
+  let quiet = 0
+  let advisoryFound = 0
+  let unmatchedFindings = 0
+  let uncheckedIssues = 0
+
+  for (const sample of completed) {
+    const assignment = assignFindings(sample)
+    unmatchedFindings += sample.retainedResult.findings.length - assignment.size
+    advisoryFound += advisoryIssues.filter((issue) => assignment.has(issue.id)).length
+    if (sample.retainedResult.findings.length > 0) {
+      uncheckedIssues += expected.issues.length - sample.judgements.length
+    }
+    if (kind === "blocking") {
+      if (blocksRecordedBug(sample)) blockedForRecordedBug += 1
+      else if (sample.conclusion === "failure") blockedForOtherReason += 1
+      else if (describesRecordedBug(sample)) foundAtLowerUrgency += 1
+      else missed += 1
+    } else {
+      if (sample.conclusion === "failure") wronglyBlocked += 1
+      if (kind === "control" && sample.retainedResult.findings.length === 0) quiet += 1
+    }
   }
 
   return {
     caseId,
-    samples: samples.length,
+    kind,
+    samples: requestedSamples,
+    completed: completed.length,
     knownIssues: expected.issues.length,
-    operationalCompletion: completed.length / samples.length,
-    conclusionAgreement:
-      samples.filter(
-        (sample) =>
-          sample.status === "completed" && sample.conclusion === expectedConclusion(sample.expected),
-      ).length / samples.length,
-    groundedConclusionAgreement:
-      samples.filter((sample) => isGroundedConclusion(sample)).length / samples.length,
-    cleanAlertRate:
-      kind === "control"
-        ? completed.length === 0
-          ? null
-          : completed.filter((sample) => sample.retainedResult.findings.length > 0).length /
-            completed.length
-        : null,
-    issueDetectionRate:
-      kind === "control" ? null : detected / (expected.issues.length * samples.length),
-    frozenLabelMatchFraction:
-      kind === "control" || reportedFindings === 0 ? null : detected / reportedFindings,
-    severityAgreement:
-      kind === "control" || detected === 0 ? null : severityMatches / detected,
-    severityThresholdAgreement:
-      kind === "control" || detected === 0 ? null : thresholdMatches / detected,
-    judgeCoverage:
-      kind === "control" || eligibleJudgements === 0
-        ? null
-        : judgements.length / eligibleJudgements,
-    judgeDisagreementRate:
-      kind === "control" || judgements.length === 0
-        ? null
-        : judgements.filter((judgement) => judgement.disagreement).length / judgements.length,
-    conclusions,
+    rightCalls: completed.filter((sample) => isRightCall(sample)).length,
+    blockedForRecordedBug,
+    blockedForOtherReason,
+    foundAtLowerUrgency,
+    missed,
+    wronglyBlocked,
+    quiet,
+    advisoryChances: advisoryIssues.length * completed.length,
+    advisoryFound,
+    unmatchedFindings,
+    droppedFindings: completed.reduce((total, sample) => total + sample.omitted, 0),
+    uncheckedIssues,
   }
 }
 
@@ -181,36 +227,64 @@ function seedOutcome(passedSamples: number, samples: number): SeedScore["outcome
   return passedSamples > samples / 2 ? "unstable" : "fail"
 }
 
-function isGroundedConclusion(sample: EvalSample): boolean {
+function isRightCall(sample: EvalSample): boolean {
   if (sample.status === "error") return false
-  const kind = expectedKind(sample.expected)
-  if (kind === "control") {
-    return sample.conclusion === "success" && sample.retainedResult.findings.length === 0
-  }
-  const assignment = assignFindings(sample, matchedThreshold)
-  return (
-    sample.conclusion === expectedConclusion(sample.expected) &&
-    assignment.size === sample.expected.issues.length
-  )
+  if (expectedKind(sample.expected) === "blocking") return blocksRecordedBug(sample)
+  return sample.conclusion !== "failure"
 }
 
-function assignFindings(
-  sample: CompletedSample,
-  accepts: (issue: ExpectedIssue, sample: CompletedSample, findingIndex: number) => boolean = () =>
-    true,
-): Map<string, number> {
-  const judgements = new Map(
-    sample.judgements.map((judgement) => [judgement.issueId, judgement.matchingFindingIndices]),
-  )
+/** A recorded blocking issue matched a finding that itself has blocking urgency. */
+/**
+ * Some finding was judged to match a recorded blocking issue, whatever its
+ * urgency. Read from the judgements directly rather than the one-to-one
+ * assignment, so a finding shared with an advisory issue still counts.
+ */
+function describesRecordedBug(sample: CompletedSample): boolean {
+  return sample.judgements.some((judgement) => {
+    const issue = sample.expected.issues.find((candidate) => candidate.id === judgement.issueId)
+    return issue !== undefined && isBlocking(issue.severity) && judgement.matchingFindingIndices.length > 0
+  })
+}
+
+function blocksRecordedBug(sample: CompletedSample): boolean {
+  const findings = sample.retainedResult.findings
+  return sample.judgements.some((judgement) => {
+    const issue = sample.expected.issues.find((candidate) => candidate.id === judgement.issueId)
+    return (
+      issue !== undefined &&
+      isBlocking(issue.severity) &&
+      judgement.matchingFindingIndices.some((index) => {
+        const finding = findings[index]
+        return finding !== undefined && isBlocking(finding.severity)
+      })
+    )
+  })
+}
+
+function isBlocking(severity: ExpectedIssue["severity"]): boolean {
+  return isBlockingSeverity(severity, "high")
+}
+
+/**
+ * Pairs each recorded issue with at most one finding so a single finding
+ * cannot count as two issues (maximum bipartite matching).
+ */
+function assignFindings(sample: CompletedSample): Map<string, number> {
   const choices = new Map(
     sample.expected.issues.map((issue) => [
       issue.id,
-      (judgements.get(issue.id) ?? []).filter((finding) => accepts(issue, sample, finding)),
+      sample.judgements.find((judgement) => judgement.issueId === issue.id)?.matchingFindingIndices ??
+        [],
     ]),
   )
   const findingToIssue = new Map<number, string>()
 
-  for (const issue of sample.expected.issues) {
+  // Fixed order so a finding shared by a blocking and an advisory issue lands on the
+  // blocking one, whichever way the pack lists them.
+  const issues = [...sample.expected.issues].sort(
+    (a, b) => Number(isBlocking(b.severity)) - Number(isBlocking(a.severity)) || a.id.localeCompare(b.id),
+  )
+  for (const issue of issues) {
     assign(issue.id, new Set())
   }
   return new Map([...findingToIssue].map(([finding, issue]) => [issue, finding]))
@@ -227,30 +301,4 @@ function assignFindings(
     }
     return false
   }
-}
-
-function matchedSeverity(
-  issue: ExpectedIssue,
-  sample: CompletedSample,
-  findingIndex: number,
-): boolean {
-  return sample.retainedResult.findings[findingIndex]?.severity === issue.severity
-}
-
-function matchedThreshold(
-  issue: ExpectedIssue,
-  sample: CompletedSample,
-  findingIndex: number,
-): boolean {
-  const finding = sample.retainedResult.findings[findingIndex]
-  return (
-    finding !== undefined &&
-    isBlockingSeverity(finding.severity, "high") === isBlockingSeverity(issue.severity, "high")
-  )
-}
-
-function mean(values: Array<number | null>): number | null {
-  const present = values.filter((value): value is number => value !== null)
-  if (present.length === 0) return null
-  return present.reduce((total, value) => total + value, 0) / present.length
 }

@@ -13,6 +13,7 @@ import { AmpOptionsSchema, type StreamMessage } from "@ampcode/sdk"
 import { checkReviewTrace, modelsFromTrace } from "../eval/evidence.js"
 import { judgeIssue, resolveMatchingVotes } from "../eval/judge.js"
 import { checkPack, exampleSchema, loadPack } from "../eval/pack.js"
+import { chanceSentence, formatComparison } from "../eval/compare.js"
 import { formatReport, reviewResources } from "../eval/report.js"
 import { evaluationAmpArgs, keepThreadTrace } from "../eval/reviewer-child.js"
 import {
@@ -798,6 +799,18 @@ describe("eval example packs", () => {
     )
   })
 
+  it("can run only the versions that drive the blocking numbers", () => {
+    const cases = [
+      evalCase("control", control),
+      evalCase("advisory", { issues: [{ ...blocking.issues[0]!, severity: "medium" }] }),
+      evalCase("blocking", blocking),
+    ]
+    assert.deepEqual(
+      selectCases(cases, "development", ["blocking", "control"]).map((item) => item.id),
+      ["control", "blocking"],
+    )
+  })
+
   it("randomizes each complete sample block reproducibly", () => {
     const cases = [evalCase("one", control), evalCase("two", control), evalCase("three", control)]
     const first = orderedReviewTasks(cases, 3, "fixed-seed")
@@ -1403,7 +1416,7 @@ Use only this checked-out source.`
 })
 
 describe("eval scoring", () => {
-  it("averages repeated samples within each code version", () => {
+  it("scores each review by whether it made the right call", () => {
     const cases = [evalCase("control", control), evalCase("blocking", blocking)]
     const run = makeRun(cases, 3, [
       completed("control", 1, control, "success", [], []),
@@ -1418,24 +1431,45 @@ describe("eval scoring", () => {
     const controlScore = score.cases.find((item) => item.caseId === "control")!
     const blockingScore = score.cases.find((item) => item.caseId === "blocking")!
 
-    assert.ok(Math.abs(score.operationalCompletion - 5 / 6) < Number.EPSILON)
-    assert.equal(score.conclusionAgreement, 1 / 2)
-    assert.equal(score.groundedConclusionAgreement, 1 / 3)
-    assert.equal(controlScore.cleanAlertRate, 1 / 2)
-    assert.equal(blockingScore.issueDetectionRate, 2 / 3)
-    assert.equal(blockingScore.frozenLabelMatchFraction, 2 / 3)
-    assert.equal(blockingScore.severityAgreement, 1 / 2)
-    assert.equal(blockingScore.severityThresholdAgreement, 1 / 2)
-    assert.equal(blockingScore.judgeCoverage, 1)
-    assert.equal(blockingScore.judgeDisagreementRate, 1 / 3)
+    assert.equal(score.completedReviews, 5)
+    assert.equal(controlScore.completed, 2)
+    assert.equal(controlScore.quiet, 1)
+    assert.equal(controlScore.wronglyBlocked, 0)
+    assert.equal(controlScore.rightCalls, 2)
+    assert.equal(blockingScore.blockedForRecordedBug, 1)
+    assert.equal(blockingScore.blockedForOtherReason, 1)
+    assert.equal(blockingScore.foundAtLowerUrgency, 1)
+    assert.equal(blockingScore.missed, 0)
+    assert.equal(blockingScore.rightCalls, 1)
+    assert.equal(blockingScore.unmatchedFindings, 1)
+    assert.deepEqual(score.scorecard.badPrs, {
+      versions: 1,
+      reviews: 3,
+      blocked: 1,
+      blockedForOtherReason: 1,
+      foundAtLowerUrgency: 1,
+      missed: 0,
+      versionsRightEveryTime: 0,
+    })
+    assert.deepEqual(score.scorecard.cleanPrs, { versions: 1, reviews: 2, quiet: 1 })
+    // The control never blocked, but one of its three repeats did not finish.
+    assert.deepEqual(score.scorecard.okPrs, {
+      versions: 1,
+      reviews: 2,
+      wronglyBlocked: 0,
+      versionsRightEveryTime: 0,
+    })
 
     const report = formatReport(run)
-    assert.match(report, /Review evaluation: HISTORICAL RESULT/)
     assert.match(report, /Recorded result: INCOMPLETE/)
-    assert.match(report, /Use its counts for investigation, not comparison/)
-    assert.match(report, /1 version with no recorded issues, 0 versions with recorded non-blocking issues/)
-    assert.match(report, /no recorded issues: 1 of 2 completed reviews raised no alert/)
-    assert.match(report, /recorded blocking issues: found in 2 of 3; response matched the recorded issues in 1 of 3/)
+    assert.match(report, /2 code versions from 2 pull requests, each reviewed 3 times; 5 of 6 reviews completed/)
+    assert.match(report, /Bad PRs blocked: +1 of 3 \(33%\) across 1 version with a recorded blocking bug; 0 blocked every time\. Of the rest: 1 blocked for something else, 1 found the bug at lower urgency, 0 missed it\./)
+    assert.match(report, /OK PRs wrongly blocked: 0 of 2 \(0%\) across 1 version without one; 0 never blocked\./)
+    assert.match(report, /Clean PRs left alone: +1 of 2 \(50%\) across 1 version with no recorded issues\./)
+    assert.match(report, /Recorded advisory issues found: none to count\./)
+    assert.match(report, /no recorded issues: left alone in 1 of 2; raised a non-blocking finding in 1/)
+    assert.match(report, /recorded blocking bug: blocked for it in 1 of 3; blocked for something else in 1; found it at lower urgency in 1; 1 unmatched finding needs source checking/)
+    assert.doesNotMatch(report, /Wrongly blocked \(check the source/)
     assert.match(report, /This result covers only these examples/)
 
     const contaminatedRun = structuredClone(run)
@@ -1445,33 +1479,26 @@ describe("eval scoring", () => {
     const contaminatedReport = formatReport(contaminatedRun)
     assert.match(contaminatedReport, /Recorded result: INCOMPLETE/)
     assert.match(contaminatedReport, /4 of 6 reviews completed/)
-    assert.match(
-      contaminatedReport,
-      /recorded blocking issues: found in 1 of 3; response matched the recorded issues in 0 of 3/,
-    )
+    assert.match(contaminatedReport, /recorded blocking bug: blocked for it in 0 of 2; blocked for something else in 1; found it at lower urgency in 1/)
     assert.match(
       contaminatedReport,
       /1 review did not follow the review rules and is excluded from these counts/,
-    )
-    assert.match(
-      contaminatedReport,
-      /trace also shows that 1 review did not follow the current rules/,
     )
 
     const completeRun = makeRun(cases, 3, [
       completed("control", 1, control, "success", [], []),
       completed("control", 2, control, "success", [], []),
-      completed("control", 3, control, "success", [], []),
+      completed("control", 3, control, "failure", [highFinding], []),
       completed("blocking", 1, blocking, "neutral", [mediumFinding], [judgement([0], false)]),
       completed("blocking", 2, blocking, "neutral", [mediumFinding], [judgement([0], false)]),
       completed("blocking", 3, blocking, "neutral", [mediumFinding], [judgement([0], false)]),
     ])
     const completeReport = formatReport(completeRun)
     assert.match(completeReport, /Recorded result: NEEDS WORK/)
-    assert.match(
-      completeReport,
-      /recorded blocking issues: found in 3 of 3; response matched the recorded issues in 0 of 3/,
-    )
+    assert.match(completeReport, /2 pull-request examples: 0 pass, 1 unstable, 1 fail/)
+    assert.match(completeReport, /Wrongly blocked \(check the source; a justified block means the recorded issues are incomplete\):\n  #42 version: blocked in 1 of 3/)
+    assert.match(completeReport, /no recorded issues: left alone in 2 of 3; wrongly blocked in 1/)
+    assert.match(completeReport, /recorded blocking bug: blocked for it in 0 of 3; found it at lower urgency in 3/)
 
     assert.throws(
       () =>
@@ -1506,9 +1533,9 @@ describe("eval scoring", () => {
       ]),
     ])
     const score = scoreRun(run).cases[0]!
-    assert.equal(score.issueDetectionRate, 1 / 2)
-    assert.equal(score.frozenLabelMatchFraction, 1)
-    assert.equal(score.groundedConclusionAgreement, 0)
+    assert.equal(score.blockedForRecordedBug, 1)
+    assert.equal(score.unmatchedFindings, 0)
+    assert.equal(score.advisoryChances, 0)
   })
 
   it("uses the valid severity pairing when finding matches overlap", () => {
@@ -1531,10 +1558,9 @@ describe("eval scoring", () => {
     ])
 
     const score = scoreRun(run).cases[0]!
-    assert.equal(score.issueDetectionRate, 1)
-    assert.equal(score.severityAgreement, 1)
-    assert.equal(score.severityThresholdAgreement, 1)
-    assert.equal(score.groundedConclusionAgreement, 1)
+    assert.equal(score.blockedForRecordedBug, 1)
+    assert.equal(score.advisoryFound, 1)
+    assert.equal(score.unmatchedFindings, 0)
   })
 
   it("keeps duplicate findings visible in the plain report", () => {
@@ -1546,7 +1572,7 @@ describe("eval scoring", () => {
     ])
 
     const score = scoreRun(run)
-    assert.equal(score.cases[0]!.frozenLabelMatchFraction, 1 / 2)
+    assert.equal(score.cases[0]!.unmatchedFindings, 1)
     assert.match(formatReport(run), /1 unmatched finding needs source checking/)
   })
 
@@ -1745,18 +1771,191 @@ describe("eval scoring", () => {
     const report = formatReport(run)
     assert.match(
       report,
-      /1 of 2 known issues found; response matched the recorded issues in 0 of 1; 1 raw finding dropped for not pointing at a changed line/,
+      /recorded blocking bug: blocked for it in 1 of 1; 1 raw finding dropped for not pointing at a changed line/,
     )
+    assert.equal(scoreRun(run).cases[0]!.droppedFindings, 1)
+  })
+
+  it("compares two runs version by version", () => {
+    const cases = [
+      evalCase("control", control),
+      evalCase("blocking", blocking),
+      { ...evalCase("extra", control), headSha: "e".repeat(40) },
+    ]
+    const a = makeRun(cases, 2, [
+      completed("control", 1, control, "success", [], []),
+      completed("control", 2, control, "failure", [highFinding], []),
+      completed("blocking", 1, blocking, "neutral", [mediumFinding], [judgement([0], false)]),
+      completed("blocking", 2, blocking, "neutral", [mediumFinding], [judgement([0], false)]),
+      completed("extra", 1, control, "success", [], []),
+      completed("extra", 2, control, "success", [], []),
+    ])
+    const b = makeRun(cases.slice(0, 2), 2, [
+      completed("control", 1, control, "success", [], []),
+      completed("control", 2, control, "success", [], []),
+      completed("blocking", 1, blocking, "failure", [highFinding], [judgement([0], false)]),
+      completed("blocking", 2, blocking, "neutral", [mediumFinding], [judgement([0], false)]),
+    ])
+
+    const comparison = formatComparison({ name: "a.json", run: a }, { name: "b.json", run: b })
+    assert.match(comparison, /Compared on 2 shared code versions\. Left out: 1 version in only one run\./)
+    assert.doesNotMatch(comparison, /Incomplete:/)
+    assert.match(comparison, /older rules/)
+    // The extra control in A is left out of A's scorecard, not just the per-version lists.
+    assert.match(comparison, /A:\n  Bad PRs blocked:.*\n  OK PRs wrongly blocked: 1 of 2 \(50%\) across 1 version without one/)
+    assert.match(comparison, /Bad PRs blocked:\n  A 0 of 2 \(0%\), B 1 of 2 \(50%\)\.\n  B better on 1 version, A better on 0, same on 0\. Only 1 version differs: too few to tell from chance\.\n  B better:\n    #42 version: A 0 of 2 → B 1 of 2/)
+    assert.match(comparison, /OK PRs wrongly blocked:\n  A 1 of 2 \(50%\), B 0 of 2 \(0%\)\.\n  B better on 1 version/)
+    assert.match(comparison, /Right call on every version and repeat: A 0, B 1 of 2 versions\./)
+  })
+
+  it("leaves out a version whose commits or recorded issues changed between runs, and discloses missing reviews", () => {
+    const cases = [evalCase("control", control), evalCase("blocking", blocking)]
+    const a = makeRun(cases, 2, [
+      completed("control", 1, control, "success", [], []),
+      completed("control", 2, control, "success", [], []),
+      completed("blocking", 1, blocking, "failure", [highFinding], [judgement([0], false)]),
+      completed("blocking", 2, blocking, "failure", [highFinding], [judgement([0], false)]),
+    ])
+    const relabelled = evalCase("blocking", {
+      issues: [{ ...blocking.issues[0]!, severity: "medium" }],
+    })
+    const b = makeRun([cases[0]!, relabelled], 2, [
+      completed("control", 1, control, "success", [], []),
+      failed("control", 2, control),
+      completed("blocking", 1, relabelled.expected, "neutral", [mediumFinding], [judgement([0], false)]),
+      completed("blocking", 2, relabelled.expected, "neutral", [mediumFinding], [judgement([0], false)]),
+    ])
+
+    const comparison = formatComparison({ name: "a.json", run: a }, { name: "b.json", run: b })
     assert.match(
-      report,
-      /the reviewer missed 1 of 2 chances to find a recorded issue across 1 review of versions with issues\. 1 raw finding was dropped for not pointing at a changed line; check whether it describes the missed issues/,
+      comparison,
+      /Compared on 1 shared code version\. Left out: 1 version with different commits or recorded issues in the two runs \(the runs used different example packs\)\./,
     )
-    assert.doesNotMatch(report, /of 2 reviews/)
+    assert.match(comparison, /Incomplete: B: 1 of 2 reviews count \(1 did not finish\)\. Missing reviews can tilt every number below/)
+    assert.match(comparison, /Bad PRs blocked:\n  no versions to compare/)
+    assert.match(comparison, /Clean PRs left alone:\n  A 2 of 2 \(100%\), B 1 of 1 \(100%\)\./)
+
+    const moved = makeRun([cases[0]!, { ...cases[1]!, headSha: "c".repeat(40) }], 2, a.samples)
+    assert.match(
+      formatComparison({ name: "a.json", run: a }, { name: "moved.json", run: moved }),
+      /Compared on 1 shared code version\. Left out: 1 version with different commits/,
+    )
+    const rewordedIssues: ExpectedResult = { issues: [{ ...blocking.issues[0]!, verification: "Reworded." }] }
+    const reworded = makeRun([cases[0]!, evalCase("blocking", rewordedIssues)], 2, [
+      ...a.samples.slice(0, 2),
+      completed("blocking", 1, rewordedIssues, "failure", [highFinding], [judgement([0], false)]),
+      completed("blocking", 2, rewordedIssues, "failure", [highFinding], [judgement([0], false)]),
+    ])
+    assert.match(
+      formatComparison({ name: "a.json", run: a }, { name: "reworded.json", run: reworded }),
+      /Compared on 1 shared code version\. Left out: 1 version with different commits or recorded issues/,
+    )
+    // A renamed example gets a new case ID from the pack loader but is the same version.
+    const renamed = makeRun(
+      [cases[0]!, { ...cases[1]!, id: "renamed/bug", seedId: "renamed", versionName: "bug" }],
+      2,
+      a.samples.map((sample) => (sample.caseId === "blocking" ? { ...sample, caseId: "renamed/bug" } : sample)),
+    )
+    const renamedComparison = formatComparison({ name: "a.json", run: a }, { name: "renamed.json", run: renamed })
+    assert.match(renamedComparison, /Compared on 2 shared code versions\.\n/)
+    assert.match(renamedComparison, /Bad PRs blocked:\n  A 2 of 2 \(100%\), B 2 of 2 \(100%\)\./)
+
+    const once = makeRun(cases, 1, a.samples.filter((sample) => sample.sample === 1))
+    assert.throws(
+      () => formatComparison({ name: "a.json", run: a }, { name: "once.json", run: once }),
+      /cannot compare runs with different repeat counts: A reviewed each version 2 times, B 1/,
+    )
+
+    // Two versions with identical content cannot be paired one-to-one with another run.
+    const twin = { ...evalCase("twin", blocking), seedId: "twin-seed" }
+    const twins = makeRun([...cases, twin], 2, [
+      ...a.samples,
+      completed("twin", 1, blocking, "failure", [highFinding], [judgement([0], false)]),
+      completed("twin", 2, blocking, "failure", [highFinding], [judgement([0], false)]),
+    ])
+    assert.throws(
+      () => formatComparison({ name: "a.json", run: a }, { name: "twins.json", run: twins }),
+      /twins\.json has two versions with identical commits, context, and recorded issues \(blocking and twin\)/,
+    )
+
+    // A different judge setup is called out, since matching decides the blocking numbers.
+    const otherJudge = structuredClone(a)
+    for (const sample of otherJudge.samples) {
+      if (sample.status !== "completed") continue
+      for (const item of sample.judgements) item.provenance.version = "4"
+    }
+    assert.match(
+      formatComparison({ name: "a.json", run: a }, { name: "judge.json", run: otherJudge }),
+      /different judge setups \(A: 3 high\/unpinned schema [0-9a-f]{7} sdk test-sdk cli test-cli; B: 4 high\/unpinned schema [0-9a-f]{7} sdk test-sdk cli test-cli\), so part of any difference may come from the matching/,
+    )
+    assert.doesNotMatch(comparison, /different judge setups/)
+  })
+
+  it("counts a blocking bug as found at lower urgency even when its finding also matches an advisory", () => {
+    const advisoryFirst: ExpectedResult = {
+      issues: [{ ...blocking.issues[0]!, id: "advisory-first", severity: "medium" }, blocking.issues[0]!],
+    }
+    const run = makeRun([evalCase("blocking", advisoryFirst)], 1, [
+      completed("blocking", 1, advisoryFirst, "neutral", [mediumFinding], [
+        judgement([0], false, "advisory-first"),
+        judgement([0], false),
+      ]),
+    ])
+    const score = scoreRun(run).cases[0]!
+    assert.equal(score.foundAtLowerUrgency, 1)
+    assert.equal(score.missed, 0)
+  })
+
+  it("gives a shared finding to the blocking bug regardless of issue order", () => {
+    const advisory = { ...blocking.issues[0]!, id: "advisory", severity: "medium" as const }
+    const orders: ExpectedResult[] = [
+      { issues: [advisory, blocking.issues[0]!] },
+      { issues: [blocking.issues[0]!, advisory] },
+    ]
+    const scores = orders.map((expected) => {
+      const run = makeRun([evalCase("blocking", expected)], 1, [
+        completed("blocking", 1, expected, "neutral", [mediumFinding], [
+          judgement([0], false, "advisory"),
+          judgement([0], false),
+        ]),
+      ])
+      return scoreRun(run).cases[0]!
+    })
+    assert.deepEqual(
+      scores.map((score) => [score.advisoryFound, score.foundAtLowerUrgency, score.unmatchedFindings]),
+      [
+        [0, 1, 0],
+        [0, 1, 0],
+      ],
+    )
+  })
+
+  it("counts a version as right every time only when every requested repeat completed", () => {
+    const cases = [evalCase("blocking", blocking)]
+    const run = makeRun(cases, 2, [
+      completed("blocking", 1, blocking, "failure", [highFinding], [judgement([0], false)]),
+      failed("blocking", 2, blocking),
+    ])
+    const score = scoreRun(run)
+    assert.equal(score.cases[0]!.samples, 2)
+    assert.equal(score.scorecard.badPrs.versionsRightEveryTime, 0)
+    assert.match(
+      formatComparison({ name: "a.json", run }, { name: "b.json", run }),
+      /Right call on every version and repeat: A 0, B 0 of 1 versions\./,
+    )
+
+    assert.equal(chanceSentence(0, 0), "No difference to weigh.")
+    assert.match(chanceSentence(4, 1), /Only 5 versions differ: too few to tell from chance\./)
+    assert.match(chanceSentence(4, 2), /about 69% of the time, so this could easily be noise/)
+    assert.match(chanceSentence(9, 1), /about 2% of the time, so this looks like a real difference/)
+    assert.match(chanceSentence(12, 0), /under 1% of the time, so this looks like a real difference/)
   })
 
   it("does not report failed clean reviews as clean", () => {
     const cases = [evalCase("control", control)]
-    assert.equal(scoreRun(makeRun(cases, 1, [failed("control", 1, control)])).cleanAlertRate, null)
+    const score = scoreRun(makeRun(cases, 1, [failed("control", 1, control)]))
+    assert.deepEqual(score.scorecard.cleanPrs, { versions: 1, reviews: 0, quiet: 0 })
+    assert.match(formatReport(makeRun(cases, 1, [failed("control", 1, control)])), /no recorded issues: no reviews completed/)
   })
 
   it("scores a synthetic seed only when both paired versions match", () => {
@@ -1779,7 +1978,7 @@ describe("eval scoring", () => {
       completed(introduced.id, 1, blocking, "failure", [highFinding], [judgement([0], false)]),
       completed(baseline.id, 2, control, "success", [], []),
       completed(introduced.id, 2, blocking, "failure", [highFinding], [judgement([0], false)]),
-      completed(baseline.id, 3, control, "neutral", [lowFinding], []),
+      completed(baseline.id, 3, control, "failure", [highFinding], []),
       completed(introduced.id, 3, blocking, "failure", [highFinding], [judgement([0], false)]),
     ])
 
@@ -1856,7 +2055,10 @@ describe("eval scoring", () => {
       /Reviewer: Amp mode medium\. Model: not pinned\. SDK: test\. CLI: test-cli\./,
     )
     assert.match(researchReport, /Reported model IDs: test-judge, test-reviewer\./)
-    assert.doesNotMatch(researchReport, /HISTORICAL RESULT/)
+    assert.doesNotMatch(researchReport, /OLDER RULES/)
+    const olderReport = formatReport(evalRunSchema.parse(run))
+    assert.match(olderReport, /Review evaluation: OLDER RULES/)
+    assert.match(olderReport, /Use its counts for investigation, not comparison\./)
     const unreportedModelsRun = structuredClone(researchRun)
     unreportedModelsRun.samples[0]!.models = []
     if (unreportedModelsRun.samples[0]!.status !== "completed") {
@@ -1936,7 +2138,7 @@ describe("eval scoring", () => {
     ]
     const reaudited = evalRunSchema.parse(run)
     assert.deepEqual(reaudited.samples[0]!.evidenceBoundaryViolations, [])
-    assert.match(formatReport(reaudited), /trace also shows/)
+    assert.match(formatReport(reaudited), /1 review did not follow the review rules/)
     mutableSample.trace = trace
     if (run.samples[0]!.status !== "completed") assert.fail("expected completed sample")
     run.samples[0]!.judgements[0]!.provenance.promptHash = "0".repeat(64)

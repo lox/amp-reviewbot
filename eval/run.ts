@@ -18,6 +18,7 @@ import { checkReviewTrace, modelsFromTrace } from "./evidence.js"
 import { judgeIssue, type AmpVersions } from "./judge.js"
 import { checkPack, describePack, loadPack } from "./pack.js"
 import { formatReport } from "./report.js"
+import { formatComparison } from "./compare.js"
 import {
   readThreadUsage,
   reviewAuthentication,
@@ -25,11 +26,11 @@ import {
   type ReviewAuthentication,
 } from "./reviewer.js"
 import {
-  corpusSchema,
   corpusContentHash,
   evalRunSchema,
   expectedKind,
   type EvalCase,
+  type EvalCorpus,
   type EvalRun,
   type EvalSample,
   type ThreadUsage,
@@ -51,6 +52,7 @@ type RunOptions = {
   judgeTimeoutMs: number
   orderSeed: string
   split: NonNullable<EvalCase["split"]>
+  versions: VersionKind[]
 }
 
 type FinishOptions = {
@@ -127,13 +129,26 @@ async function main(): Promise<void> {
   }
   if (command === "report" || command === "score") {
     const runPath = requiredInput(process.argv.slice(3), "--run")
-    const input: unknown = JSON.parse(await readFile(runPath, "utf8"))
-    const run = evalRunSchema.parse(input)
-    console.log(formatReport(run))
+    console.log(formatReport(await readRun(runPath)))
+    return
+  }
+  if (command === "compare") {
+    const [pathA, pathB] = process.argv.slice(3, 5)
+    if (!pathA || !pathB) throw new Error("compare needs two saved result files: compare A.json B.json")
+    console.log(
+      formatComparison(
+        { name: pathA, run: await readRun(pathA) },
+        { name: pathB, run: await readRun(pathB) },
+      ),
+    )
     return
   }
   printHelp()
   if (command && command !== "help" && command !== "--help") process.exitCode = 1
+}
+
+async function readRun(path: string): Promise<EvalRun> {
+  return evalRunSchema.parse(JSON.parse(await readFile(path, "utf8")))
 }
 
 async function runEvaluation(
@@ -144,12 +159,14 @@ async function runEvaluation(
   const account = await reviewAuthentication(options.reviewerApiKey)
   console.log("Checking source commits and changed lines...")
   const loaded = await loadPack(options.packPath, options.sourceCache)
-  const cases = selectCases(loaded.corpus.cases, options.split)
-  if (cases.length === 0) throw new Error(`The example pack has no ${options.split} cases`)
-  const corpus = corpusSchema.parse({
-    version: `${loaded.corpus.version}-${options.split}`,
+  const cases = selectCases(loaded.corpus.cases, options.split, options.versions)
+  if (cases.length === 0) throw new Error(`The example pack has no matching ${options.split} cases`)
+  // The full pack was validated on load; a filtered subset may hold only one
+  // half of a synthetic pair, so it is not re-checked as a pack.
+  const corpus: EvalCorpus = {
+    version: `${loaded.corpus.version}-${options.split}${options.versions.length === allVersionKinds.length ? "" : `-${options.versions.join("+")}`}`,
     cases,
-  })
+  }
   const sourcePreparation = loaded.sourcePreparation
   const startedAt = new Date().toISOString()
   const reviewer = await reviewerProvenance(account)
@@ -244,12 +261,18 @@ export function orderedReviewTasks(
   )
 }
 
+export type VersionKind = ReturnType<typeof expectedKind>
+export const allVersionKinds: VersionKind[] = ["blocking", "advisory", "control"]
+
 export function selectCases(
   cases: EvalCase[],
   split: NonNullable<EvalCase["split"]>,
+  versions: VersionKind[] = allVersionKinds,
 ): EvalCase[] {
-  return cases.filter((evalCase) =>
-    split === "development" ? evalCase.split !== "holdout" : evalCase.split === "holdout",
+  return cases.filter(
+    (evalCase) =>
+      (split === "development" ? evalCase.split !== "holdout" : evalCase.split === "holdout") &&
+      versions.includes(expectedKind(evalCase.expected)),
   )
 }
 
@@ -600,6 +623,10 @@ function runOptions(args: string[]): RunOptions {
   if (split !== "development" && split !== "holdout") {
     throw new Error("--split must be development or holdout")
   }
+  const versions = [...new Set((flag(args, "--versions") ?? allVersionKinds.join(",")).split(","))]
+  if (!versions.every((kind): kind is VersionKind => (allVersionKinds as string[]).includes(kind))) {
+    throw new Error("--versions must list some of blocking, advisory, control (comma-separated)")
+  }
   return {
     packPath,
     reviewerApiKey,
@@ -612,6 +639,7 @@ function runOptions(args: string[]): RunOptions {
     judgeTimeoutMs: judgeTimeoutMinutes * 60_000,
     orderSeed: flag(args, "--order-seed") ?? randomBytes(16).toString("hex"),
     split,
+    versions,
   }
 }
 
@@ -744,11 +772,12 @@ function formatDuration(milliseconds: number): string {
 function printHelp(): void {
   console.log(`Usage:
   npm run eval -- check PACK
-  npm run eval -- run PACK [--samples 3] [--concurrency 2] [--split development|holdout]
+  npm run eval -- run PACK [--samples 3] [--concurrency 2] [--split development|holdout] [--versions blocking,control]
   npm run eval -- finish RUN.json [--concurrency 2]
   npm run eval -- report RUN.json
+  npm run eval -- compare A.json B.json
 
-Run reviews with public research against a fixed copy of the target repository, validate an example pack, finish interrupted comparisons, or read a saved report. Running reviews requires AMP_EVAL_REVIEWER_API_KEY for a separate account that cannot access the example pack.`)
+Run reviews with public research against a fixed copy of the target repository, validate an example pack, finish interrupted comparisons, read a saved report, or compare two saved results version by version. Running reviews requires AMP_EVAL_REVIEWER_API_KEY for a separate account that cannot access the example pack.`)
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
