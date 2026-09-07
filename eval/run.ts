@@ -380,7 +380,7 @@ async function runReviewSample(
     baseSha: evalCase.baseSha,
     headSha: evalCase.headSha,
   }
-  const reviewPrompt = buildReviewPrompt(job, { preparedSource: sourcePreparation !== undefined })
+  const reviewPrompt = buildReviewPrompt(job, { failOn, preparedSource: sourcePreparation !== undefined })
   const sourceSetupPrompt =
     sourcePreparation === undefined ? undefined : buildSourceSetupPrompt(sourcePreparation)
   const prompt =

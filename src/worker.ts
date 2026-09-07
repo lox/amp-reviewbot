@@ -314,7 +314,7 @@ export class ReviewWorkers {
       }
 
       const finalText = await executeReviewWithRetries({
-        prompt: buildReviewPrompt(job),
+        prompt: buildReviewPrompt(job, { failOn: this.config.failOn }),
         title: reviewThreadTitle(job),
         signal: controller.signal,
         project: job.ampProject,

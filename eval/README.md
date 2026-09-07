@@ -26,6 +26,8 @@ examples/
 
 A human-review example has one exact version from before the fix. A synthetic example has a directly checked baseline and one child commit that adds exactly one issue. Any issue already present in the baseline is recorded for both versions; the child adds one more. The new issue must point to a line changed by the child commit. Behavioral bugs and maintainability advice stay separate: duplication and non-idiomatic Go are advice, not broken behavior.
 
+Record each issue's severity with the same guide the reviewer is given, `severityGuide` in [`src/review.ts`](../src/review.ts). The scoring compares the two, so a recorded `medium` that the guide calls `high` counts a correct block as a wrong one, and the other way round. When they disagree, fix whichever side is wrong against the guide rather than the guide.
+
 The runner calculates changed lines from the exact Git diff. It does not store a second hand-written copy. It also calculates the expected `success`, `neutral`, or `failure` result from issue severity at `FAIL_ON=high`.
 
 ## What the reviewer can access
