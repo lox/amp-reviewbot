@@ -102,14 +102,16 @@ npm run eval -- compare .eval-runs/BASELINE.json .eval-runs/CANDIDATE.json
 
 ### Fast prompt loop
 
-The private pack owns `sets/fast-v1.json`. It names exactly 16 settled development versions: 10 with blocking bugs, 3 clean versions, and 3 advisory-only versions. Keep disputed cases out. Once selected, do not change this set, its labels, `FAIL_ON=high`, the runner, mode, or model while iterating; only the prompt refs change.
+The private pack owns `sets/fast-v1.json`. It names exactly 16 settled development versions: 10 with blocking bugs, 3 clean versions, and 3 advisory-only versions. Keep disputed cases out. Once selected, do not change this set, its labels, `FAIL_ON=high`, the runner, mode, or model while iterating; only the prompt variant changes.
 
-Run two production prompt versions once each. The refs may be commits, branches, or tags; `ab` reads `src/review.ts` and the embedded review methodology from each ref, while all source preparation, parsing, filtering, retries, and execution use the current runner. Reviews are paired by version, A/B order within each pair is randomized, and both sides share one concurrency limit (3 by default):
+Run two production prompt versions once each. A variant is `current`, `pre-severity-guide`, or a path to a plain-text file containing additional trusted review instructions. The built-ins reproduce the current production prompt and its immediate predecessor. A file is data, not executable code, so prompt experiments cannot run candidate code on the trusted corpus machine. Reviews are paired by version, A/B order within each pair is randomized, and both sides share one concurrency limit (3 by default):
 
 ```sh
 export AMP_EVAL_REVIEWER_API_KEY="separate-review-account-key"
-npm run eval -- ab /path/to/review-eval-pack fast-v1 BASELINE_REF CANDIDATE_REF
+npm run eval -- ab /path/to/review-eval-pack fast-v1 pre-severity-guide current
 ```
+
+For a new prompt idea, put only its additional instructions in a text file and pass that path as B. The decision page records a content hash, so editing the file creates a new prompt identifier without a code change or commit.
 
 Both artifacts are saved under the pack's `.eval-runs`. The command prints one decision page using only each completed review's deterministic `conclusion`; it does not run finding-match judges or usage lookups. Traces, exact-source setup, source isolation, reviewer identity, raw output, filtering, and conclusions are still saved for inspection.
 

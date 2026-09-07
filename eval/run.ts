@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process"
 import { createHash, randomBytes } from "node:crypto"
-import { mkdir, mkdtemp, open, readFile, rename, rm, unlink, writeFile } from "node:fs/promises"
+import { mkdir, open, readFile, rename, unlink } from "node:fs/promises"
 import { dirname, relative, resolve, sep } from "node:path"
 import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
@@ -11,6 +11,7 @@ import {
   finalizeReview,
   parseReviewResult,
   reviewThreadTitle,
+  severityGuide,
 } from "../src/review.js"
 import type { ReviewFinding, ReviewJob } from "../src/types.js"
 import { pinnedModel, reviewMode } from "../src/amp.js"
@@ -67,8 +68,8 @@ type FinishOptions = {
 type AbOptions = {
   packPath: string
   setName: string
-  promptRefA: string
-  promptRefB: string
+  promptVariantA: string
+  promptVariantB: string
   reviewerApiKey: string
   concurrency: number
   timeoutMs: number
@@ -274,17 +275,19 @@ async function runAb(options: AbOptions): Promise<{ runA: EvalRun; runB: EvalRun
   console.log("Checking source commits, changed lines, and the frozen set...")
   const loaded = await loadPack(options.packPath, options.sourceCache)
   const frozen = await loadFrozenSet(options.packPath, options.setName, loaded.corpus.cases)
-  const [promptA, promptB] = await Promise.all([
-    promptsAtRef(options.promptRefA, frozen.cases),
-    promptsAtRef(options.promptRefB, frozen.cases),
+  const [variantA, variantB] = await Promise.all([
+    loadPromptVariant(options.promptVariantA),
+    loadPromptVariant(options.promptVariantB),
   ])
+  const promptA = new Map(frozen.cases.map((evalCase) => [evalCase.id, variantA.build(evalJob(evalCase, 1))]))
+  const promptB = new Map(frozen.cases.map((evalCase) => [evalCase.id, variantB.build(evalJob(evalCase, 1))]))
   const reviewer = await reviewerProvenance(account, [options.outputA, options.outputB])
   const startedAt = new Date().toISOString()
   const tasks = interleavedAbTasks(frozen.cases, options.orderSeed)
   let finished = 0
   console.log(`Running ${tasks.length} interleaved reviews, up to ${options.concurrency} at a time...`)
   const results = await mapConcurrent(tasks, options.concurrency, async ({ evalCase, variant }) => {
-    const reviewPrompt = (variant === "A" ? promptA.prompts : promptB.prompts).get(evalCase.id)
+    const reviewPrompt = (variant === "A" ? promptA : promptB).get(evalCase.id)
     if (!reviewPrompt) throw new Error(`Prompt ${variant} was not built for ${evalCase.id}`)
     const sample = await runReviewSample(
       evalCase,
@@ -332,8 +335,8 @@ async function runAb(options: AbOptions): Promise<{ runA: EvalRun; runB: EvalRun
     runB,
     decision: formatAbDecision({
       setIdentifier: frozen.identifier,
-      promptA: promptA.identifier,
-      promptB: promptB.identifier,
+      promptA: variantA.identifier,
+      promptB: variantB.identifier,
       runA,
       runB,
       wallTimeMs: Date.now() - wallStarted,
@@ -753,9 +756,9 @@ function runOptions(args: string[]): RunOptions {
 }
 
 function abOptions(args: string[]): AbOptions {
-  const [packPath, setName, promptRefA, promptRefB] = positionalArgs(args)
-  if (!packPath || !setName || !promptRefA || !promptRefB) {
-    throw new Error("ab needs PACK, SET, A_REF, and B_REF: ab PACK SET A_REF B_REF")
+  const [packPath, setName, promptVariantA, promptVariantB] = positionalArgs(args)
+  if (!packPath || !setName || !promptVariantA || !promptVariantB) {
+    throw new Error("ab needs PACK, SET, A_VARIANT, and B_VARIANT: ab PACK SET A_VARIANT B_VARIANT")
   }
   if (process.env.AMP_API_KEY) {
     throw new Error("Unset AMP_API_KEY; A/B reviews require the separate reviewer account")
@@ -773,8 +776,8 @@ function abOptions(args: string[]): AbOptions {
   return {
     packPath,
     setName,
-    promptRefA,
-    promptRefB,
+    promptVariantA,
+    promptVariantB,
     reviewerApiKey,
     concurrency,
     timeoutMs: timeoutMinutes * 60_000,
@@ -907,43 +910,49 @@ async function writeNewRun(path: string, run: EvalRun): Promise<void> {
   }
 }
 
-export async function promptsAtRef(
-  ref: string,
-  cases: EvalCase[],
-): Promise<{ identifier: string; prompts: Map<string, string> }> {
-  const [{ stdout: commit }, { stdout: reviewSource }, { stdout: methodology }] = await Promise.all([
-    execFileAsync("git", ["rev-parse", `${ref}^{commit}`]),
-    execFileAsync("git", ["show", `${ref}:src/review.ts`], { maxBuffer: 4 * 1024 * 1024 }),
-    execFileAsync("git", ["show", `${ref}:.agents/skills/general-code-reviewing/SKILL.md`], {
-      maxBuffer: 4 * 1024 * 1024,
-    }),
-  ])
-  const temporary = await mkdtemp(resolve(".eval-prompt-builder-"))
-  try {
-    await mkdir(resolve(temporary, ".agents", "skills", "general-code-reviewing"), { recursive: true })
-    await writeFile(
-      resolve(temporary, ".agents", "skills", "general-code-reviewing", "SKILL.md"),
-      methodology,
+export async function loadPromptVariant(input: string): Promise<{
+  identifier: string
+  build: (job: ReviewJob) => string
+}> {
+  if (input === "current") {
+    return promptVariant("current", (job) =>
+      buildReviewPrompt(job, { failOn, preparedSource: true }),
     )
-    await writeFile(resolve(temporary, "review.ts"), reviewSource)
-    await writeFile(
-      resolve(temporary, "build.ts"),
-      `import { readFile } from "node:fs/promises"\nimport { buildReviewPrompt } from "./review.js"\nconst jobs = JSON.parse(await readFile(process.argv[2]!, "utf8"))\nprocess.stdout.write(JSON.stringify(jobs.map(job => buildReviewPrompt(job, { failOn: "high", preparedSource: true }))))\n`,
+  }
+  if (input === "pre-severity-guide") {
+    const guide = `\n${severityGuide(failOn)}\n`
+    return promptVariant("pre-severity-guide", (job) =>
+      buildReviewPrompt(job, { failOn, preparedSource: true }).replace(guide, "\n"),
     )
-    const jobs = cases.map((evalCase) => evalJob(evalCase, 1))
-    const jobsPath = resolve(temporary, "jobs.json")
-    await writeFile(jobsPath, JSON.stringify(jobs))
-    const { stdout } = await execFileAsync(process.execPath, ["--import", "tsx", "build.ts", jobsPath], {
-      cwd: temporary,
-      maxBuffer: 16 * 1024 * 1024,
-    })
-    const built = z.array(z.string().min(1)).length(cases.length).parse(JSON.parse(stdout))
-    return {
-      identifier: `${ref}@${commit.trim().slice(0, 12)}`,
-      prompts: new Map(cases.map((evalCase, index) => [evalCase.id, built[index]!])),
-    }
-  } finally {
-    await rm(temporary, { recursive: true, force: true })
+  }
+  const instructions = (await readFile(resolve(input), "utf8")).trim()
+  if (!instructions) throw new Error(`Prompt variant file is empty: ${input}`)
+  return promptVariant(input, (job) =>
+    buildReviewPrompt(job, { failOn, preparedSource: true, additionalInstructions: instructions }),
+  )
+}
+
+function promptVariant(name: string, build: (job: ReviewJob) => string) {
+  const identifyingJob: ReviewJob = {
+    id: "prompt-identifier",
+    sourceDeliveryId: "prompt-identifier",
+    eventType: "eval.prompt-identifier",
+    installationId: "0",
+    repositoryId: "0",
+    repositoryFullName: "example/repository",
+    pullNumber: 1,
+    baseSha: "0".repeat(40),
+    headSha: "1".repeat(40),
+    ampProject: "no-project",
+    pullRequestContext: null,
+    checkRunId: null,
+    ampThreadId: null,
+    status: "running",
+    attempts: 1,
+  }
+  return {
+    identifier: `${name}@${hash(build(identifyingJob)).slice(0, 12)}`,
+    build,
   }
 }
 
@@ -974,7 +983,7 @@ function printHelp(): void {
   console.log(`Usage:
   npm run eval -- check PACK
   npm run eval -- run PACK [--samples 3] [--concurrency 2] [--split development|holdout] [--versions blocking,control]
-  npm run eval -- ab PACK SET A_REF B_REF [--concurrency 3]
+  npm run eval -- ab PACK SET A_VARIANT B_VARIANT [--concurrency 3]
   npm run eval -- finish RUN.json [--concurrency 2]
   npm run eval -- report RUN.json
   npm run eval -- compare A.json B.json

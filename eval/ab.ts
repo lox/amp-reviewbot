@@ -38,6 +38,9 @@ export async function loadFrozenSet(
   const cases = ids.map((id) => {
     const evalCase = byId.get(id)
     if (!evalCase) throw new Error(`Frozen set ${setName} names unknown version ${id}`)
+    if (evalCase.split === "holdout") {
+      throw new Error(`Frozen set ${setName} must not contain holdout version ${id}`)
+    }
     return evalCase
   })
   const counts = { blocking: 0, control: 0, advisory: 0 }
@@ -83,14 +86,25 @@ export function formatAbDecision(input: {
   const falseA = nonBlocking.filter((evalCase) => blocks(samplesA.get(evalCase.id))).length
   const falseB = nonBlocking.filter((evalCase) => blocks(samplesB.get(evalCase.id))).length
   const failures = 2 * cases.length - completedA - completedB
-  const changed = cases.filter(
+  const paired = cases.filter((evalCase) => {
+    const a = samplesA.get(evalCase.id)
+    const b = samplesB.get(evalCase.id)
+    return a?.status === "completed" && b?.status === "completed"
+  })
+  const changed = paired.filter(
     (evalCase) => blocks(samplesA.get(evalCase.id)) !== blocks(samplesB.get(evalCase.id)),
   )
   const newNonBlockingBlocks = nonBlocking.some(
-    (evalCase) => !blocks(samplesA.get(evalCase.id)) && blocks(samplesB.get(evalCase.id)),
+    (evalCase) =>
+      paired.includes(evalCase) &&
+      !blocks(samplesA.get(evalCase.id)) &&
+      blocks(samplesB.get(evalCase.id)),
   )
   const blockingLosses = blocking.filter(
-    (evalCase) => blocks(samplesA.get(evalCase.id)) && !blocks(samplesB.get(evalCase.id)),
+    (evalCase) =>
+      paired.includes(evalCase) &&
+      blocks(samplesA.get(evalCase.id)) &&
+      !blocks(samplesB.get(evalCase.id)),
   ).length
   const promising =
     failures === 0 && blockedB - blockedA >= 3 && !newNonBlockingBlocks && blockingLosses < 3
