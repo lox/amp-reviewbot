@@ -45,9 +45,11 @@ export async function loadFrozenSet(
   })
   const counts = { blocking: 0, control: 0, advisory: 0 }
   for (const evalCase of cases) counts[expectedKind(evalCase.expected)] += 1
-  if (counts.blocking !== 10 || counts.control !== 3 || counts.advisory !== 3) {
+  const originalComposition = counts.blocking === 10 && counts.control === 3 && counts.advisory === 3
+  const adjudicatedComposition = counts.blocking === 11 && counts.control === 3 && counts.advisory === 2
+  if (!originalComposition && !adjudicatedComposition) {
     throw new Error(
-      `Frozen set ${setName} must contain 10 blocking, 3 clean, and 3 advisory-only versions; found ${counts.blocking}, ${counts.control}, and ${counts.advisory}`,
+      `Frozen set ${setName} must have its original 10/3/3 composition or the adjudicated 11/3/2 labels; found ${counts.blocking} blocking, ${counts.control} clean, and ${counts.advisory} advisory-only versions`,
     )
   }
   const hash = createHash("sha256").update(JSON.stringify(definition)).digest("hex").slice(0, 12)

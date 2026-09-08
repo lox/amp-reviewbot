@@ -859,7 +859,7 @@ describe("eval example packs", () => {
     }
   })
 
-  it("loads an exact 10/3/3 frozen set from the private pack", async () => {
+  it("loads the frozen set before and after an advisory is adjudicated as blocking", async () => {
     const directory = await mkdtemp(join(tmpdir(), "reviewbot-frozen-set-"))
     const advisory: ExpectedResult = {
       issues: [{ ...blocking.issues[0]!, severity: "medium" }],
@@ -886,6 +886,9 @@ describe("eval example packs", () => {
       const frozen = await loadFrozenSet(directory, "fast-v1", cases)
       assert.deepEqual(frozen.cases.map((evalCase) => evalCase.id), cases.map((evalCase) => evalCase.id))
       assert.match(frozen.identifier, /^fast-v1@[0-9a-f]{12}$/)
+
+      cases[13]!.expected = blocking
+      await assert.doesNotReject(loadFrozenSet(directory, "fast-v1", cases))
 
       cases[0]!.split = "holdout"
       await assert.rejects(loadFrozenSet(directory, "fast-v1", cases), /must not contain holdout/)
