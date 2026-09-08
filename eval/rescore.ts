@@ -36,7 +36,6 @@ export function rescoreRun(
   }
 
   const cases: EvalCase[] = []
-  const rescoredSamples: EvalRun["samples"] = []
   const dropped: RescoreDrop[] = []
   for (const oldCase of sourceRun.cases) {
     const currentCase = currentCases.get(oldCase.id)
@@ -69,22 +68,25 @@ export function rescoreRun(
     }
 
     cases.push(currentCase)
-    const currentIssueIds = new Set(currentCase.expected.issues.map((issue) => issue.id))
-    for (const sample of samples.get(oldCase.id) ?? []) {
-      rescoredSamples.push(
-        sample.status === "completed"
-          ? {
-              ...sample,
-              expected: currentCase.expected,
-              judgements: sample.judgements.filter((item) => currentIssueIds.has(item.issueId)),
-              judgementErrors: sample.judgementErrors.filter((item) => currentIssueIds.has(item.issueId)),
-            }
-          : { ...sample, expected: currentCase.expected },
-      )
-    }
   }
   if (cases.length === 0) throw new Error("No saved versions still match the current pack")
 
+  const retainedCases = new Map(cases.map((evalCase) => [evalCase.id, evalCase]))
+  const rescoredSamples = sourceRun.samples.flatMap((sample): EvalRun["samples"] => {
+    const currentCase = retainedCases.get(sample.caseId)
+    if (!currentCase) return []
+    const currentIssueIds = new Set(currentCase.expected.issues.map((issue) => issue.id))
+    return [
+      sample.status === "completed"
+        ? {
+            ...sample,
+            expected: currentCase.expected,
+            judgements: sample.judgements.filter((item) => currentIssueIds.has(item.issueId)),
+            judgementErrors: sample.judgementErrors.filter((item) => currentIssueIds.has(item.issueId)),
+          }
+        : { ...sample, expected: currentCase.expected },
+    ]
+  })
   const corpusVersion = `${pack.corpus.version}-rescored`
   const run = evalRunSchema.parse({
     ...sourceRun,

@@ -2372,6 +2372,31 @@ describe("eval scoring", () => {
 })
 
 describe("eval rescoring", () => {
+  it("preserves the saved execution order", () => {
+    const preparation = "Run these commands from the repository:\n\necho source\n\nUse only this source."
+    const cases = [evalCase("first", control), evalCase("second", control)]
+    const sourceRun = makeRun(
+      cases,
+      1,
+      [cases[1]!, cases[0]!].map((item) => ({
+        ...completed(item.id, 1, control, "success", [], []),
+        sourceSetupPrompt: buildSourceSetupPrompt(preparation),
+      })),
+    )
+
+    const result = rescoreRun(
+      sourceRun,
+      Buffer.from(JSON.stringify(sourceRun)),
+      {
+        corpus: { version: "pack-v1-current", cases },
+        sourcePreparation: new Map(cases.map((item) => [item.id, preparation])),
+      },
+      "2026-09-08T12:00:00.000Z",
+    )
+
+    assert.deepEqual(result.run.samples.map((sample) => sample.caseId), ["second", "first"])
+  })
+
   it("updates labels while dropping changed or unavailable evidence", () => {
     const oldPreparation = "Run these commands from the repository:\n\necho old-source\n\nUse only this source."
     const newPreparation = "Run these commands from the repository:\n\necho new-source\n\nUse only this source."
