@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process"
 import { createHash, randomBytes } from "node:crypto"
 import { mkdir, open, readFile, rename, unlink } from "node:fs/promises"
-import { dirname, relative, resolve, sep } from "node:path"
+import { basename, dirname, extname, join, relative, resolve, sep } from "node:path"
 import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
 import { z } from "zod"
@@ -21,6 +21,7 @@ import { judgeIssue, type AmpVersions } from "./judge.js"
 import { checkPack, describePack, loadPack } from "./pack.js"
 import { formatReport } from "./report.js"
 import { formatComparison } from "./compare.js"
+import { formatRescoreSummary, isAbPair, rescoreRun } from "./rescore.js"
 import {
   readThreadUsage,
   reviewAuthentication,
@@ -166,12 +167,77 @@ async function main(): Promise<void> {
     )
     return
   }
+  if (command === "rescore") {
+    const [packPath, ...runPaths] = positionalArgs(process.argv.slice(3))
+    if (!packPath || runPaths.length === 0) {
+      throw new Error("rescore needs a pack and one or more saved results: rescore PACK RUN.json [RUN.json ...]")
+    }
+    const cacheRoot = flag(process.argv.slice(3), "--cache") ?? resolve(packPath, ".eval-cache")
+    console.log("Checking current pack labels and reviewer-visible inputs...")
+    const pack = await loadPack(packPath, resolve(cacheRoot, "source"))
+    const rescoredAt = new Date().toISOString()
+    const stamp = rescoredAt.replaceAll(/[:.]/g, "-")
+    const inputs = await Promise.all(
+      runPaths.map(async (path) => {
+        const bytes = await readFile(path)
+        return { path, bytes, run: evalRunSchema.parse(JSON.parse(bytes.toString("utf8"))) }
+      }),
+    )
+    const results = await Promise.all(
+      inputs.map(async (input) => {
+        const result = rescoreRun(input.run, input.bytes, pack, rescoredAt)
+        const outputPath = rescoreOutputPath(input.path, stamp)
+        await writeNewRun(outputPath, result.run)
+        return { ...result, source: input, outputPath }
+      }),
+    )
+    for (const result of results) {
+      console.log(`\nRescored ${result.source.path} -> ${result.outputPath}`)
+      console.log(formatRescoreSummary(result))
+    }
+    if (results.length === 2 && isAbPair(results[0]!.source.run, results[1]!.source.run)) {
+      const [a, b] = results
+      if (!sameCaseIds(a!.run, b!.run)) {
+        throw new Error("The A/B artifacts retained different versions and cannot share a decision page")
+      }
+      console.log(
+        `\n${formatAbDecision({
+          setIdentifier: savedSetIdentifier(a!.source.run),
+          promptA: basename(a!.source.path),
+          promptB: basename(b!.source.path),
+          runA: a!.run,
+          runB: b!.run,
+          wallTimeMs: Math.max(0, Date.parse(a!.source.run.completedAt) - Date.parse(a!.source.run.startedAt)),
+          requestedCases: a!.source.run.cases.length,
+          unavailableCases: a!.source.run.cases.length - a!.run.cases.length,
+        })}`,
+      )
+    } else {
+      for (const result of results) console.log(`\n${formatReport(result.run)}`)
+    }
+    return
+  }
   printHelp()
   if (command && command !== "help" && command !== "--help") process.exitCode = 1
 }
 
 async function readRun(path: string): Promise<EvalRun> {
   return evalRunSchema.parse(JSON.parse(await readFile(path, "utf8")))
+}
+
+function rescoreOutputPath(inputPath: string, stamp: string): string {
+  const extension = extname(inputPath)
+  const stem = extension === "" ? basename(inputPath) : basename(inputPath, extension)
+  return join(dirname(inputPath), `${stem}.rescored-${stamp}${extension || ".json"}`)
+}
+
+function sameCaseIds(left: EvalRun, right: EvalRun): boolean {
+  const rightIds = new Set(right.cases.map((evalCase) => evalCase.id))
+  return left.cases.length === right.cases.length && left.cases.every((evalCase) => rightIds.has(evalCase.id))
+}
+
+function savedSetIdentifier(run: EvalRun): string {
+  return /([a-z0-9][a-z0-9._-]*@[0-9a-f]{12})$/i.exec(run.corpusVersion)?.[1] ?? run.corpusVersion
 }
 
 async function runEvaluation(
@@ -987,8 +1053,9 @@ function printHelp(): void {
   npm run eval -- finish RUN.json [--concurrency 2]
   npm run eval -- report RUN.json
   npm run eval -- compare A.json B.json
+  npm run eval -- rescore PACK RUN.json [RUN.json ...]
 
-Run reviews with public research against a fixed copy of the target repository, compare two prompt versions on a frozen set, validate an example pack, finish interrupted comparisons, read a saved report, or compare two saved results version by version. Running reviews requires AMP_EVAL_REVIEWER_API_KEY for a separate account that cannot access the example pack.`)
+Run reviews with public research against a fixed copy of the target repository, compare two prompt versions on a frozen set, validate an example pack, finish interrupted comparisons, read or re-score saved results, or compare two saved results version by version. Running reviews requires AMP_EVAL_REVIEWER_API_KEY for a separate account that cannot access the example pack.`)
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {

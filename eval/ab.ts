@@ -72,6 +72,8 @@ export function formatAbDecision(input: {
   runA: EvalRun
   runB: EvalRun
   wallTimeMs: number
+  requestedCases?: number
+  unavailableCases?: number
 }): string {
   const samplesA = samplesByCase(input.runA)
   const samplesB = samplesByCase(input.runB)
@@ -85,7 +87,10 @@ export function formatAbDecision(input: {
   const blockedB = blocking.filter((evalCase) => blocks(samplesB.get(evalCase.id))).length
   const falseA = nonBlocking.filter((evalCase) => blocks(samplesA.get(evalCase.id))).length
   const falseB = nonBlocking.filter((evalCase) => blocks(samplesB.get(evalCase.id))).length
+  const requestedCases = input.requestedCases ?? cases.length
+  const unavailable = 2 * (input.unavailableCases ?? 0)
   const failures = 2 * cases.length - completedA - completedB
+  const missing = failures + unavailable
   const paired = cases.filter((evalCase) => {
     const a = samplesA.get(evalCase.id)
     const b = samplesB.get(evalCase.id)
@@ -107,7 +112,7 @@ export function formatAbDecision(input: {
       !blocks(samplesB.get(evalCase.id)),
   ).length
   const promising =
-    failures === 0 && blockedB - blockedA >= 3 && !newNonBlockingBlocks && blockingLosses < 3
+    missing === 0 && blockedB - blockedA >= 3 && !newNonBlockingBlocks && blockingLosses < 3
   const recommendation = newNonBlockingBlocks || blockingLosses >= 3
     ? "REGRESSION"
     : promising
@@ -117,10 +122,11 @@ export function formatAbDecision(input: {
     `Frozen set: ${input.setIdentifier}`,
     `Prompt A: ${input.promptA}`,
     `Prompt B: ${input.promptB}`,
-    `Completed / requested reviews: A ${completedA}/${cases.length}   B ${completedB}/${cases.length}`,
+    `Completed / requested reviews: A ${completedA}/${requestedCases}   B ${completedB}/${requestedCases}`,
     `Execution failures: ${failures}`,
-    `Blocking versions blocked:     A ${blockedA}/10   B ${blockedB}/10`,
-    `Non-blocking versions blocked: A ${falseA}/6    B ${falseB}/6`,
+    ...(unavailable === 0 ? [] : [`Unavailable after re-score: ${unavailable}`]),
+    `Blocking versions blocked:     A ${blockedA}/${blocking.length}   B ${blockedB}/${blocking.length}`,
+    `Non-blocking versions blocked: A ${falseA}/${nonBlocking.length}    B ${falseB}/${nonBlocking.length}`,
     "Changed calls: case | expected | A | B | retained high findings (title, file:line)",
   ]
   if (changed.length === 0) lines.push("  none")
@@ -134,8 +140,8 @@ export function formatAbDecision(input: {
   lines.push(`Wall time: ${formatDuration(input.wallTimeMs)}`, `Recommendation: ${recommendation}`)
   if (recommendation === "PROMISING B") {
     lines.push("Human read required: validate the retained high findings behind B's gains before an outer-loop run.")
-  } else if (failures > 0) {
-    lines.push("Execution failures prevent a PROMISING B verdict because the missing calls could change it.")
+  } else if (missing > 0) {
+    lines.push("Missing calls prevent a PROMISING B verdict because they could change it.")
   }
   return lines.join("\n")
 }

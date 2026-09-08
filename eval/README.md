@@ -123,11 +123,20 @@ The predeclared rule is a product choice:
 
 KEEP A is a finished experiment, not a reason to enlarge or rerun it. Use the full `run`, `finish`, `report`, and `compare` path when you need repeat stability, issue matching, advisory recall, clean-version silence, sign tests, or usage accounting.
 
-Re-scoring saved outputs after label changes is not automated yet. It is an outer-loop follow-up; do not rerun reviews merely because labels changed.
+After pack labels or membership change, re-score one or more saved artifacts without running a reviewer or finding-match judge:
+
+```sh
+npm run eval -- rescore /path/to/review-eval-pack .eval-runs/RUN.json
+npm run eval -- rescore /path/to/review-eval-pack .eval-runs/A.json .eval-runs/B.json
+```
+
+Each new artifact is written beside its source and records the source artifact hash; the source is never overwritten. A single `run` prints the normal scorecard. Two artifacts created by the same `ab` invocation print the binary decision page, using their filenames as prompt identifiers because older artifacts did not save the display names.
+
+`rescore` updates embedded expectations to the current pack and drops versions no longer in the pack. It also compares the saved review with the current commit, pull-request context, prepared source, and changed-line map. If any reviewer-visible input differs, the version is dropped and the changed field is printed. A recorded issue whose meaning changed beyond severity or classification labels is also dropped because an old finding-match judgement cannot safely be reused. Newly added issues have no saved judgement, so a full scorecard remains incomplete until those matches are checked; `rescore` never starts that model work.
 
 ### Outer loop
 
-About weekly, compare the incumbent with one candidate on the larger development set. Audit whether blocking findings are valid and inspect suspicious saved traces. Batch justified label fixes, then re-score saved outputs rather than rerunning them. Grow the pack with varied blocking mutants and hard non-blocking cases. Use the holdout only after selecting a candidate, not while tuning it.
+About weekly, compare the incumbent with one candidate on the larger development set. Audit whether blocking findings are valid and inspect suspicious saved traces. Batch justified label fixes, then use `rescore` on saved outputs rather than rerunning them. Grow the pack with varied blocking mutants and hard non-blocking cases. Use the holdout only after selecting a candidate, not while tuning it.
 
 If reviews finish but checking their findings is interrupted, finish only those checks without rerunning the reviews:
 
