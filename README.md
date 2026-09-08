@@ -27,7 +27,7 @@ The `reviewbot-v1` Amp mode extends the built-in `medium` agent, preserving its 
 
 ## Requirements
 
-- Node.js 22+
+- [mise](https://mise.jdx.dev/)
 - Postgres
 - An [Amp access token](https://ampcode.com/settings/security)
 - An Amp project for every reviewed repository
@@ -77,7 +77,8 @@ Copy `.env.example` and provide:
 Run locally:
 
 ```sh
-npm install
+mise install
+npm ci
 npm run build
 npm start
 ```
