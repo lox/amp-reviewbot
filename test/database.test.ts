@@ -62,8 +62,39 @@ describe("review context persistence", () => {
 
     await database.migrate()
 
-    assert.equal(queries.length, 2)
+    assert.equal(queries.length, 3)
     assert.match(queries[1]!, /ADD COLUMN IF NOT EXISTS pull_request_title/)
+    assert.match(queries[2]!, /CREATE TABLE IF NOT EXISTS review_threads/)
+  })
+})
+
+describe("review thread usage persistence", () => {
+  it("registers each thread while updating the job's current thread", async () => {
+    const queries: Array<{ text: string; values?: unknown[] }> = []
+    const database = databaseWithQueries(queries)
+
+    await database.setThread("1", "T-review")
+
+    assert.match(queries[0]!.text, /INSERT INTO review_threads/)
+    assert.deepEqual(queries[0]!.values, ["1", "T-review"])
+  })
+
+  it("stores Amp usage and the separate estimated provider cost", async () => {
+    const queries: Array<{ text: string; values?: unknown[] }> = []
+    const database = databaseWithQueries(queries)
+    const usage = {
+      costUsd: 1.25,
+      estimatedProviderCostAtListPriceUsd: 0.75,
+      inputTokens: 1_000,
+      outputTokens: 100,
+      requests: 2,
+      subscriptionUsed: false,
+    }
+
+    await database.setThreadUsage("T-review", usage)
+
+    assert.match(queries[0]!.text, /estimated_provider_cost_at_list_price_usd/)
+    assert.deepEqual(queries[0]!.values, ["T-review", 1.25, 0.75, JSON.stringify(usage)])
   })
 })
 

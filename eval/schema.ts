@@ -263,11 +263,13 @@ const judgementSchema = z.object(judgementFields).strict()
  * What Amp billed for the thread that produced the review, as reported by
  * `amp threads usage`. Unlike the trace, this includes subagent threads.
  * `costUsd` is Amp credits only; it is 0 when a subscription covered the
- * inference, which `subscriptionUsed` records.
+ * inference, which `subscriptionUsed` records. The estimated provider list
+ * price is absent when the CLI does not report it.
  */
 export const threadUsageSchema = z
   .object({
     costUsd: z.number().nonnegative(),
+    estimatedProviderCostAtListPriceUsd: z.number().nonnegative().optional(),
     inputTokens: z.number().int().nonnegative(),
     outputTokens: z.number().int().nonnegative(),
     requests: z.number().int().nonnegative(),
