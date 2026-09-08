@@ -9,6 +9,7 @@ import type { Config } from "./config.js"
 import { Database } from "./database.js"
 import { GitHubClient } from "./github.js"
 import { buildReviewPrompt, parseReviewResult, reviewThreadTitle } from "./review.js"
+import { readThreadUsage } from "./thread-usage.js"
 import type { ReviewJob } from "./types.js"
 
 const execFileAsync = promisify(execFile)
@@ -394,6 +395,13 @@ export class ReviewWorkers {
       }
       if (!cancelled) await this.database.finish(job.id, "failed", reason)
     } finally {
+      clearTimeout(timeout)
+      clearInterval(cancellationPoll)
+      try {
+        for (const threadId of await this.database.reviewThreadIds(job.id)) threadIds.add(threadId)
+      } catch (error) {
+        log.warn({ err: error }, "failed to load all Amp review threads for usage collection")
+      }
       for (const threadId of threadIds) {
         try {
           await execFileAsync(
@@ -404,9 +412,32 @@ export class ReviewWorkers {
         } catch (error) {
           log.warn({ err: error, threadId }, "failed to archive Amp review thread")
         }
+        try {
+          const lookup = await readThreadUsage(threadId)
+          if (!("usage" in lookup)) throw new Error(lookup.unavailable)
+          await this.database.setThreadUsage(threadId, lookup.usage)
+          log.info(
+            {
+              threadId,
+              ampUsageUsd: lookup.usage.costUsd,
+              estimatedProviderCostAtListPriceUsd:
+                lookup.usage.estimatedProviderCostAtListPriceUsd,
+            },
+            "Amp review usage collected",
+          )
+        } catch (error) {
+          const reason = errorMessage(error)
+          log.warn({ err: error, threadId }, "failed to collect Amp review usage")
+          try {
+            await this.database.setThreadUsageError(threadId, reason)
+          } catch (databaseError) {
+            log.warn(
+              { err: databaseError, threadId },
+              "failed to persist Amp review usage error",
+            )
+          }
+        }
       }
-      clearTimeout(timeout)
-      clearInterval(cancellationPoll)
       this.active.delete(controller)
     }
   }

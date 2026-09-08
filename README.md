@@ -3,7 +3,7 @@
 `amp-reviewbot` is a GitHub App that reviews pull requests in fresh [Amp orbs](https://ampcode.com/manual/orbs) and publishes the result as a GitHub check run with line annotations.
 
 Each review gets an Amp thread labeled `reviewbot`. GitHub delivery IDs and a Postgres job queue make webhook handling idempotent, and a newer PR revision cancels an obsolete review.
-Review threads are archived after each run; the corresponding GitHub check keeps a direct link to the archived thread.
+Review threads are archived after each run; the corresponding GitHub check keeps a direct link to the archived thread. Reviewbot runs `amp threads usage --details` for every thread used by a job, including fresh retries, and stores the results in `review_threads`. Amp credits and estimated provider cost at list price are separate values; the estimate remains null when Amp does not report `Est. list price`.
 Interrupted worker jobs are recovered periodically and reuse their existing GitHub check with a fresh Amp thread. After three worker attempts, the check fails instead of remaining pending.
 
 ## How it works
