@@ -16,6 +16,7 @@ import { judgeIssue, resolveMatchingVotes } from "../eval/judge.js"
 import { checkPack, exampleSchema, loadPack } from "../eval/pack.js"
 import { chanceSentence, formatComparison } from "../eval/compare.js"
 import { formatReport, reviewResources } from "../eval/report.js"
+import { formatRescoreSummary, rescoreRun } from "../eval/rescore.js"
 import { ampExitError, evaluationAmpArgs, keepThreadTrace } from "../eval/reviewer-child.js"
 import {
   reviewAuthentication,
@@ -47,7 +48,7 @@ import {
   pinnedModel,
   reviewMode,
 } from "../src/amp.js"
-import { preparedSourceVerificationCommand } from "../src/review.js"
+import { buildSourceSetupPrompt, preparedSourceVerificationCommand } from "../src/review.js"
 import { isTransientAmpError } from "../src/worker.js"
 
 const execFileAsync = promisify(execFile)
@@ -2366,6 +2367,104 @@ describe("eval scoring", () => {
           samples: [completed("blocking", 1, blocking, "failure", [], [])],
         }),
       /sample result does not match its raw production review/,
+    )
+  })
+})
+
+describe("eval rescoring", () => {
+  it("updates labels while dropping changed or unavailable evidence", () => {
+    const oldPreparation = "Run these commands from the repository:\n\necho old-source\n\nUse only this source."
+    const newPreparation = "Run these commands from the repository:\n\necho new-source\n\nUse only this source."
+    const oldBlocking = structuredClone(blocking)
+    oldBlocking.issues[0]!.severity = "medium"
+    const ids = ["kept", "removed", "commit-changed", "context-changed", "source-changed", "issue-changed"]
+    const oldCases = ids.map((id) => evalCase(id, id === "kept" || id === "issue-changed" ? oldBlocking : control))
+    const sourceRun = makeRun(
+      oldCases,
+      1,
+      oldCases.map((item) => ({
+        ...completed(
+          item.id,
+          1,
+          item.expected,
+          item.id === "kept" ? "failure" : "success",
+          item.id === "kept" ? [highFinding] : [],
+          [],
+        ),
+        sourceSetupPrompt: buildSourceSetupPrompt(oldPreparation),
+      })),
+    )
+    const currentKept = evalCase("kept", blocking)
+    const currentCommit = { ...evalCase("commit-changed", control), headSha: "c".repeat(40) }
+    const currentContext = evalCase("context-changed", control)
+    currentContext.context.title = "Changed pull request context"
+    const currentSource = evalCase("source-changed", control)
+    const currentIssue = evalCase("issue-changed", oldBlocking)
+    currentIssue.expected.issues[0]!.rootCause = "The recorded issue now describes another cause."
+    const pack = {
+      corpus: {
+        version: "pack-v1-current",
+        cases: [currentKept, currentCommit, currentContext, currentSource, currentIssue],
+      },
+      sourcePreparation: new Map([
+        ["kept", oldPreparation],
+        ["commit-changed", oldPreparation],
+        ["context-changed", oldPreparation],
+        ["source-changed", newPreparation],
+        ["issue-changed", oldPreparation],
+      ]),
+    }
+    const sourceBytes = Buffer.from(`${JSON.stringify(sourceRun)}\n`)
+
+    const result = rescoreRun(sourceRun, sourceBytes, pack, "2026-09-08T12:00:00.000Z")
+
+    assert.deepEqual(result.run.cases.map((item) => item.id), ["kept"])
+    assert.equal(result.run.cases[0]!.expected.issues[0]!.severity, "high")
+    assert.equal(result.run.samples[0]!.expected.issues[0]!.severity, "high")
+    assert.equal(sourceRun.cases[0]!.expected.issues[0]!.severity, "medium")
+    assert.deepEqual(result.dropped, [
+      { caseId: "removed", reason: "not-in-pack" },
+      { caseId: "commit-changed", reason: "review-input-changed", fields: ["commit"] },
+      { caseId: "context-changed", reason: "review-input-changed", fields: ["PR context"] },
+      { caseId: "source-changed", reason: "review-input-changed", fields: ["prepared source"] },
+      { caseId: "issue-changed", reason: "recorded-issue-changed", issueIds: ["known-failure"] },
+    ])
+    assert.equal(result.run.rescoredFrom?.sourceCorpusVersion, sourceRun.corpusVersion)
+    assert.equal(result.run.rescoredFrom?.packVersion, "pack-v1-current")
+    assert.match(result.run.rescoredFrom?.sourceArtifactHash ?? "", /^sha256:[0-9a-f]{64}$/)
+    const summary = formatRescoreSummary(result)
+    assert.match(summary, /removed/)
+    assert.match(summary, /commit-changed: commit/)
+    assert.match(summary, /context-changed: PR context/)
+    assert.match(summary, /source-changed: prepared source/)
+    assert.match(summary, /issue-changed: known-failure/)
+  })
+
+  it("rejects a run when every version changed commits", () => {
+    const preparation = "Run these commands from the repository:\n\necho source\n\nUse only this source."
+    const oldCase = evalCase("changed", control)
+    const sourceRun = makeRun(
+      [oldCase],
+      1,
+      [{
+        ...completed("changed", 1, control, "success", [], []),
+        sourceSetupPrompt: buildSourceSetupPrompt(preparation),
+      }],
+    )
+    const changedCase = { ...oldCase, headSha: "c".repeat(40) }
+
+    assert.throws(
+      () =>
+        rescoreRun(
+          sourceRun,
+          Buffer.from(JSON.stringify(sourceRun)),
+          {
+            corpus: { version: "pack-v1-current", cases: [changedCase] },
+            sourcePreparation: new Map([["changed", preparation]]),
+          },
+          "2026-09-08T12:00:00.000Z",
+        ),
+      /No saved versions still match/,
     )
   })
 })

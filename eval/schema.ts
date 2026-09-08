@@ -8,6 +8,28 @@ const artifactHashSchema = z
   .string()
   .regex(/^sha256:[0-9a-f]{64}$/i, "must be a sha256 artifact hash")
 const conclusionSchema = z.enum(["success", "neutral", "failure"])
+const rescoreDropSchema = z.discriminatedUnion("reason", [
+  z
+    .object({
+      caseId: z.string().min(1),
+      reason: z.literal("not-in-pack"),
+    })
+    .strict(),
+  z
+    .object({
+      caseId: z.string().min(1),
+      reason: z.literal("review-input-changed"),
+      fields: z.array(z.enum(["commit", "PR context", "prepared source"])).min(1),
+    })
+    .strict(),
+  z
+    .object({
+      caseId: z.string().min(1),
+      reason: z.literal("recorded-issue-changed"),
+      issueIds: z.array(z.string().min(1)).min(1),
+    })
+    .strict(),
+])
 export const exampleOriginSchema = z.enum(["pilot", "human-review", "synthetic"])
 export const exampleSplitSchema = z.enum(["development", "holdout"])
 export const versionRoleSchema = z.enum(["baseline", "introduced-issue"])
@@ -332,6 +354,16 @@ export const evalRunSchema = z
       .object({
         sourceArtifactHash: artifactHashSchema,
         finishedAt: z.string(),
+      })
+      .strict()
+      .optional(),
+    rescoredFrom: z
+      .object({
+        sourceArtifactHash: artifactHashSchema,
+        sourceCorpusVersion: z.string(),
+        packVersion: z.string(),
+        rescoredAt: z.string(),
+        dropped: z.array(rescoreDropSchema),
       })
       .strict()
       .optional(),
