@@ -16,7 +16,7 @@ const frozenSetSchema = z
           .object({ example: setNameSchema, version: setNameSchema })
           .strict(),
       )
-      .length(16),
+      .min(1),
   })
   .strict()
 
@@ -43,15 +43,6 @@ export async function loadFrozenSet(
     }
     return evalCase
   })
-  const counts = { blocking: 0, control: 0, advisory: 0 }
-  for (const evalCase of cases) counts[expectedKind(evalCase.expected)] += 1
-  const originalComposition = counts.blocking === 10 && counts.control === 3 && counts.advisory === 3
-  const adjudicatedComposition = counts.blocking === 11 && counts.control === 3 && counts.advisory === 2
-  if (!originalComposition && !adjudicatedComposition) {
-    throw new Error(
-      `Frozen set ${setName} must have its original 10/3/3 composition or the adjudicated 11/3/2 labels; found ${counts.blocking} blocking, ${counts.control} clean, and ${counts.advisory} advisory-only versions`,
-    )
-  }
   const hash = createHash("sha256").update(JSON.stringify(definition)).digest("hex").slice(0, 12)
   return { identifier: `${setName}@${hash}`, cases }
 }
@@ -82,6 +73,8 @@ export function formatAbDecision(input: {
   const cases = input.runA.cases
   const blocking = cases.filter((evalCase) => expectedKind(evalCase.expected) === "blocking")
   const nonBlocking = cases.filter((evalCase) => expectedKind(evalCase.expected) !== "blocking")
+  const clean = cases.filter((evalCase) => expectedKind(evalCase.expected) === "control")
+  const advisory = cases.filter((evalCase) => expectedKind(evalCase.expected) === "advisory")
   const blocks = (sample: EvalSample | undefined) => sample?.status === "completed" && sample.conclusion === "failure"
   const completedA = [...samplesA.values()].filter((sample) => sample.status === "completed").length
   const completedB = [...samplesB.values()].filter((sample) => sample.status === "completed").length
@@ -122,6 +115,8 @@ export function formatAbDecision(input: {
       : "KEEP A"
   const lines = [
     `Frozen set: ${input.setIdentifier}`,
+    `Set composition: ${blocking.length} blocking, ${clean.length} clean, ${advisory.length} advisory-only versions`,
+    "Decision thresholds: absolute counts chosen for the 16-version fast set; predeclare a rule for larger sets.",
     `Prompt A: ${input.promptA}`,
     `Prompt B: ${input.promptB}`,
     `Completed / requested reviews: A ${completedA}/${requestedCases}   B ${completedB}/${requestedCases}`,

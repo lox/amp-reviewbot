@@ -859,7 +859,7 @@ describe("eval example packs", () => {
     }
   })
 
-  it("loads the frozen set before and after an advisory is adjudicated as blocking", async () => {
+  it("loads named sets of any size and rejects holdout versions", async () => {
     const directory = await mkdtemp(join(tmpdir(), "reviewbot-frozen-set-"))
     const advisory: ExpectedResult = {
       issues: [{ ...blocking.issues[0]!, severity: "medium" }],
@@ -887,8 +887,22 @@ describe("eval example packs", () => {
       assert.deepEqual(frozen.cases.map((evalCase) => evalCase.id), cases.map((evalCase) => evalCase.id))
       assert.match(frozen.identifier, /^fast-v1@[0-9a-f]{12}$/)
 
-      cases[13]!.expected = blocking
-      await assert.doesNotReject(loadFrozenSet(directory, "fast-v1", cases))
+      const smaller = cases.slice(0, 2)
+      await writeFile(
+        join(directory, "sets", "small.json"),
+        JSON.stringify({
+          formatVersion: 1,
+          name: "small",
+          cases: smaller.map((evalCase) => {
+            const [example, version] = evalCase.id.split("/")
+            return { example, version }
+          }),
+        }),
+      )
+      assert.deepEqual(
+        (await loadFrozenSet(directory, "small", cases)).cases.map((evalCase) => evalCase.id),
+        smaller.map((evalCase) => evalCase.id),
+      )
 
       cases[0]!.split = "holdout"
       await assert.rejects(loadFrozenSet(directory, "fast-v1", cases), /must not contain holdout/)
@@ -1545,6 +1559,8 @@ describe("eval scoring", () => {
       wallTimeMs: 65_000,
     })
 
+    assert.match(decision, /Set composition: 10 blocking, 3 clean, 3 advisory-only versions/)
+    assert.match(decision, /absolute counts chosen for the 16-version fast set/)
     assert.match(decision, /Blocking versions blocked: +A 5\/10 +B 8\/10/)
     assert.match(decision, /Non-blocking versions blocked: A 0\/6 +B 0\/6/)
     assert.match(decision, /Recommendation: PROMISING B/)
