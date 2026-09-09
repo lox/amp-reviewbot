@@ -70,6 +70,7 @@ export function parseThreadUsage(report: string): ThreadUsage | null {
 }
 
 function estimatedListPrice(report: string): Pick<ThreadUsage, "estimatedProviderCostAtListPriceUsd"> {
+  if (/^Est\. list price: N\/A$/m.test(report)) return {}
   const summary = numberAfter(report, /^Est\. list price: \$([\d,]+(?:\.\d+)?)$/m)
   if (summary !== undefined) return { estimatedProviderCostAtListPriceUsd: summary }
 
@@ -77,15 +78,16 @@ function estimatedListPrice(report: string): Pick<ThreadUsage, "estimatedProvide
   const headerIndex = lines.findIndex((line) => tableCells(line).includes("Est. list price"))
   if (headerIndex < 0) return {}
   const estimateColumn = tableCells(lines[headerIndex]!).indexOf("Est. list price")
-  let estimatedProviderCostAtListPriceUsd = 0
+  const estimates: number[] = []
   for (const line of lines.slice(headerIndex + 2)) {
     if (!line.trim().startsWith("|")) break
     const value = /^\$([\d,]+(?:\.\d+)?)$/.exec(tableCells(line)[estimateColumn] ?? "")?.[1]
-    if (value !== undefined) {
-      estimatedProviderCostAtListPriceUsd += Number(value.replaceAll(",", ""))
-    }
+    if (value === undefined) return {}
+    estimates.push(Number(value.replaceAll(",", "")))
   }
-  return { estimatedProviderCostAtListPriceUsd }
+  return estimates.length === 0
+    ? {}
+    : { estimatedProviderCostAtListPriceUsd: estimates.reduce((sum, value) => sum + value, 0) }
 }
 
 function tableCells(line: string): string[] {
