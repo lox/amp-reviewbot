@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises"
 import { resolve } from "node:path"
 import { Pool, type PoolClient } from "pg"
 import type { Config } from "./config.js"
+import type { ThreadUsage } from "./thread-usage.js"
 import type { JobStatus, ReviewJob } from "./types.js"
 
 type JobRow = {
@@ -77,7 +78,7 @@ export class Database {
   }
 
   async migrate(): Promise<void> {
-    for (const file of ["001_initial.sql", "002_review_context.sql"]) {
+    for (const file of ["001_initial.sql", "002_review_context.sql", "003_review_threads.sql"]) {
       const sql = await readFile(resolve("migrations", file), "utf8")
       await this.pool.query(sql)
     }
@@ -244,8 +245,50 @@ export class Database {
 
   async setThread(jobId: string, threadId: string): Promise<void> {
     await this.pool.query(
-      "UPDATE review_jobs SET amp_thread_id = $2, updated_at = NOW() WHERE id = $1",
+      `WITH job AS (
+         UPDATE review_jobs SET amp_thread_id = $2, updated_at = NOW()
+         WHERE id = $1
+         RETURNING id
+       )
+       INSERT INTO review_threads (job_id, thread_id)
+       SELECT id, $2 FROM job
+       ON CONFLICT (thread_id) DO NOTHING`,
       [jobId, threadId],
+    )
+  }
+
+  async reviewThreadIds(jobId: string): Promise<string[]> {
+    const result = await this.pool.query<{ thread_id: string }>(
+      "SELECT thread_id FROM review_threads WHERE job_id = $1 ORDER BY created_at",
+      [jobId],
+    )
+    return result.rows.map((row) => row.thread_id)
+  }
+
+  async setThreadUsage(threadId: string, usage: ThreadUsage): Promise<void> {
+    await this.pool.query(
+      `UPDATE review_threads
+       SET amp_usage_usd = $2,
+           estimated_provider_cost_at_list_price_usd = $3,
+           usage_details = $4,
+           usage_error = NULL,
+           usage_collected_at = NOW()
+       WHERE thread_id = $1`,
+      [
+        threadId,
+        usage.costUsd,
+        usage.estimatedProviderCostAtListPriceUsd ?? null,
+        JSON.stringify(usage),
+      ],
+    )
+  }
+
+  async setThreadUsageError(threadId: string, error: string): Promise<void> {
+    await this.pool.query(
+      `UPDATE review_threads
+       SET usage_error = $2, usage_collected_at = NOW()
+       WHERE thread_id = $1 AND usage_details IS NULL`,
+      [threadId, error],
     )
   }
 

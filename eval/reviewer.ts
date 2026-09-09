@@ -1,14 +1,21 @@
-import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
 import { createHash } from "node:crypto"
 import { mkdir, mkdtemp, rm, stat } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
-import { promisify } from "node:util"
 import { z } from "zod"
-import type { ThreadUsage } from "./schema.js"
+import {
+  readThreadUsage as readThreadUsageWithEnvironment,
+  type ThreadUsageLookup,
+} from "../src/thread-usage.js"
 
-const execFileAsync = promisify(execFile)
+export {
+  execFailureReason,
+  parseThreadUsage,
+  usageUnavailableReason,
+} from "../src/thread-usage.js"
+export type { ThreadUsageLookup } from "../src/thread-usage.js"
 
 const outputFields = {
   threadId: z.string().nullable(),
@@ -238,74 +245,12 @@ function hashId(userId: string): string {
  * When the numbers are missing, the result says why, so a run without cost
  * figures can show whether Amp declined to report them or the lookup failed.
  */
-export type ThreadUsageLookup = { usage: ThreadUsage } | { unavailable: string }
-
 export async function readThreadUsage(threadId: string, apiKey?: string): Promise<ThreadUsageLookup> {
   let home: string | undefined
   try {
     if (apiKey) home = await mkdtemp(join(tmpdir(), "amp-reviewbot-usage-"))
-    const { stdout } = await execFileAsync(
-      resolve("node_modules", ".bin", "amp"),
-      ["threads", "usage", "--details", threadId],
-      { env: reviewerEnvironment(apiKey, home), timeout: 30_000, maxBuffer: 4 * 1024 * 1024 },
-    )
-    const usage = parseThreadUsage(stdout)
-    return usage === null ? { unavailable: usageUnavailableReason(stdout) } : { usage }
-  } catch (error) {
-    return { unavailable: `amp threads usage failed: ${execFailureReason(error)}` }
+    return await readThreadUsageWithEnvironment(threadId, reviewerEnvironment(apiKey, home))
   } finally {
     if (home) await rm(home, { recursive: true, force: true }).catch(() => {})
   }
-}
-
-/**
- * Why a usage report had no numbers: Amp's own explanation when it printed
- * one (for example "Usage information is currently unavailable for this
- * thread."), otherwise a note that the output lacked the expected lines.
- */
-export function usageUnavailableReason(report: string): string {
-  const explanation = report
-    .split("\n")
-    .map((line) => line.trim())
-    .find((line) => /usage information/i.test(line))
-  return explanation ?? "amp threads usage printed no cost or token counts"
-}
-
-/**
- * A short, thread-independent reason for a failed `amp threads usage` call:
- * the CLI's first stderr line when it printed one, otherwise the timeout or
- * exit status. The exec error message itself is avoided because it repeats
- * the command line, which would make every thread's reason unique.
- */
-export function execFailureReason(error: unknown): string {
-  if (typeof error !== "object" || error === null) return "unknown error"
-  const { stderr, killed, code } = error as { stderr?: unknown; killed?: unknown; code?: unknown }
-  const stderrLine =
-    typeof stderr === "string" ? stderr.split("\n").find((line) => line.trim() !== "")?.trim() : undefined
-  if (stderrLine) return stderrLine
-  if (killed === true) return "timed out"
-  if (code !== undefined && code !== null) return `exited with ${String(code)}`
-  return "unknown error"
-}
-
-export function parseThreadUsage(report: string): ThreadUsage | null {
-  const costUsd = numberAfter(report, /^Cost: \$([\d,]+(?:\.\d+)?)$/m)
-  const inputTokens = numberAfter(report, /^Input tokens: ([\d,]+)/m)
-  const outputTokens = numberAfter(report, /^Output tokens: ([\d,]+)/m)
-  const requests = numberAfter(report, /^Requests: ([\d,]+)$/m)
-  if (costUsd === undefined || inputTokens === undefined || outputTokens === undefined || requests === undefined) {
-    return null
-  }
-  return {
-    costUsd,
-    inputTokens,
-    outputTokens,
-    requests,
-    subscriptionUsed: /subscription was used for some inference/.test(report),
-  }
-}
-
-function numberAfter(report: string, pattern: RegExp): number | undefined {
-  const match = pattern.exec(report)
-  return match === null ? undefined : Number(match[1]!.replaceAll(",", ""))
 }

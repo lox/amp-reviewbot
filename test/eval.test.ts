@@ -1886,6 +1886,32 @@ describe("eval scoring", () => {
       requests: 366,
       subscriptionUsed: true,
     })
+    const withEstimatedListPrice = report.concat(
+      "\n## Models\n\n",
+      "| Model | Requests | Est. list price |\n",
+      "| --- | ---: | ---: |\n",
+      "| model-a | 2 | $1.25 |\n",
+      "| model-b | 3 | $0.75 |\n",
+    )
+    assert.equal(
+      parseThreadUsage(withEstimatedListPrice)?.estimatedProviderCostAtListPriceUsd,
+      2,
+    )
+    assert.equal(
+      parseThreadUsage(report.concat("\nEst. list price: $3.50\n"))
+        ?.estimatedProviderCostAtListPriceUsd,
+      3.5,
+    )
+    assert.equal(
+      parseThreadUsage(withEstimatedListPrice.replace("$0.75", "N/A"))
+        ?.estimatedProviderCostAtListPriceUsd,
+      undefined,
+    )
+    assert.equal(
+      parseThreadUsage(withEstimatedListPrice.concat("\nEst. list price: N/A\n"))
+        ?.estimatedProviderCostAtListPriceUsd,
+      undefined,
+    )
     const covered = parseThreadUsage(report.replace("Cost: $1,234.56", "Cost: $0"))!
     assert.equal(covered.costUsd, 0)
     assert.equal(covered.subscriptionUsed, true)
