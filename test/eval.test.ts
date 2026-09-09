@@ -1902,6 +1902,16 @@ describe("eval scoring", () => {
         ?.estimatedProviderCostAtListPriceUsd,
       3.5,
     )
+    assert.equal(
+      parseThreadUsage(withEstimatedListPrice.replace("$0.75", "N/A"))
+        ?.estimatedProviderCostAtListPriceUsd,
+      undefined,
+    )
+    assert.equal(
+      parseThreadUsage(withEstimatedListPrice.concat("\nEst. list price: N/A\n"))
+        ?.estimatedProviderCostAtListPriceUsd,
+      undefined,
+    )
     const covered = parseThreadUsage(report.replace("Cost: $1,234.56", "Cost: $0"))!
     assert.equal(covered.costUsd, 0)
     assert.equal(covered.subscriptionUsed, true)
