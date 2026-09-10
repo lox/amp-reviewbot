@@ -905,7 +905,21 @@ describe("eval example packs", () => {
       )
 
       cases[0]!.split = "holdout"
-      await assert.rejects(loadFrozenSet(directory, "fast-v1", cases), /must not contain holdout/)
+      await assert.rejects(
+        loadFrozenSet(directory, "fast-v1", cases),
+        /must contain only development versions.*is holdout/,
+      )
+      await assert.rejects(
+        loadFrozenSet(directory, "fast-v1", cases, "holdout"),
+        /must contain only holdout versions.*is development/,
+      )
+      for (const evalCase of cases) evalCase.split = "holdout"
+      assert.deepEqual(
+        (await loadFrozenSet(directory, "fast-v1", cases, "holdout")).cases.map(
+          (evalCase) => evalCase.id,
+        ),
+        cases.map((evalCase) => evalCase.id),
+      )
     } finally {
       await rm(directory, { recursive: true, force: true })
     }
