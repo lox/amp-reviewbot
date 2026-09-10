@@ -98,21 +98,23 @@ export function formatAbDecision(input: {
   const changed = paired.filter(
     (evalCase) => blocks(samplesA.get(evalCase.id)) !== blocks(samplesB.get(evalCase.id)),
   )
-  const newNonBlockingBlocks = nonBlocking.some(
-    (evalCase) =>
-      paired.includes(evalCase) &&
-      !blocks(samplesA.get(evalCase.id)) &&
-      blocks(samplesB.get(evalCase.id)),
-  )
-  const blockingLosses = blocking.filter(
-    (evalCase) =>
-      paired.includes(evalCase) &&
-      blocks(samplesA.get(evalCase.id)) &&
-      !blocks(samplesB.get(evalCase.id)),
-  ).length
+  const flipped = (group: EvalCase[], from: boolean) =>
+    group.filter(
+      (evalCase) =>
+        paired.includes(evalCase) &&
+        blocks(samplesA.get(evalCase.id)) === from &&
+        blocks(samplesB.get(evalCase.id)) !== from,
+    ).length
+  const blockingGains = flipped(blocking, false)
+  const blockingLosses = flipped(blocking, true)
+  const wrongBlocksAdded = flipped(nonBlocking, false)
+  const wrongBlocksRemoved = flipped(nonBlocking, true)
+  const netBlocking = blockingGains - blockingLosses
+  const netWrongBlocks = wrongBlocksRemoved - wrongBlocksAdded
   const promising =
-    missing === 0 && blockedB - blockedA >= 3 && !newNonBlockingBlocks && blockingLosses < 3
-  const recommendation = newNonBlockingBlocks || blockingLosses >= 3
+    missing === 0 &&
+    ((netBlocking >= 3 && netWrongBlocks >= 0) || (netWrongBlocks >= 2 && netBlocking >= 0))
+  const recommendation = netBlocking <= -2 || netWrongBlocks <= -1
     ? "REGRESSION"
     : promising
       ? "PROMISING B"
@@ -120,7 +122,7 @@ export function formatAbDecision(input: {
   const lines = [
     `Frozen set: ${input.setIdentifier}`,
     `Set composition: ${blocking.length} blocking, ${clean.length} clean, ${advisory.length} advisory-only versions`,
-    "Decision thresholds: absolute counts chosen for the 16-version fast set; predeclare a rule for larger sets.",
+    "Rule (paired calls, sized for a 16-version set): PROMISING B if net blocking gain >= 3 with no net new wrong blocks, or net wrong blocks removed >= 2 with no net blocking loss; REGRESSION if net blocking loss >= 2 or net new wrong blocks >= 1; otherwise KEEP A.",
     `Prompt A: ${input.promptA}`,
     `Prompt B: ${input.promptB}`,
     `Completed / requested reviews: A ${completedA}/${requestedCases}   B ${completedB}/${requestedCases}`,
@@ -128,6 +130,7 @@ export function formatAbDecision(input: {
     ...(unavailable === 0 ? [] : [`Unavailable after re-score: ${unavailable}`]),
     `Blocking versions blocked:     A ${blockedA}/${blocking.length}   B ${blockedB}/${blocking.length}`,
     `Non-blocking versions blocked: A ${falseA}/${nonBlocking.length}    B ${falseB}/${nonBlocking.length}`,
+    `Paired changes A -> B: blocking +${blockingGains} -${blockingLosses} (net ${signed(netBlocking)}); wrong blocks -${wrongBlocksRemoved} +${wrongBlocksAdded} (net ${signed(netWrongBlocks)} removed)`,
     "Changed calls: case | expected | A | B | retained high findings (title, file:line)",
   ]
   if (changed.length === 0) lines.push("  none")
@@ -164,6 +167,10 @@ function highFindings(sample: EvalSample | undefined): string {
   return findings.length === 0
     ? "none"
     : findings.map((finding) => `${finding.title} (${finding.path}:${finding.startLine})`).join("; ")
+}
+
+function signed(value: number): string {
+  return value > 0 ? `+${value}` : `${value}`
 }
 
 function hash(value: string): string {

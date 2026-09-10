@@ -121,12 +121,12 @@ For a new prompt idea, put only its additional instructions in a text file and p
 
 Both artifacts are saved under the pack's `.eval-runs`. The command prints one decision page using only each completed review's deterministic `conclusion`; it does not run finding-match judges or usage lookups. Traces, exact-source setup, source isolation, reviewer identity, raw output, filtering, and conclusions are still saved for inspection.
 
-The built-in PROMISING, REGRESSION, and KEEP A thresholds use absolute counts chosen for `fast-v1`. The decision page says so; predeclare a separate rule before interpreting a larger set.
+The built-in PROMISING, REGRESSION, and KEEP A thresholds are absolute counts sized for a 16-version set. The decision page prints the rule and the paired changes it was applied to; predeclare a separate rule before interpreting a larger set.
 
-The predeclared rule is a product choice:
+The rule counts only versions both prompts completed. A blocking gain is a blocking version A passed and B blocked; a blocking loss is the reverse. A wrong block is a block on a clean or advisory-only version; B can add or remove them. The rule is a product choice and works in both directions, so a candidate that catches more bugs and one that stops blocking good changes can each win:
 
-- **PROMISING B:** B blocks at least 3 more blocking versions, creates no new block among the non-blocking versions, and has no execution failure that could change that result. Read the retained high findings behind the gains before doing anything larger.
-- **REGRESSION:** B newly blocks any non-blocking version, or loses at least 3 blocking detections that A made.
+- **PROMISING B:** net blocking gain of at least 3 with no net new wrong blocks, or net wrong blocks removed of at least 2 with no net blocking loss, and no execution failure that could change that result. Read the retained high findings behind the changed calls before doing anything larger.
+- **REGRESSION:** net blocking loss of at least 2, or at least 1 net new wrong block.
 - **KEEP A:** every other result, including an incomplete result that cannot earn PROMISING B.
 
 KEEP A is a finished experiment, not a reason to enlarge or rerun it. Use the full `run`, `finish`, `report`, and `compare` path when you need repeat stability, issue matching, advisory recall, clean-version silence, sign tests, or usage accounting.

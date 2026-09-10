@@ -1574,19 +1574,28 @@ describe("eval scoring", () => {
     })
 
     assert.match(decision, /Set composition: 10 blocking, 3 clean, 3 advisory-only versions/)
-    assert.match(decision, /absolute counts chosen for the 16-version fast set/)
+    assert.match(decision, /^Rule \(paired calls, sized for a 16-version set\): PROMISING B if/m)
     assert.match(decision, /Blocking versions blocked: +A 5\/10 +B 8\/10/)
     assert.match(decision, /Non-blocking versions blocked: A 0\/6 +B 0\/6/)
+    assert.match(decision, /Paired changes A -> B: blocking \+3 -0 \(net \+3\); wrong blocks -0 \+0 \(net 0 removed\)/)
     assert.match(decision, /Recommendation: PROMISING B/)
     assert.match(decision, /Wall time: 1m 5s/)
 
+    // B blocks every blocking version it completed (a net gain of 5 over A) but three reviews failed.
     const incompleteB = makeRun(
       cases,
       1,
       cases.map((evalCase, index) =>
         index < 3
           ? failed(evalCase.id, 1, evalCase.expected)
-          : completed(evalCase.id, 1, evalCase.expected, "success", [], []),
+          : completed(
+              evalCase.id,
+              1,
+              evalCase.expected,
+              index < 10 ? "failure" : "success",
+              index < 10 ? [highFinding] : [],
+              [],
+            ),
       ),
     )
     const incomplete = formatAbDecision({
@@ -1598,8 +1607,73 @@ describe("eval scoring", () => {
       wallTimeMs: 65_000,
     })
     assert.match(incomplete, /Execution failures: 3/)
+    assert.match(incomplete, /Paired changes A -> B: blocking \+5 -0 \(net \+5\)/)
     assert.match(incomplete, /Recommendation: KEEP A/)
-    assert.doesNotMatch(incomplete, /Recommendation: REGRESSION/)
+    assert.match(incomplete, /Missing calls prevent a PROMISING B verdict/)
+  })
+
+  it("decides the fast A/B from net paired changes in both directions", () => {
+    const advisory: ExpectedResult = {
+      issues: [{ ...blocking.issues[0]!, severity: "medium" }],
+    }
+    const cases = [
+      ...Array.from({ length: 8 }, (_, index) => evalCase(`blocking-${index}`, blocking)),
+      ...Array.from({ length: 4 }, (_, index) => evalCase(`clean-${index}`, control)),
+      ...Array.from({ length: 4 }, (_, index) => evalCase(`advisory-${index}`, advisory)),
+    ]
+    const run = (blocked: string[]) =>
+      makeRun(
+        cases,
+        1,
+        cases.map((evalCase) =>
+          completed(
+            evalCase.id,
+            1,
+            evalCase.expected,
+            blocked.includes(evalCase.id) ? "failure" : "success",
+            blocked.includes(evalCase.id) ? [highFinding] : [],
+            [],
+          ),
+        ),
+      )
+    const decide = (a: string[], b: string[]) =>
+      formatAbDecision({
+        setIdentifier: "fast-v2@abc",
+        promptA: "old@aaa",
+        promptB: "new@bbb",
+        runA: run(a),
+        runB: run(b),
+        wallTimeMs: 1_000,
+      }).match(/Recommendation: (.+)$/m)![1]
+
+    const caught = ["blocking-0", "blocking-1", "blocking-2", "blocking-3", "blocking-4", "blocking-5"]
+    // Removing two wrong blocks with blocking unchanged is a win; the old rule could not see it.
+    assert.equal(decide([...caught, "advisory-0", "clean-0"], caught), "PROMISING B")
+    // Removing one wrong block alone is not enough.
+    assert.equal(decide([...caught, "advisory-0"], caught), "KEEP A")
+    // Fewer wrong blocks do not excuse losing a blocking call.
+    assert.equal(decide([...caught, "advisory-0", "clean-0"], caught.slice(0, 5)), "KEEP A")
+    // A net new wrong block is a regression even when it swaps for a removed one plus another.
+    assert.equal(decide([...caught, "advisory-0"], [...caught, "advisory-1", "clean-1"]), "REGRESSION")
+    // A swapped wrong block is net zero, so a large blocking gain still counts.
+    assert.equal(
+      decide(["blocking-0", "blocking-1", "blocking-2", "advisory-0"], [...caught, "blocking-6", "advisory-1"]),
+      "PROMISING B",
+    )
+    // Losing two blocking calls is a regression regardless of gains elsewhere.
+    assert.equal(decide(caught, [...caught.slice(0, 4), "blocking-6"]), "KEEP A")
+    assert.equal(decide(caught, caught.slice(0, 4)), "REGRESSION")
+    assert.match(
+      formatAbDecision({
+        setIdentifier: "fast-v2@abc",
+        promptA: "old@aaa",
+        promptB: "new@bbb",
+        runA: run([...caught, "advisory-0"]),
+        runB: run([...caught, "advisory-1", "clean-1"]),
+        wallTimeMs: 1_000,
+      }),
+      /Paired changes A -> B: blocking \+0 -0 \(net 0\); wrong blocks -1 \+2 \(net -1 removed\)/,
+    )
   })
 
   it("scores each review by whether it made the right call", () => {
