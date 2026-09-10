@@ -991,35 +991,6 @@ async function writeNewRun(path: string, run: EvalRun): Promise<void> {
   }
 }
 
-const preScopeGateFindingBar = `## Finding Bar
-
-Report only material issues introduced or materially worsened by the target change. Do not report style, naming, low-value cleanup, or speculative concerns.
-
-Every finding must establish:
-
-1. the reachable failure scenario or concrete maintenance burden
-2. why this change causes it
-3. the likely impact
-4. the smallest concrete remedy
-5. a changed file and precise line range
-
-Testing and observability gaps are findings only when they allow a specific material defect to ship or remain hidden. If repository context or tool output does not support a concern, omit it. Withdraw or downgrade suspicions disproved by broader context.`
-
-const scopeGateFindingBar = `## Finding Bar
-
-Report only material issues that pass all four checks:
-
-1. **In scope:** The issue affects the stated intent, changed behavior, a supported contract, or an established invariant, and identifies a changed file and precise line range.
-2. **Concrete harm:** There is a reachable failure scenario under realistic conditions or a concrete maintenance burden, with a likely material impact.
-3. **Introduced here:** The target change introduces the issue or materially worsens it, and the finding explains why.
-4. **Actionable remedy:** The finding gives the smallest sufficient remedy for the concrete harm.
-
-Drop anything that fails one of these checks. Maintenance burden counts as concrete harm only when it is specific: a duplicate source of truth, an ambiguous or impossible state, needless change surface, an abstraction with one implementation, feature-specific logic in shared code, or complexity relocated rather than removed.
-
-Do not report adjacent pre-existing problems, speculative future concerns, tool-enforced style, defence in depth without a credible present threat, unrelated refactors, or a better design that corrects no concrete harm. Objective improvement alone is not a reason to ask for work.
-
-Testing and observability gaps are findings only when they allow a specific material defect to ship or remain hidden. If repository context or tool output does not support a concern, omit it. Withdraw or downgrade suspicions disproved by broader context.`
-
 export async function loadPromptVariant(input: string): Promise<{
   identifier: string
   build: (job: ReviewJob) => string
@@ -1032,14 +1003,7 @@ export async function loadPromptVariant(input: string): Promise<{
   if (input === "pre-severity-guide") {
     const guide = `\n${severityGuide(failOn)}\n`
     return promptVariant("pre-severity-guide", (job) =>
-      removeScopeGate(
-        buildReviewPrompt(job, { failOn, preparedSource: true }).replace(guide, "\n"),
-      ),
-    )
-  }
-  if (input === "pre-scope-gate") {
-    return promptVariant("pre-scope-gate", (job) =>
-      removeScopeGate(buildReviewPrompt(job, { failOn, preparedSource: true })),
+      buildReviewPrompt(job, { failOn, preparedSource: true }).replace(guide, "\n"),
     )
   }
   const instructions = (await readFile(resolve(input), "utf8")).trim()
@@ -1047,13 +1011,6 @@ export async function loadPromptVariant(input: string): Promise<{
   return promptVariant(input, (job) =>
     buildReviewPrompt(job, { failOn, preparedSource: true, additionalInstructions: instructions }),
   )
-}
-
-function removeScopeGate(prompt: string): string {
-  if (!prompt.includes(scopeGateFindingBar)) {
-    throw new Error("Current prompt does not contain the scope-gated finding bar")
-  }
-  return prompt.replace(scopeGateFindingBar, preScopeGateFindingBar)
 }
 
 function promptVariant(name: string, build: (job: ReviewJob) => string) {
