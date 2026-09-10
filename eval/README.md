@@ -114,7 +114,7 @@ npm run eval -- ab /path/to/review-eval-pack fast-v1 pre-severity-guide current
 Run a deliberately held-back named set only after selecting a candidate:
 
 ```sh
-npm run eval -- ab /path/to/review-eval-pack holdout-all-v1 pre-scope-gate current --split holdout
+npm run eval -- ab /path/to/review-eval-pack holdout-all-v1 current /path/to/candidate.txt --split holdout
 ```
 
 For a new prompt idea, put only its additional instructions in a text file and pass that path as B. The decision page records a content hash, so editing the file creates a new prompt identifier without a code change or commit.
