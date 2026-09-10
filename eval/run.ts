@@ -69,6 +69,7 @@ type FinishOptions = {
 type AbOptions = {
   packPath: string
   setName: string
+  split: NonNullable<EvalCase["split"]>
   promptVariantA: string
   promptVariantB: string
   reviewerApiKey: string
@@ -336,11 +337,19 @@ async function runEvaluation(
 
 async function runAb(options: AbOptions): Promise<{ runA: EvalRun; runB: EvalRun; decision: string }> {
   const wallStarted = Date.now()
+  if (options.split === "holdout") {
+    console.warn("WARNING: Running an A/B experiment on held-back holdout versions.")
+  }
   console.log("Checking the separate review account key...")
   const account = await reviewAuthentication(options.reviewerApiKey)
   console.log("Checking source commits, changed lines, and the frozen set...")
   const loaded = await loadPack(options.packPath, options.sourceCache)
-  const frozen = await loadFrozenSet(options.packPath, options.setName, loaded.corpus.cases)
+  const frozen = await loadFrozenSet(
+    options.packPath,
+    options.setName,
+    loaded.corpus.cases,
+    options.split,
+  )
   const [variantA, variantB] = await Promise.all([
     loadPromptVariant(options.promptVariantA),
     loadPromptVariant(options.promptVariantB),
@@ -797,10 +806,7 @@ function runOptions(args: string[]): RunOptions {
   )
   const stamp = new Date().toISOString().replaceAll(/[:.]/g, "-")
   const cacheRoot = flag(args, "--cache") ?? resolve(".eval-cache")
-  const split = flag(args, "--split") ?? "development"
-  if (split !== "development" && split !== "holdout") {
-    throw new Error("--split must be development or holdout")
-  }
+  const split = splitFlag(args)
   const versions = [...new Set((flag(args, "--versions") ?? allVersionKinds.join(",")).split(","))]
   if (!versions.every((kind): kind is VersionKind => (allVersionKinds as string[]).includes(kind))) {
     throw new Error("--versions must list some of blocking, advisory, control (comma-separated)")
@@ -842,6 +848,7 @@ function abOptions(args: string[]): AbOptions {
   return {
     packPath,
     setName,
+    split: splitFlag(args),
     promptVariantA,
     promptVariantB,
     reviewerApiKey,
@@ -852,6 +859,14 @@ function abOptions(args: string[]): AbOptions {
     outputA: resolve(outputDirectory, `${stamp}-${setName}-A.json`),
     outputB: resolve(outputDirectory, `${stamp}-${setName}-B.json`),
   }
+}
+
+function splitFlag(args: string[]): NonNullable<EvalCase["split"]> {
+  const split = flag(args, "--split") ?? "development"
+  if (split !== "development" && split !== "holdout") {
+    throw new Error("--split must be development or holdout")
+  }
+  return split
 }
 
 function positionalArgs(args: string[]): string[] {
@@ -1092,7 +1107,7 @@ function printHelp(): void {
   console.log(`Usage:
   npm run eval -- check PACK
   npm run eval -- run PACK [--samples 3] [--concurrency 2] [--split development|holdout] [--versions blocking,control]
-  npm run eval -- ab PACK SET A_VARIANT B_VARIANT [--concurrency 3]
+  npm run eval -- ab PACK SET A_VARIANT B_VARIANT [--concurrency 3] [--split development|holdout]
   npm run eval -- finish RUN.json [--concurrency 2]
   npm run eval -- report RUN.json
   npm run eval -- compare A.json B.json

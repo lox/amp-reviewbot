@@ -27,6 +27,7 @@ export async function loadFrozenSet(
   packPath: string,
   setName: string,
   availableCases: EvalCase[],
+  expectedSplit: NonNullable<EvalCase["split"]> = "development",
 ): Promise<{ identifier: string; cases: EvalCase[] }> {
   const definition = frozenSetSchema.parse(
     JSON.parse(await readFile(resolve(packPath, "sets", `${setName}.json`), "utf8")),
@@ -38,8 +39,11 @@ export async function loadFrozenSet(
   const cases = ids.map((id) => {
     const evalCase = byId.get(id)
     if (!evalCase) throw new Error(`Frozen set ${setName} names unknown version ${id}`)
-    if (evalCase.split === "holdout") {
-      throw new Error(`Frozen set ${setName} must not contain holdout version ${id}`)
+    const split = evalCase.split ?? "development"
+    if (split !== expectedSplit) {
+      throw new Error(
+        `Frozen set ${setName} must contain only ${expectedSplit} versions; ${id} is ${split}`,
+      )
     }
     return evalCase
   })

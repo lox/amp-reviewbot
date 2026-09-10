@@ -102,13 +102,19 @@ npm run eval -- compare .eval-runs/BASELINE.json .eval-runs/CANDIDATE.json
 
 ### Fast prompt loop
 
-The private pack owns named set files under `sets/`. A set may contain any positive number of versions, but every member must exist in the pack and belong to the development split. The decision page derives its blocking, clean, and advisory-only composition from current labels. `fast-v1.json` names 16 settled versions, originally selected as 10 with blocking bugs, 3 clean versions, and 3 advisory-only versions. Keep disputed cases out and do not change membership while iterating. Label corrections require an explicit adjudication and offline re-score; one approved correction currently makes the split 11 blocking, 3 clean, and 2 advisory-only. Keep `FAIL_ON=high`, the runner, mode, and model fixed so only the prompt variant changes during an experiment.
+The private pack owns named set files under `sets/`. A set may contain any positive number of versions, but every member must exist in the pack and belong to the requested split. A/B defaults to the development split; `--split holdout` explicitly unlocks a holdout-only set and prints a warning before reviews start. Mixed-split sets are rejected. The decision page derives its blocking, clean, and advisory-only composition from current labels. `fast-v1.json` names 16 settled versions, originally selected as 10 with blocking bugs, 3 clean versions, and 3 advisory-only versions. Keep disputed cases out and do not change membership while iterating. Label corrections require an explicit adjudication and offline re-score; one approved correction currently makes the split 11 blocking, 3 clean, and 2 advisory-only. Keep `FAIL_ON=high`, the runner, mode, and model fixed so only the prompt variant changes during an experiment.
 
 Run two production prompt versions once each. A variant is `current`, `pre-scope-gate`, `pre-severity-guide`, or a path to a plain-text file containing additional trusted review instructions. `pre-scope-gate` reproduces the production prompt immediately before the finding scope gate shipped; `pre-severity-guide` reproduces the earlier prompt before explicit severity guidance. A file is data, not executable code, so prompt experiments cannot run candidate code on the trusted corpus machine. Reviews are paired by version, A/B order within each pair is randomized, and both sides share one concurrency limit (3 by default):
 
 ```sh
 export AMP_EVAL_REVIEWER_API_KEY="separate-review-account-key"
 npm run eval -- ab /path/to/review-eval-pack fast-v1 pre-severity-guide current
+```
+
+Run a deliberately held-back named set only after selecting a candidate:
+
+```sh
+npm run eval -- ab /path/to/review-eval-pack holdout-all-v1 pre-scope-gate current --split holdout
 ```
 
 For a new prompt idea, put only its additional instructions in a text file and pass that path as B. The decision page records a content hash, so editing the file creates a new prompt identifier without a code change or commit.
