@@ -69,15 +69,16 @@ Indirection alone is not simplification, and file size alone is not a defect. Do
 
 ## Finding Bar
 
-Report only material issues introduced or materially worsened by the target change. Do not report style, naming, low-value cleanup, or speculative concerns.
+Report only material issues that pass all four checks:
 
-Every finding must establish:
+1. **In scope:** The issue affects the stated intent, changed behavior, a supported contract, or an established invariant, and identifies a changed file and precise line range.
+2. **Concrete harm:** There is a reachable failure scenario under realistic conditions or a concrete maintenance burden, with a likely material impact.
+3. **Introduced here:** The target change introduces the issue or materially worsens it, and the finding explains why.
+4. **Actionable remedy:** The finding gives the smallest sufficient remedy for the concrete harm.
 
-1. the reachable failure scenario or concrete maintenance burden
-2. why this change causes it
-3. the likely impact
-4. the smallest concrete remedy
-5. a changed file and precise line range
+Drop anything that fails one of these checks. Maintenance burden counts as concrete harm only when it is specific: a duplicate source of truth, an ambiguous or impossible state, needless change surface, an abstraction with one implementation, feature-specific logic in shared code, or complexity relocated rather than removed.
+
+Do not report adjacent pre-existing problems, speculative future concerns, tool-enforced style, defence in depth without a credible present threat, unrelated refactors, or a better design that corrects no concrete harm. Objective improvement alone is not a reason to ask for work.
 
 Testing and observability gaps are findings only when they allow a specific material defect to ship or remain hidden. If repository context or tool output does not support a concern, omit it. Withdraw or downgrade suspicions disproved by broader context.
 
