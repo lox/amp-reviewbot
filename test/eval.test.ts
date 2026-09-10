@@ -929,13 +929,23 @@ describe("eval example packs", () => {
       status: "running",
       attempts: 1,
     } as const
-    const [beforeGuide, current] = await Promise.all([
+    const [beforeGuide, beforeScopeGate, current] = await Promise.all([
       loadPromptVariant("pre-severity-guide"),
+      loadPromptVariant("pre-scope-gate"),
       loadPromptVariant("current"),
     ])
 
     assert.doesNotMatch(beforeGuide.build(job), /Severity is about what happens/)
+    assert.doesNotMatch(beforeGuide.build(job), /pass all four checks/)
+    assert.match(beforeScopeGate.build(job), /Every finding must establish:/)
+    assert.doesNotMatch(beforeScopeGate.build(job), /pass all four checks/)
+    assert.doesNotMatch(beforeScopeGate.build(job), /Objective improvement alone/)
+    assert.match(beforeScopeGate.build(job), /Severity is about what happens/)
+    assert.equal(beforeScopeGate.identifier, "pre-scope-gate@da7f479098f7")
     assert.match(current.build(job), /Severity is about what happens/)
+    assert.match(current.build(job), /Report only material issues that pass all four checks/)
+    assert.match(current.build(job), /Objective improvement alone is not a reason to ask for work/)
+    assert.notEqual(beforeScopeGate.identifier, current.identifier)
     assert.match(current.identifier, /^current@[0-9a-f]{12}$/)
   })
 
