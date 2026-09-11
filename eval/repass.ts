@@ -79,6 +79,11 @@ export async function repassRun(
   runReview: RunRepassReview = runEvaluationReview,
   progress: RepassProgress = () => {},
 ): Promise<RepassResult> {
+  // A second re-pass would rate already-lowered findings and could no longer
+  // be checked against the raw review, so start again from the original run.
+  if (sourceRun.repassedFrom !== undefined) {
+    throw new Error("This run was already re-passed; re-pass the original review artifact instead")
+  }
   const cases = new Map(sourceRun.cases.map((evalCase) => [evalCase.id, evalCase]))
   const targets = sourceRun.samples.filter(
     (sample): sample is Extract<EvalSample, { status: "completed" }> =>
@@ -247,7 +252,8 @@ export function formatRepassSummary(result: RepassResult): string {
   return lines.join("\n")
 }
 
-function evalJob(evalCase: EvalCase, sample: number): ReviewJob {
+/** The review job a saved evaluation review used; the re-pass must see the same one. */
+export function evalJob(evalCase: EvalCase, sample: number): ReviewJob {
   return {
     id: `eval-${evalCase.id}-${sample}`,
     sourceDeliveryId: `eval-${evalCase.id}-${sample}`,

@@ -21,7 +21,7 @@ import { judgeIssue, type AmpVersions } from "./judge.js"
 import { checkPack, describePack, loadPack } from "./pack.js"
 import { formatReport } from "./report.js"
 import { formatComparison } from "./compare.js"
-import { formatRepassSummary, repassRun, severityRepassIdentifier } from "./repass.js"
+import { evalJob, formatRepassSummary, repassRun, severityRepassIdentifier } from "./repass.js"
 import { formatRescoreSummary, isAbPair, rescoreRun } from "./rescore.js"
 import {
   readThreadUsage,
@@ -724,25 +724,6 @@ async function runReviewSample(
   }
 }
 
-function evalJob(evalCase: EvalCase, sample: number): ReviewJob {
-  return {
-    id: `eval-${evalCase.id}-${sample}`,
-    sourceDeliveryId: `eval-${evalCase.id}-${sample}`,
-    eventType: "eval.replay",
-    installationId: "0",
-    repositoryId: "0",
-    repositoryFullName: evalCase.repositoryFullName,
-    pullNumber: evalCase.pullNumber,
-    baseSha: evalCase.baseSha,
-    headSha: evalCase.headSha,
-    ampProject: "no-project",
-    pullRequestContext: evalCase.context,
-    checkRunId: null,
-    ampThreadId: null,
-    status: "running",
-    attempts: 1,
-  }
-}
 
 function changedLineMap(evalCase: EvalCase): Map<string, Set<number>> {
   return new Map(
