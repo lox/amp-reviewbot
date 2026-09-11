@@ -21,6 +21,7 @@ import { judgeIssue, type AmpVersions } from "./judge.js"
 import { checkPack, describePack, loadPack } from "./pack.js"
 import { formatReport } from "./report.js"
 import { formatComparison } from "./compare.js"
+import { formatRepassSummary, repassRun, severityRepassIdentifier } from "./repass.js"
 import { formatRescoreSummary, isAbPair, rescoreRun } from "./rescore.js"
 import {
   readThreadUsage,
@@ -218,6 +219,54 @@ async function main(): Promise<void> {
     }
     return
   }
+  if (command === "repass") {
+    const options = repassOptions(process.argv.slice(3))
+    const wallStarted = Date.now()
+    console.log("Checking the separate review account key...")
+    await reviewAuthentication(options.reviewerApiKey)
+    console.log("Checking current pack labels and reviewer-visible inputs...")
+    const pack = await loadPack(options.packPath, options.sourceCache)
+    const sourceBytes = await readFile(options.runPath)
+    const sourceRun = evalRunSchema.parse(JSON.parse(sourceBytes.toString("utf8")))
+    const repassedAt = new Date().toISOString()
+    const aligned = rescoreRun(sourceRun, sourceBytes, pack, repassedAt)
+    if (aligned.dropped.length > 0) console.log(`\n${formatRescoreSummary(aligned)}`)
+    const blocked = aligned.run.samples.filter(
+      (sample) => sample.status === "completed" && sample.conclusion === "failure",
+    ).length
+    console.log(`Re-rating the blocking findings of ${blocked} saved reviews, up to ${options.concurrency} at a time...`)
+    const result = await repassRun(
+      aligned.run,
+      sourceBytes,
+      pack,
+      {
+        reviewerApiKey: options.reviewerApiKey,
+        timeoutMs: options.timeoutMs,
+        concurrency: options.concurrency,
+        repassedAt,
+      },
+      undefined,
+      (finished, total, caseId, outcome, durationMs) => {
+        console.log(`[${finished}/${total}] ${caseId}: severity re-pass ${outcome} (${formatDuration(durationMs)})`)
+      },
+    )
+    await writeNewRun(options.outputPath, result.run)
+    console.log(`\n${formatRepassSummary(result)}`)
+    console.log(
+      `\n${formatAbDecision({
+        setIdentifier: savedSetIdentifier(sourceRun),
+        promptA: basename(options.runPath),
+        promptB: severityRepassIdentifier(),
+        runA: aligned.run,
+        runB: result.run,
+        wallTimeMs: Date.now() - wallStarted,
+        requestedCases: sourceRun.cases.length,
+        unavailableCases: aligned.dropped.length,
+      })}`,
+    )
+    console.log(`\nRe-passed results: ${options.outputPath}`)
+    return
+  }
   printHelp()
   if (command && command !== "help" && command !== "--help") process.exitCode = 1
 }
@@ -227,9 +276,13 @@ async function readRun(path: string): Promise<EvalRun> {
 }
 
 function rescoreOutputPath(inputPath: string, stamp: string): string {
+  return derivedRunPath(inputPath, "rescored", stamp)
+}
+
+function derivedRunPath(inputPath: string, kind: string, stamp: string): string {
   const extension = extname(inputPath)
   const stem = extension === "" ? basename(inputPath) : basename(inputPath, extension)
-  return join(dirname(inputPath), `${stem}.rescored-${stamp}${extension || ".json"}`)
+  return join(dirname(inputPath), `${stem}.${kind}-${stamp}${extension || ".json"}`)
 }
 
 function sameCaseIds(left: EvalRun, right: EvalRun): boolean {
@@ -861,6 +914,44 @@ function abOptions(args: string[]): AbOptions {
   }
 }
 
+type RepassOptions = {
+  packPath: string
+  runPath: string
+  outputPath: string
+  reviewerApiKey: string
+  concurrency: number
+  timeoutMs: number
+  sourceCache: string
+}
+
+function repassOptions(args: string[]): RepassOptions {
+  const [packPath, runPath] = positionalArgs(args)
+  if (!packPath || !runPath) {
+    throw new Error("repass needs a pack and one saved result: repass PACK RUN.json")
+  }
+  if (process.env.AMP_API_KEY) {
+    throw new Error("Unset AMP_API_KEY; severity re-passes require the separate reviewer account")
+  }
+  const reviewerApiKey = process.env.AMP_EVAL_REVIEWER_API_KEY
+  delete process.env.AMP_EVAL_REVIEWER_API_KEY
+  if (!reviewerApiKey) {
+    throw new Error("Set AMP_EVAL_REVIEWER_API_KEY to a separate account that cannot access the example pack")
+  }
+  const concurrency = positiveInteger(flag(args, "--concurrency") ?? "3", "--concurrency", 10)
+  const timeoutMinutes = positiveInteger(flag(args, "--timeout-minutes") ?? "30", "--timeout-minutes", 120)
+  const stamp = new Date().toISOString().replaceAll(/[:.]/g, "-")
+  const cacheRoot = flag(args, "--cache") ?? resolve(packPath, ".eval-cache")
+  return {
+    packPath,
+    runPath,
+    outputPath: derivedRunPath(runPath, "repass", stamp),
+    reviewerApiKey,
+    concurrency,
+    timeoutMs: timeoutMinutes * 60_000,
+    sourceCache: resolve(cacheRoot, "source"),
+  }
+}
+
 function splitFlag(args: string[]): NonNullable<EvalCase["split"]> {
   const split = flag(args, "--split") ?? "development"
   if (split !== "development" && split !== "holdout") {
@@ -1069,8 +1160,9 @@ function printHelp(): void {
   npm run eval -- report RUN.json
   npm run eval -- compare A.json B.json
   npm run eval -- rescore PACK RUN.json [RUN.json ...]
+  npm run eval -- repass PACK RUN.json [--concurrency 3]
 
-Run reviews with public research against a fixed copy of the target repository, compare two prompt versions on a frozen set, validate an example pack, finish interrupted comparisons, read or re-score saved results, or compare two saved results version by version. Running reviews requires AMP_EVAL_REVIEWER_API_KEY for a separate account that cannot access the example pack.`)
+Run reviews with public research against a fixed copy of the target repository, compare two prompt versions on a frozen set, validate an example pack, finish interrupted comparisons, read or re-score saved results, compare two saved results version by version, or re-rate the blocking findings of saved reviews with a second severity pass and print the A/B decision page. Running reviews or re-passes requires AMP_EVAL_REVIEWER_API_KEY for a separate account that cannot access the example pack.`)
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {

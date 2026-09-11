@@ -388,6 +388,7 @@ export function excludeRuleBreakingReviews(run: EvalRun): { run: EvalRun; exclud
       retainedResult: _retainedResult,
       omitted: _omitted,
       conclusion: _conclusion,
+      severityRepass: _severityRepass,
       judgements: _judgements,
       judgementErrors: _judgementErrors,
       ...common
