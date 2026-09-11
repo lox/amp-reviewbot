@@ -28,6 +28,23 @@ Hypothesis (2026-09-11): a fresh thread that only re-rates the retained blocking
 
 Result: KEEP A. With only the four wrong blocks in view and the code available, the re-pass confirmed every one of them as high; it found nothing to lower in #2759, #3820, #3931, or #3907. The one finding it did lower was real (#3964 mutant, "Release pipeline runs after failed tests"): the re-pass argued that a later `wait` step precedes the release triggers, which is the same kind of over-confident reasoning that produces the wrong blocks in the first place. Reading the four wrong blocks together with this result: the reviewer treats "a misconfigured or non-default input reaches a bad path" as high, and neither wording nor a second look changes that. The remaining levers are labels (whether those four are advisory is a product judgement; see the label audit), a rule-based check the model does not get to argue with (for example, evidence that the path is reachable from shipped defaults), or accepting the current wrong-block rate (5/22 development, 3/10 holdout on corrected labels). The `repass` command stays in the eval as a measured negative result and a template for the next mechanism.
 
+## Miss audit
+
+On 2026-09-11 every blocking version `current` completed and did not block was read from the rescored artifacts, without model calls. Development, final labels: 35 blocking = 25 blocked, 4 missed, 1 excluded for rule breaking (#2807), 5 never scored because the prepared source no longer matched the pack (#4061 mutant, both #4101, #4239 mutant, #4270 mutant); evaluable denominator 29. Holdout: 20 blocking = 17 blocked, 2 missed, 1 excluded (#3871); denominator 19.
+
+| Version | Split | Class | What the review said |
+|---|---|---|---|
+| agent-3295-human/reviewed-change | dev | calibration | Described the exact coverdir-flag defect at the labelled line, rated medium. |
+| agent-3464-human/reviewed-change | dev | detection | No finding about the Go 1.25 / macOS 11 support break. |
+| agent-3825-synthetic-concurrency/clean-change | dev | detection (unstable) | No finding about the mutable-mirror dependency; blocked in 2 of 3 other `current` runs. |
+| agent-4270-synthetic-api-contract/clean-control | dev | calibration | Described the force-stop / graceful-report wait on another changed line, rated medium. |
+| agent-3868-synthetic-concurrency/clean-change | holdout | detection | Only a separate medium negative-timeout finding. |
+| agent-4110-synthetic-concurrency/clean-change | holdout | detection | No finding about replaying non-idempotent calls on the HTTP/2 failure. |
+
+No miss was a changed-line filtering drop. Only #3825 flipped between `current` runs, so the instability gate for a multi-sample majority A/B (at least three unstable development misses) is not met and that trial is off. The two calibration misses are the mirror image of the persistent wrong blocks: the reviewer describes the defect and places it on the wrong side of the medium/high line, in both directions. Prompt wording did not move that line for the wrong blocks and there is no reason to expect it to move for the misses. The four detection misses are deep bugs (platform support floor, mirror maintenance, env-file allowlist, retry idempotency) with no shared mechanism.
+
+Open eval hygiene item: the five development blocking versions dropped for a prepared-source mismatch have never been scored under `current`; one small paid run over exactly those versions would complete the development denominator.
+
 ## Label audit
 
 On 2026-09-10 every version the pre-gate prompt wrongly blocked on the wide sets (34) was adjudicated offline against source. 26 were real high-severity bugs with stale or missing labels; a sceptical second pass lowered 3 of those back. 7 were false positives and 1 (#4028) stayed uncertain. The corpus went from 118 to 147 recorded issues, the development split from 21/7/32 to 35/6/19, and the holdout from 5/10/15 to 19/7/4. Saved artifacts were rescored rather than rerun.
