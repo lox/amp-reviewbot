@@ -423,7 +423,8 @@ function withoutRuleBreakingRepass(sample: EvalSample, evalCase: EvalCase, run: 
             baseSha: evalCase.baseSha,
             headSha: evalCase.headSha,
           },
-          run.reviewer.mode,
+          // The re-pass ran in the mode recorded with it, not the review's.
+          run.repassedFrom?.mode ?? run.reviewer.mode,
           "plugin",
         )
   if (problems.length === 0) return sample

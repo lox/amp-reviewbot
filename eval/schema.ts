@@ -329,6 +329,9 @@ const severityRepassSchema = z.discriminatedUnion("status", [
       status: z.literal("completed"),
       rawResult: z.string(),
       ratings: severityRepassResultSchema.shape.ratings,
+      // A re-pass that broke the review rules is saved as an error, so its
+      // ratings never reach a decision page that does not re-check traces.
+      evidenceBoundaryViolations: z.array(z.string().min(1)).max(0),
     })
     .strict(),
   z.object({ ...severityRepassFields, status: z.literal("error"), error: z.string() }).strict(),
@@ -364,6 +367,28 @@ export const evalSampleSchema = z.discriminatedUnion("status", [
   completedSampleSchema,
   failedSampleSchema,
 ])
+
+const reviewAccountSchema = z.union([
+  z
+    .object({
+      authentication: z.literal("local-cli"),
+    })
+    .strict(),
+  z
+    .object({
+      authentication: z.literal("reviewer-api-key"),
+      reviewerIdHash: artifactHashSchema,
+    })
+    .strict(),
+  z
+    .object({
+      separation: z.literal("verified-user-id"),
+      trustedIdHash: artifactHashSchema,
+      reviewerIdHash: artifactHashSchema,
+    })
+    .strict(),
+])
+export type ReviewAccount = z.infer<typeof reviewAccountSchema>
 
 export const evalRunSchema = z
   .object({
@@ -414,6 +439,8 @@ export const evalRunSchema = z
         prompt: z.string().min(1),
         mode: z.string().min(1),
         model: z.string().optional(),
+        /** The account that ran the re-pass threads; it may differ from the review's. */
+        account: reviewAccountSchema,
         attempted: z.number().int().nonnegative(),
         failed: z.number().int().nonnegative(),
       })
@@ -439,26 +466,7 @@ export const evalRunSchema = z
           "research-enabled-target-frozen-v5",
         ])
         .optional(),
-      account: z.union([
-        z
-          .object({
-            authentication: z.literal("local-cli"),
-          })
-          .strict(),
-        z
-          .object({
-            authentication: z.literal("reviewer-api-key"),
-            reviewerIdHash: artifactHashSchema,
-          })
-          .strict(),
-        z
-          .object({
-            separation: z.literal("verified-user-id"),
-            trustedIdHash: artifactHashSchema,
-            reviewerIdHash: artifactHashSchema,
-          })
-          .strict(),
-      ]),
+      account: reviewAccountSchema,
     }),
     cases: z.array(evalCaseSchema).min(1),
     samples: z.array(evalSampleSchema).min(1),

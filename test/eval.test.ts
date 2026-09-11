@@ -2605,6 +2605,10 @@ describe("eval rescoring", () => {
 describe("eval severity re-pass", () => {
   const preparation = "Run these commands from the repository:\n\necho source\n\nUse only this source."
   const repassOptions = {
+    account: {
+      authentication: "reviewer-api-key" as const,
+      reviewerIdHash: `sha256:${"b".repeat(64)}` as const,
+    },
     timeoutMs: 60_000,
     concurrency: 2,
     repassedAt: "2026-09-11T00:00:00.000Z",
@@ -2699,6 +2703,12 @@ describe("eval severity re-pass", () => {
     assert.equal(result.run.repassedFrom?.failed, 0)
     assert.match(result.run.repassedFrom?.prompt ?? "", /^severity-repass@[0-9a-f]{12}$/)
     assert.equal(result.run.repassedFrom?.prompt, severityRepassIdentifier())
+    assert.deepEqual(result.run.repassedFrom?.account, repassOptions.account)
+    assert.deepEqual(
+      result.run.reviewer.account,
+      { authentication: "local-cli" },
+      "the review's own account is kept",
+    )
     assert.match(result.run.repassedFrom?.sourceArtifactHash ?? "", /^sha256:[0-9a-f]{64}$/)
     const sourceLowered = sourceRun.samples[0]!
     assert.equal(sourceLowered.status === "completed" && sourceLowered.conclusion, "failure", "source run untouched")
@@ -2809,11 +2819,40 @@ describe("eval severity re-pass", () => {
       repassOptions,
       fakeReview({ lowered: lowering }, { lowered: 1 }),
     )
+    // A re-pass trace is judged in the mode the re-pass ran in, not the saved
+    // review's older mode, so a clean re-pass of an older run is kept.
+    assert.equal(honest.run.reviewer.mode, "medium")
+    assert.equal(honest.run.repassedFrom?.mode, reviewMode)
+    const verification = preparedSourceVerificationCommand({
+      baseSha: cases[0]!.baseSha,
+      headSha: cases[0]!.headSha,
+    })
+    const clean = structuredClone(honest.run)
+    const cleanSample = clean.samples[0]!
+    if (cleanSample.status !== "completed" || cleanSample.severityRepass === undefined) {
+      assert.fail("re-pass missing")
+    }
+    cleanSample.severityRepass.trace = [
+      traceSystemMessage("thread-1", "/workspace", reviewMode),
+      toolMessage("shell_command", { command: verification, workdir: "/home/user/workspace" }, "verify"),
+      toolResultMessage("verify", false, 0),
+    ]
+    const cleanKept = excludeRuleBreakingReviews(clean).run.samples[0]!
+    assert.equal(cleanKept.status === "completed" && cleanKept.conclusion, "neutral")
+    assert.equal(cleanKept.status === "completed" && cleanKept.severityRepass?.status, "completed")
+
     const contaminated = structuredClone(honest.run)
     const saved = contaminated.samples[0]!
     if (saved.status !== "completed" || saved.severityRepass === undefined) assert.fail("re-pass missing")
     assert.equal(saved.conclusion, "neutral")
-    saved.severityRepass.trace = [traceSystemMessage(), toolMessage("shell_command", { command: "gh pr view 1" })]
+    saved.severityRepass.trace = [
+      traceSystemMessage("thread-1", "/workspace", reviewMode),
+      toolMessage("shell_command", { command: verification, workdir: "/home/user/workspace" }, "verify"),
+      toolResultMessage("verify", false, 0),
+      toolMessage("shell_command", {
+        command: "gh pr view https://github.com/lox/example/pull/1 --comments",
+      }),
+    ]
     const { run: excluded, excluded: count } = excludeRuleBreakingReviews(contaminated)
     assert.equal(count, 0, "the review itself followed the rules and stays counted")
     const kept = excluded.samples[0]!
@@ -2823,6 +2862,12 @@ describe("eval severity re-pass", () => {
     assert.equal(kept.retainedResult.findings[0]!.severity, "high")
     assert.equal(kept.severityRepass?.status, "error")
     assert.match(formatReport(contaminated), /wrongly blocked: 1 of 1/i)
+
+    // A completed re-pass can never carry cached violations: repassRun saves
+    // those as errors, so an artifact claiming otherwise was not written by it.
+    const forged = JSON.parse(JSON.stringify(honest.run))
+    forged.samples[0].severityRepass.evidenceBoundaryViolations = ["accessed the target pull request"]
+    assert.throws(() => evalRunSchema.parse(forged))
   })
 
   it("refuses a run that reviewed each version more than once", async () => {

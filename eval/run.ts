@@ -223,7 +223,7 @@ async function main(): Promise<void> {
     const options = repassOptions(process.argv.slice(3))
     const wallStarted = Date.now()
     console.log("Checking the separate review account key...")
-    await reviewAuthentication(options.reviewerApiKey)
+    const account = await reviewAuthentication(options.reviewerApiKey)
     console.log("Checking current pack labels and reviewer-visible inputs...")
     const pack = await loadPack(options.packPath, options.sourceCache)
     const sourceBytes = await readFile(options.runPath)
@@ -241,6 +241,7 @@ async function main(): Promise<void> {
       pack,
       {
         reviewerApiKey: options.reviewerApiKey,
+        account,
         timeoutMs: options.timeoutMs,
         concurrency: options.concurrency,
         repassedAt,

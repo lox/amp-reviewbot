@@ -13,7 +13,14 @@ import type { ReviewFinding, ReviewJob, Severity } from "../src/types.js"
 import { checkReviewTrace, modelsFromTrace } from "./evidence.js"
 import type { LoadedPack } from "./pack.js"
 import { runEvaluationReview, type EvaluationReviewInput } from "./reviewer.js"
-import { evalRunSchema, type EvalCase, type EvalRun, type EvalSample, type SeverityRepass } from "./schema.js"
+import {
+  evalRunSchema,
+  type EvalCase,
+  type EvalRun,
+  type EvalSample,
+  type ReviewAccount,
+  type SeverityRepass,
+} from "./schema.js"
 
 const failOn: Severity = "high"
 
@@ -21,6 +28,8 @@ type RunRepassReview = (input: EvaluationReviewInput) => ReturnType<typeof runEv
 
 export type RepassOptions = {
   reviewerApiKey?: string
+  /** The verified identity behind `reviewerApiKey`, recorded with the run. */
+  account: ReviewAccount
   timeoutMs: number
   concurrency: number
   repassedAt: string
@@ -139,6 +148,7 @@ export async function repassRun(
       prompt: severityRepassIdentifier(),
       mode: reviewMode,
       model: pinnedModel,
+      account: options.account,
       attempted: targets.length,
       failed,
     },
