@@ -1,3 +1,4 @@
+import { finalizeReview, parseReviewResult } from "../src/review.js"
 import type { EvalCase, EvalRun, EvalSample } from "./schema.js"
 import { scoreRun, type CaseScore, type EvalScore, type Scorecard } from "./score.js"
 import { checkReviewTrace, sourcePreparationFromPrompt } from "./evidence.js"
@@ -379,7 +380,7 @@ export function excludeRuleBreakingReviews(run: EvalRun): { run: EvalRun; exclud
                 ? "plugin"
                 : undefined,
           )
-    if (problems.length === 0) return sample
+    if (problems.length === 0) return withoutRuleBreakingRepass(sample, evalCase, run)
     excluded += 1
     if (sample.status === "error") return sample
     const {
@@ -388,6 +389,7 @@ export function excludeRuleBreakingReviews(run: EvalRun): { run: EvalRun; exclud
       retainedResult: _retainedResult,
       omitted: _omitted,
       conclusion: _conclusion,
+      severityRepass: _severityRepass,
       judgements: _judgements,
       judgementErrors: _judgementErrors,
       ...common
@@ -399,4 +401,47 @@ export function excludeRuleBreakingReviews(run: EvalRun): { run: EvalRun; exclud
     }
   })
   return { run: { ...run, samples }, excluded }
+}
+
+/**
+ * A severity re-pass that broke the review rules is treated like one that
+ * failed: its ratings are discarded and the review's own severities decide
+ * the block. The review itself followed the rules and stays in the counts.
+ */
+function withoutRuleBreakingRepass(sample: EvalSample, evalCase: EvalCase, run: EvalRun): EvalSample {
+  if (sample.status !== "completed" || sample.severityRepass?.status !== "completed") return sample
+  const repass = sample.severityRepass
+  const problems =
+    repass.trace === undefined
+      ? repass.evidenceBoundaryViolations
+      : checkReviewTrace(
+          repass.trace,
+          sourcePreparationFromPrompt(repass.prompt),
+          {
+            repository: evalCase.repositoryFullName,
+            pullNumber: evalCase.pullNumber,
+            baseSha: evalCase.baseSha,
+            headSha: evalCase.headSha,
+          },
+          // The re-pass ran in the mode recorded with it, not the review's.
+          run.repassedFrom?.mode ?? run.reviewer.mode,
+          "plugin",
+        )
+  if (problems.length === 0) return sample
+  const finalized = finalizeReview(
+    parseReviewResult(sample.rawResult),
+    new Map(Object.entries(evalCase.changedLines).map(([path, lines]) => [path, new Set(lines)])),
+    "high",
+  )
+  const { rawResult: _rawResult, ratings: _ratings, ...common } = repass
+  return {
+    ...sample,
+    retainedResult: finalized.result,
+    conclusion: finalized.conclusion,
+    severityRepass: {
+      ...common,
+      status: "error",
+      error: `did not follow the review rules: ${problems.join("; ")}`,
+    },
+  }
 }

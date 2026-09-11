@@ -21,6 +21,10 @@ One row per predeclared A/B. A row is written when the decision page is read, wh
 
 Three prompt-wording attempts at severity calibration (tightened high, scope gate, severity calibration gate) each lowered blocking detection by one to three calls while leaving the persistent wrong blocks in place. The reviewer's severity judgement on #2759, #3820, and #3931 has not moved under any wording. The next attempt at over-blocking should change the mechanism, not the wording: for example a separate severity pass over retained findings with the code in view, or accepting the current rate. On corrected labels the production prompt blocks 25/29 development and 17/18 holdout bugs and wrongly blocks 5/22 and 3/10.
 
+## Severity re-pass (next mechanism)
+
+Hypothesis: a fresh thread that only re-rates the retained blocking findings, with the code in view and nothing else to find, lowers the wrong blocks (#2759, #3820, #3931, #3907) while keeping the real ones. `npm run eval -- repass PACK A.json` derives B from the saved fast-v2 A artifact (`2026-09-10T22-51-26-509Z-fast-v2-A.json`, 7/8 blocking, 4/8 wrong) by re-passing only its 11 blocked reviews, so the review side is held constant and the result isolates the re-pass. The same rule applies: PROMISING needs net wrong blocks removed of at least 2 with no net blocking loss; any blocking loss of 2 or a net new wrong block (impossible for a lower-only pass) is a REGRESSION. If PROMISING, repeat on the dev-all-v1 A artifact and then the holdout A artifact before wiring the re-pass into the production worker.
+
 ## Label audit
 
 On 2026-09-10 every version the pre-gate prompt wrongly blocked on the wide sets (34) was adjudicated offline against source. 26 were real high-severity bugs with stale or missing labels; a sceptical second pass lowered 3 of those back. 7 were false positives and 1 (#4028) stayed uncertain. The corpus went from 118 to 147 recorded issues, the development split from 21/7/32 to 35/6/19, and the holdout from 5/10/15 to 19/7/4. Saved artifacts were rescored rather than rerun.

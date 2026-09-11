@@ -1,7 +1,16 @@
 import { createHash } from "node:crypto"
 import { isDeepStrictEqual } from "node:util"
 import { z } from "zod"
-import { finalizeReview, parseReviewResult, reviewResultSchema } from "../src/review.js"
+import {
+  applySeverityRatings,
+  blockingFindingIndices,
+  checkConclusion,
+  finalizeReview,
+  parseReviewResult,
+  parseSeverityRepassResult,
+  reviewResultSchema,
+  severityRepassResultSchema,
+} from "../src/review.js"
 
 const shaSchema = z.string().regex(/^[0-9a-f]{40}$/i, "must be a full 40-character commit SHA")
 const artifactHashSchema = z
@@ -298,6 +307,37 @@ const sampleFields = {
   usageUnavailable: z.string().min(1).optional(),
 }
 
+/**
+ * The second look at a review's blocking findings, run after the review in a
+ * fresh thread. When it completed, `retainedResult` carries its ratings and
+ * `conclusion` follows them; when it failed, the review's own severities stand.
+ */
+const severityRepassFields = {
+  promptHash: z.string(),
+  prompt: z.string(),
+  threadId: z.string().nullable(),
+  models: z.array(z.string()),
+  durationMs: z.number().int().nonnegative(),
+  retries: z.number().int().nonnegative().optional(),
+  trace: z.array(z.unknown()).optional(),
+  evidenceBoundaryViolations: z.array(z.string().min(1)),
+}
+const severityRepassSchema = z.discriminatedUnion("status", [
+  z
+    .object({
+      ...severityRepassFields,
+      status: z.literal("completed"),
+      rawResult: z.string(),
+      ratings: severityRepassResultSchema.shape.ratings,
+      // A re-pass that broke the review rules is saved as an error, so its
+      // ratings never reach a decision page that does not re-check traces.
+      evidenceBoundaryViolations: z.array(z.string().min(1)).max(0),
+    })
+    .strict(),
+  z.object({ ...severityRepassFields, status: z.literal("error"), error: z.string() }).strict(),
+])
+export type SeverityRepass = z.infer<typeof severityRepassSchema>
+
 const completedSampleSchema = z
   .object({
     ...sampleFields,
@@ -307,6 +347,7 @@ const completedSampleSchema = z
     retainedResult: reviewResultSchema,
     omitted: z.number().int().nonnegative(),
     conclusion: conclusionSchema,
+    severityRepass: severityRepassSchema.optional(),
     judgements: z.array(judgementSchema),
     judgementErrors: z.array(
       z.object({ issueId: z.string().min(1), error: z.string().min(1) }).strict(),
@@ -326,6 +367,28 @@ export const evalSampleSchema = z.discriminatedUnion("status", [
   completedSampleSchema,
   failedSampleSchema,
 ])
+
+const reviewAccountSchema = z.union([
+  z
+    .object({
+      authentication: z.literal("local-cli"),
+    })
+    .strict(),
+  z
+    .object({
+      authentication: z.literal("reviewer-api-key"),
+      reviewerIdHash: artifactHashSchema,
+    })
+    .strict(),
+  z
+    .object({
+      separation: z.literal("verified-user-id"),
+      trustedIdHash: artifactHashSchema,
+      reviewerIdHash: artifactHashSchema,
+    })
+    .strict(),
+])
+export type ReviewAccount = z.infer<typeof reviewAccountSchema>
 
 export const evalRunSchema = z
   .object({
@@ -367,6 +430,22 @@ export const evalRunSchema = z
       })
       .strict()
       .optional(),
+    /** Set when the saved reviews were re-used and only their blocking findings were re-rated. */
+    repassedFrom: z
+      .object({
+        sourceArtifactHash: artifactHashSchema,
+        repassedAt: z.string(),
+        /** The re-pass prompt's identifier, like a prompt variant's: name@hash. */
+        prompt: z.string().min(1),
+        mode: z.string().min(1),
+        model: z.string().optional(),
+        /** The account that ran the re-pass threads; it may differ from the review's. */
+        account: reviewAccountSchema,
+        attempted: z.number().int().nonnegative(),
+        failed: z.number().int().nonnegative(),
+      })
+      .strict()
+      .optional(),
     reviewer: z.object({
       gitCommit: z.string(),
       dirty: z.boolean(),
@@ -387,26 +466,7 @@ export const evalRunSchema = z
           "research-enabled-target-frozen-v5",
         ])
         .optional(),
-      account: z.union([
-        z
-          .object({
-            authentication: z.literal("local-cli"),
-          })
-          .strict(),
-        z
-          .object({
-            authentication: z.literal("reviewer-api-key"),
-            reviewerIdHash: artifactHashSchema,
-          })
-          .strict(),
-        z
-          .object({
-            separation: z.literal("verified-user-id"),
-            trustedIdHash: artifactHashSchema,
-            reviewerIdHash: artifactHashSchema,
-          })
-          .strict(),
-      ]),
+      account: reviewAccountSchema,
     }),
     cases: z.array(evalCaseSchema).min(1),
     samples: z.array(evalSampleSchema).min(1),
@@ -699,14 +759,50 @@ function validateCompletedSample(
   sampleIndex: number,
   context: z.RefinementCtx,
 ): void {
+  let finalized: ReturnType<typeof finalizeReview> | undefined
+  let parsedResult: ReturnType<typeof parseReviewResult> | undefined
   try {
-    const parsedResult = parseReviewResult(sample.rawResult)
-    const finalized = finalizeReview(parsedResult, changedLineMap(evalCase), "high")
+    parsedResult = parseReviewResult(sample.rawResult)
+    finalized = finalizeReview(parsedResult, changedLineMap(evalCase), "high")
+  } catch {
+    context.addIssue({
+      code: "custom",
+      path: ["samples", sampleIndex, "rawResult"],
+      message: "raw result is not valid review JSON",
+    })
+  }
+  if (finalized && parsedResult) {
+    let retained = finalized.result
+    if (sample.severityRepass?.status === "completed") {
+      // The raw re-pass output is the evidence: the saved ratings must be
+      // exactly what it said about exactly the findings that blocked.
+      let ratings: ReturnType<typeof parseSeverityRepassResult> | undefined
+      try {
+        ratings = parseSeverityRepassResult(
+          sample.severityRepass.rawResult,
+          blockingFindingIndices(finalized.result, "high"),
+        )
+      } catch {
+        context.addIssue({
+          code: "custom",
+          path: ["samples", sampleIndex, "severityRepass", "rawResult"],
+          message: "severity re-pass raw result is not a valid rating of the blocking findings",
+        })
+      }
+      if (ratings && !isDeepStrictEqual(sample.severityRepass.ratings, ratings)) {
+        context.addIssue({
+          code: "custom",
+          path: ["samples", sampleIndex, "severityRepass", "ratings"],
+          message: "severity re-pass ratings do not match its raw result",
+        })
+      }
+      if (ratings) retained = applySeverityRatings(finalized.result, ratings)
+    }
     const consistent =
       isDeepStrictEqual(sample.parsedResult, parsedResult) &&
-      isDeepStrictEqual(sample.retainedResult, finalized.result) &&
+      isDeepStrictEqual(sample.retainedResult, retained) &&
       sample.omitted === finalized.omitted &&
-      sample.conclusion === finalized.conclusion
+      sample.conclusion === checkConclusion(retained, "high")
     if (!consistent) {
       context.addIssue({
         code: "custom",
@@ -714,12 +810,16 @@ function validateCompletedSample(
         message: "sample result does not match its raw production review",
       })
     }
-  } catch {
-    context.addIssue({
-      code: "custom",
-      path: ["samples", sampleIndex, "rawResult"],
-      message: "raw result is not valid review JSON",
-    })
+  }
+  if (sample.severityRepass !== undefined) {
+    const expectedPromptHash = createHash("sha256").update(sample.severityRepass.prompt).digest("hex")
+    if (sample.severityRepass.promptHash !== expectedPromptHash) {
+      context.addIssue({
+        code: "custom",
+        path: ["samples", sampleIndex, "severityRepass", "promptHash"],
+        message: "severity re-pass prompt hash does not match its saved prompt",
+      })
+    }
   }
 
   const expectedIssueIds = new Set(evalCase.expected.issues.map((issue) => issue.id))

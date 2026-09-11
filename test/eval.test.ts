@@ -15,7 +15,8 @@ import { formatAbDecision, interleavedAbTasks, loadFrozenSet } from "../eval/ab.
 import { judgeIssue, resolveMatchingVotes } from "../eval/judge.js"
 import { checkPack, exampleSchema, loadPack } from "../eval/pack.js"
 import { chanceSentence, formatComparison } from "../eval/compare.js"
-import { formatReport, reviewResources } from "../eval/report.js"
+import { excludeRuleBreakingReviews, formatReport, reviewResources } from "../eval/report.js"
+import { formatRepassSummary, repassRun, severityRepassIdentifier } from "../eval/repass.js"
 import { formatRescoreSummary, rescoreRun } from "../eval/rescore.js"
 import { ampExitError, evaluationAmpArgs, keepThreadTrace } from "../eval/reviewer-child.js"
 import {
@@ -2598,6 +2599,390 @@ describe("eval rescoring", () => {
         ),
       /No saved versions still match/,
     )
+  })
+})
+
+describe("eval severity re-pass", () => {
+  const preparation = "Run these commands from the repository:\n\necho source\n\nUse only this source."
+  const repassOptions = {
+    account: {
+      authentication: "reviewer-api-key" as const,
+      reviewerIdHash: `sha256:${"b".repeat(64)}` as const,
+    },
+    timeoutMs: 60_000,
+    concurrency: 2,
+    repassedAt: "2026-09-11T00:00:00.000Z",
+  }
+  // Every case reviews a different pull request so the fake reviewer can tell
+  // re-passes apart by their thread title, as the real one names the PR.
+  const repassCase = (id: string, expected: ExpectedResult, pullNumber: number) => {
+    const evalCaseFor = evalCase(id, expected)
+    return { ...evalCaseFor, pullNumber, context: { ...evalCaseFor.context, title: `Change ${id}` } }
+  }
+  const fakeReview =
+    (rawResults: Record<string, string | Error>, pullNumbers: Record<string, number> = {}) =>
+    async (input: { prompt: string; title: string }) => {
+      const match = /^Severity check: Review lox\/example#(\d+)$/.exec(input.title)
+      assert.ok(match, `unexpected re-pass title ${input.title}`)
+      const caseId = Object.entries(pullNumbers).find(([, pullNumber]) => pullNumber === Number(match[1]))?.[0]
+      const raw = caseId === undefined ? undefined : rawResults[caseId]
+      if (raw === undefined) throw new Error(`unexpected re-pass for ${input.title}`)
+      if (raw instanceof Error) {
+        return { status: "error" as const, error: raw.message, threadId: null, models: [], trace: [], retries: 0 }
+      }
+      return { status: "completed" as const, rawResult: raw, threadId: "T-repass", models: ["test-reviewer"], trace: [], retries: 1 }
+    }
+  const sourceRunFor = (cases: ReturnType<typeof evalCase>[], samples: unknown[]) =>
+    makeRun(
+      cases,
+      1,
+      samples.map((sample) => ({ ...(sample as object), sourceSetupPrompt: buildSourceSetupPrompt(preparation) })),
+    )
+  const packFor = (cases: ReturnType<typeof evalCase>[]) => ({
+    corpus: { version: "test-v1", cases },
+    sourcePreparation: new Map(cases.map((evalCase) => [evalCase.id, preparation])),
+  })
+
+  it("lowers only what the re-pass says and re-decides the block from the lowered severities", async () => {
+    const pullNumbers = { lowered: 1, kept: 2, passed: 3 }
+    const cases = [
+      repassCase("lowered", control, pullNumbers.lowered),
+      repassCase("kept", blocking, pullNumbers.kept),
+      repassCase("passed", control, pullNumbers.passed),
+    ]
+    const sourceRun = sourceRunFor(cases, [
+      completed("lowered", 1, control, "failure", [highFinding, mediumFinding], []),
+      completed("kept", 1, blocking, "failure", [highFinding], []),
+      completed("passed", 1, control, "neutral", [mediumFinding], []),
+    ])
+    const sourceBytes = Buffer.from(JSON.stringify(sourceRun))
+    const rawResults = {
+      lowered: JSON.stringify({ ratings: [{ index: 0, severity: "medium", reason: "Only a rare input." }] }),
+      kept: JSON.stringify({ ratings: [{ index: 0, severity: "critical", reason: "Worse than reported." }] }),
+    }
+
+    const result = await repassRun(
+      sourceRun,
+      sourceBytes,
+      packFor(cases),
+      repassOptions,
+      fakeReview(rawResults, pullNumbers),
+    )
+
+    assert.equal(result.attempted, 2)
+    assert.equal(result.failed, 0)
+    const bySample = new Map(result.run.samples.map((sample) => [sample.caseId, sample]))
+    const lowered = bySample.get("lowered")!
+    assert.equal(lowered.status, "completed")
+    if (lowered.status !== "completed") return
+    assert.equal(lowered.conclusion, "neutral", "lowered findings stay visible, so the check is neutral not clean")
+    assert.deepEqual(
+      lowered.retainedResult.findings.map((finding) => finding.severity),
+      ["medium", "medium"],
+    )
+    assert.deepEqual(lowered.parsedResult.findings.map((finding) => finding.severity), ["high", "medium"])
+    assert.equal(lowered.severityRepass?.status, "completed")
+    assert.match(lowered.severityRepass?.prompt ?? "", /echo source/)
+    const kept = bySample.get("kept")!
+    assert.equal(kept.status, "completed")
+    if (kept.status !== "completed") return
+    assert.equal(kept.conclusion, "failure")
+    assert.equal(kept.retainedResult.findings[0]!.severity, "high", "a re-pass never raises a severity")
+    const passed = bySample.get("passed")!
+    assert.equal(passed.status, "completed")
+    if (passed.status !== "completed") return
+    assert.equal(passed.severityRepass, undefined, "reviews that did not block are not re-passed")
+    assert.deepEqual(
+      result.changes.map((change) => [change.caseId, change.before, change.after, change.lowered.length]),
+      [
+        ["lowered", "BLOCK", "PASS", 1],
+        ["kept", "BLOCK", "BLOCK", 0],
+      ],
+    )
+    assert.equal(result.run.repassedFrom?.attempted, 2)
+    assert.equal(result.run.repassedFrom?.failed, 0)
+    assert.match(result.run.repassedFrom?.prompt ?? "", /^severity-repass@[0-9a-f]{12}$/)
+    assert.equal(result.run.repassedFrom?.prompt, severityRepassIdentifier())
+    assert.deepEqual(result.run.repassedFrom?.account, repassOptions.account)
+    assert.deepEqual(
+      result.run.reviewer.account,
+      { authentication: "local-cli" },
+      "the review's own account is kept",
+    )
+    assert.match(result.run.repassedFrom?.sourceArtifactHash ?? "", /^sha256:[0-9a-f]{64}$/)
+    const sourceLowered = sourceRun.samples[0]!
+    assert.equal(sourceLowered.status === "completed" && sourceLowered.conclusion, "failure", "source run untouched")
+
+    const reparsed = evalRunSchema.parse(JSON.parse(JSON.stringify(result.run)))
+    assert.deepEqual(reparsed, result.run)
+
+    const summary = formatRepassSummary(result)
+    assert.match(summary, /Re-passed reviews: 2 blocked of 3 saved/)
+    assert.match(summary, /lowered \| BLOCK -> PASS \| Minor issue \(src\/example.ts:10\) high -> medium/)
+
+    const decision = formatAbDecision({
+      setIdentifier: "test-set@000000000000",
+      promptA: "source.json",
+      promptB: severityRepassIdentifier(),
+      runA: sourceRun,
+      runB: result.run,
+      wallTimeMs: 1000,
+    })
+    assert.match(decision, /Non-blocking versions blocked: A 1\/2\s+B 0\/2/)
+    assert.match(decision, /lowered \| control \| BLOCK \| PASS/)
+  })
+
+  it("keeps the review's own severities when the re-pass fails or returns nonsense", async () => {
+    const pullNumbers = { errored: 1, garbled: 2, partial: 3 }
+    const cases = [
+      repassCase("errored", control, pullNumbers.errored),
+      repassCase("garbled", control, pullNumbers.garbled),
+      repassCase("partial", control, pullNumbers.partial),
+    ]
+    const sourceRun = sourceRunFor(cases, [
+      completed("errored", 1, control, "failure", [highFinding], []),
+      completed("garbled", 1, control, "failure", [highFinding], []),
+      completed("partial", 1, control, "failure", [highFinding, highFinding], []),
+    ])
+    const rawResults = {
+      errored: new Error("amp exited with code 1"),
+      garbled: "I could not find the file.",
+      partial: JSON.stringify({ ratings: [{ index: 0, severity: "low", reason: "Only one rating." }] }),
+    }
+
+    const result = await repassRun(
+      sourceRun,
+      Buffer.from(JSON.stringify(sourceRun)),
+      packFor(cases),
+      repassOptions,
+      fakeReview(rawResults, pullNumbers),
+    )
+
+    assert.equal(result.attempted, 3)
+    assert.equal(result.failed, 3)
+    for (const sample of result.run.samples) {
+      assert.equal(sample.status, "completed")
+      if (sample.status !== "completed") continue
+      assert.equal(sample.conclusion, "failure", `${sample.caseId} must stay blocked`)
+      assert.equal(sample.severityRepass?.status, "error")
+      assert.ok(sample.retainedResult.findings.every((finding) => finding.severity === "high"))
+    }
+    const partial = result.run.samples.find((sample) => sample.caseId === "partial")!
+    assert.match(
+      partial.status === "completed" && partial.severityRepass?.status === "error" ? partial.severityRepass.error : "",
+      /invalid result/,
+    )
+    assert.deepEqual(
+      result.changes.map((change) => [change.caseId, change.after]),
+      [
+        ["errored", "BLOCK"],
+        ["garbled", "BLOCK"],
+        ["partial", "BLOCK"],
+      ],
+    )
+    assert.equal(result.run.repassedFrom?.failed, 3)
+    evalRunSchema.parse(JSON.parse(JSON.stringify(result.run)))
+  })
+
+  it("keeps the block when the re-pass broke the review rules, at re-pass time and in the scorecard", async () => {
+    const cases = [repassCase("lowered", control, 1)]
+    const sourceRun = sourceRunFor(cases, [completed("lowered", 1, control, "failure", [highFinding], [])])
+    const lowering = JSON.stringify({ ratings: [{ index: 0, severity: "low", reason: "Cosmetic." }] })
+    const peeking = async () => ({
+      status: "completed" as const,
+      rawResult: lowering,
+      threadId: "T-repass",
+      models: ["test-reviewer"],
+      trace: [traceSystemMessage(), toolMessage("shell_command", { command: "gh pr view 1 --comments" })],
+      retries: 0,
+    })
+
+    const result = await repassRun(sourceRun, Buffer.from(JSON.stringify(sourceRun)), packFor(cases), repassOptions, peeking)
+
+    assert.equal(result.failed, 1)
+    assert.equal(result.evidenceBoundaryViolations, 1)
+    const sample = result.run.samples[0]!
+    assert.equal(sample.status, "completed")
+    if (sample.status !== "completed") return
+    assert.equal(sample.conclusion, "failure", "a rating built on forbidden evidence cannot remove the block")
+    assert.equal(sample.severityRepass?.status, "error")
+    assert.match(sample.severityRepass?.status === "error" ? sample.severityRepass.error : "", /did not follow the review rules/)
+    assert.deepEqual(result.changes, [{ caseId: "lowered", before: "BLOCK", after: "BLOCK", lowered: [] }])
+    evalRunSchema.parse(JSON.parse(JSON.stringify(result.run)))
+
+    // An artifact saved before this check, or checked under newer rules, is
+    // caught again when the scorecard is read; the review itself stays counted.
+    const honest = await repassRun(
+      sourceRun,
+      Buffer.from(JSON.stringify(sourceRun)),
+      packFor(cases),
+      repassOptions,
+      fakeReview({ lowered: lowering }, { lowered: 1 }),
+    )
+    // A re-pass trace is judged in the mode the re-pass ran in, not the saved
+    // review's older mode, so a clean re-pass of an older run is kept.
+    assert.equal(honest.run.reviewer.mode, "medium")
+    assert.equal(honest.run.repassedFrom?.mode, reviewMode)
+    const verification = preparedSourceVerificationCommand({
+      baseSha: cases[0]!.baseSha,
+      headSha: cases[0]!.headSha,
+    })
+    const clean = structuredClone(honest.run)
+    const cleanSample = clean.samples[0]!
+    if (cleanSample.status !== "completed" || cleanSample.severityRepass === undefined) {
+      assert.fail("re-pass missing")
+    }
+    cleanSample.severityRepass.trace = [
+      traceSystemMessage("thread-1", "/workspace", reviewMode),
+      toolMessage("shell_command", { command: verification, workdir: "/home/user/workspace" }, "verify"),
+      toolResultMessage("verify", false, 0),
+    ]
+    const cleanKept = excludeRuleBreakingReviews(clean).run.samples[0]!
+    assert.equal(cleanKept.status === "completed" && cleanKept.conclusion, "neutral")
+    assert.equal(cleanKept.status === "completed" && cleanKept.severityRepass?.status, "completed")
+
+    const contaminated = structuredClone(honest.run)
+    const saved = contaminated.samples[0]!
+    if (saved.status !== "completed" || saved.severityRepass === undefined) assert.fail("re-pass missing")
+    assert.equal(saved.conclusion, "neutral")
+    saved.severityRepass.trace = [
+      traceSystemMessage("thread-1", "/workspace", reviewMode),
+      toolMessage("shell_command", { command: verification, workdir: "/home/user/workspace" }, "verify"),
+      toolResultMessage("verify", false, 0),
+      toolMessage("shell_command", {
+        command: "gh pr view https://github.com/lox/example/pull/1 --comments",
+      }),
+    ]
+    const { run: excluded, excluded: count } = excludeRuleBreakingReviews(contaminated)
+    assert.equal(count, 0, "the review itself followed the rules and stays counted")
+    const kept = excluded.samples[0]!
+    assert.equal(kept.status, "completed")
+    if (kept.status !== "completed") return
+    assert.equal(kept.conclusion, "failure")
+    assert.equal(kept.retainedResult.findings[0]!.severity, "high")
+    assert.equal(kept.severityRepass?.status, "error")
+    assert.match(formatReport(contaminated), /wrongly blocked: 1 of 1/i)
+
+    // A completed re-pass can never carry cached violations: repassRun saves
+    // those as errors, so an artifact claiming otherwise was not written by it.
+    const forged = JSON.parse(JSON.stringify(honest.run))
+    forged.samples[0].severityRepass.evidenceBoundaryViolations = ["accessed the target pull request"]
+    assert.throws(() => evalRunSchema.parse(forged))
+  })
+
+  it("refuses a run that reviewed each version more than once", async () => {
+    const cases = [repassCase("blocked", control, 1)]
+    const sourceRun = makeRun(
+      cases,
+      3,
+      [1, 2, 3].map((sample) => ({
+        ...completed("blocked", sample, control, "failure", [highFinding], []),
+        sourceSetupPrompt: buildSourceSetupPrompt(preparation),
+      })),
+    )
+
+    await assert.rejects(
+      repassRun(sourceRun, Buffer.from(JSON.stringify(sourceRun)), packFor(cases), repassOptions, fakeReview({}, {})),
+      /reviewed each version 3 times/,
+    )
+  })
+
+  it("rejects saved ratings that disagree with the raw re-pass result", async () => {
+    const cases = [repassCase("lowered", control, 1)]
+    const sourceRun = sourceRunFor(cases, [completed("lowered", 1, control, "failure", [highFinding, highFinding], [])])
+    const result = await repassRun(
+      sourceRun,
+      Buffer.from(JSON.stringify(sourceRun)),
+      packFor(cases),
+      repassOptions,
+      fakeReview(
+        {
+          lowered: JSON.stringify({
+            ratings: [
+              { index: 0, severity: "high", reason: "Confirmed." },
+              { index: 1, severity: "low", reason: "Cosmetic." },
+            ],
+          }),
+        },
+        { lowered: 1 },
+      ),
+    )
+    const honest = JSON.parse(JSON.stringify(result.run))
+    assert.equal(honest.samples[0].conclusion, "failure", "one confirmed high still blocks")
+
+    // Ratings edited to lower the confirmed finding too, with the retained
+    // result and conclusion made consistent with the edit.
+    const tampered = structuredClone(honest)
+    tampered.samples[0].severityRepass.ratings[0].severity = "low"
+    tampered.samples[0].retainedResult.findings[0].severity = "low"
+    tampered.samples[0].conclusion = "neutral"
+    assert.throws(() => evalRunSchema.parse(tampered), /ratings do not match its raw result/)
+
+    // A raw result that rates a finding which never blocked is not evidence.
+    const offTarget = structuredClone(honest)
+    offTarget.samples[0].severityRepass.rawResult = JSON.stringify({
+      ratings: [{ index: 5, severity: "low", reason: "Nothing here." }],
+    })
+    assert.throws(() => evalRunSchema.parse(offTarget), /not a valid rating of the blocking findings/)
+  })
+
+  it("refuses to re-pass a run that was already re-passed", async () => {
+    const cases = [repassCase("lowered", control, 1)]
+    const sourceRun = sourceRunFor(cases, [completed("lowered", 1, control, "failure", [highFinding], [])])
+    const rawResults = { lowered: JSON.stringify({ ratings: [{ index: 0, severity: "high", reason: "Confirmed." }] }) }
+    const first = await repassRun(
+      sourceRun,
+      Buffer.from(JSON.stringify(sourceRun)),
+      packFor(cases),
+      repassOptions,
+      fakeReview(rawResults, { lowered: 1 }),
+    )
+
+    await assert.rejects(
+      repassRun(first.run, Buffer.from(JSON.stringify(first.run)), packFor(cases), repassOptions, fakeReview(rawResults, { lowered: 1 })),
+      /already re-passed/,
+    )
+  })
+
+  it("refuses a run whose blocked reviews have no prepared source in the pack", async () => {
+    const cases = [evalCase("blocked", control)]
+    const sourceRun = sourceRunFor(cases, [completed("blocked", 1, control, "failure", [highFinding], [])])
+
+    await assert.rejects(
+      repassRun(
+        sourceRun,
+        Buffer.from(JSON.stringify(sourceRun)),
+        { corpus: { version: "test-v1", cases }, sourcePreparation: new Map() },
+        repassOptions,
+        fakeReview({}),
+      ),
+      /No prepared source for blocked/,
+    )
+  })
+
+  it("rejects a saved sample whose retained result ignores its completed re-pass ratings", async () => {
+    const cases = [repassCase("lowered", control, 1)]
+    const sourceRun = sourceRunFor(cases, [completed("lowered", 1, control, "failure", [highFinding], [])])
+    const result = await repassRun(
+      sourceRun,
+      Buffer.from(JSON.stringify(sourceRun)),
+      packFor(cases),
+      repassOptions,
+      fakeReview(
+        { lowered: JSON.stringify({ ratings: [{ index: 0, severity: "low", reason: "Cosmetic." }] }) },
+        { lowered: 1 },
+      ),
+    )
+    const serialized = JSON.parse(JSON.stringify(result.run))
+    assert.equal(serialized.samples[0].conclusion, "neutral")
+
+    serialized.samples[0].retainedResult = serialized.samples[0].parsedResult
+    serialized.samples[0].conclusion = "failure"
+    assert.throws(() => evalRunSchema.parse(serialized), /does not match its raw production review/)
+
+    const tamperedPrompt = JSON.parse(JSON.stringify(result.run))
+    tamperedPrompt.samples[0].severityRepass.prompt += " tampered"
+    assert.throws(() => evalRunSchema.parse(tamperedPrompt), /promptHash|prompt hash/i)
   })
 })
 

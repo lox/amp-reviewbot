@@ -60,7 +60,7 @@ Each result records the configured mode and model plus the exact Amp SDK and CLI
 
 ## Commands
 
-The `run` and `finish` commands start model calls. Get explicit confirmation before using either one.
+The `run`, `ab`, `finish`, and `repass` commands start model calls. Get explicit confirmation before using any of them.
 
 Check the pack's files without starting reviews:
 
@@ -141,6 +141,17 @@ npm run eval -- rescore /path/to/review-eval-pack .eval-runs/A.json .eval-runs/B
 Each new artifact is written beside its source and records the source artifact hash; the source is never overwritten. A single `run` prints the normal scorecard. Two artifacts created by the same `ab` invocation print the binary decision page, using their filenames as prompt identifiers because older artifacts did not save the display names.
 
 `rescore` updates embedded expectations to the current pack and drops versions no longer in the pack. It also compares the saved review with the current commit, pull-request context, prepared source, and changed-line map. If any reviewer-visible input differs, the version is dropped and the changed field is printed. A recorded issue whose meaning changed beyond severity or classification labels is also dropped because an old finding-match judgement cannot safely be reused. Newly added issues have no saved judgement, so a full scorecard remains incomplete until those matches are checked; `rescore` never starts that model work.
+
+### Severity re-pass
+
+`repass` tests a second severity opinion without changing production. It takes one saved single-sample artifact as A (any `ab` result, or a `run` made with `--samples 1`), re-scores it against the current pack, and for every review that blocked starts one fresh Amp thread with the same prepared source, the retained blocking findings, and the production severity guide. That thread verifies each finding in code and returns a severity per finding. Ratings can only lower a severity, the findings stay in the result, and the block decision is recomputed from the lowered severities. A re-pass that fails, returns an invalid result, or breaks the review rules (for example by inspecting the pull request on GitHub) keeps the review's own severities, so an error can never let a pull request through. Reviews that did not block are left untouched because lowering cannot change them, and a re-passed artifact cannot be re-passed again.
+
+```sh
+export AMP_EVAL_REVIEWER_API_KEY="separate-review-account-key"
+npm run eval -- repass /path/to/review-eval-pack .eval-runs/fast-v2-A.json
+```
+
+This is a paid command: it runs one review-account thread per blocked review, which is far fewer than a second full `ab`. The derived artifact is written beside its source as `<stem>.repass-<stamp>.json`, records the source artifact hash and the re-pass prompt identifier (`severity-repass@<hash>`), and saves each re-pass thread, trace, prompt, ratings, and raw result under `severityRepass` on the sample; reading the artifact checks that the ratings are exactly what the raw result said about exactly the findings that blocked. The command prints which findings were lowered and then the usual decision page with A as the aligned source and B as the derived run, so the same PROMISING, REGRESSION, and KEEP A rule applies. No finding-match judge or usage lookup runs.
 
 ### Outer loop
 
