@@ -144,14 +144,14 @@ Each new artifact is written beside its source and records the source artifact h
 
 ### Severity re-pass
 
-`repass` tests a second severity opinion without changing production. It takes one saved `run` or `ab` artifact as A, re-scores it against the current pack, and for every review that blocked starts one fresh Amp thread with the same prepared source, the retained blocking findings, and the production severity guide. That thread verifies each finding in code and returns a severity per finding. Ratings can only lower a severity, the findings stay in the result, and the block decision is recomputed from the lowered severities. A re-pass that fails or returns an invalid result keeps the review's own severities, so an error can never let a pull request through. Reviews that did not block are left untouched because lowering cannot change them.
+`repass` tests a second severity opinion without changing production. It takes one saved single-sample artifact as A (any `ab` result, or a `run` made with `--samples 1`), re-scores it against the current pack, and for every review that blocked starts one fresh Amp thread with the same prepared source, the retained blocking findings, and the production severity guide. That thread verifies each finding in code and returns a severity per finding. Ratings can only lower a severity, the findings stay in the result, and the block decision is recomputed from the lowered severities. A re-pass that fails, returns an invalid result, or breaks the review rules (for example by inspecting the pull request on GitHub) keeps the review's own severities, so an error can never let a pull request through. Reviews that did not block are left untouched because lowering cannot change them, and a re-passed artifact cannot be re-passed again.
 
 ```sh
 export AMP_EVAL_REVIEWER_API_KEY="separate-review-account-key"
 npm run eval -- repass /path/to/review-eval-pack .eval-runs/fast-v2-A.json
 ```
 
-This is a paid command: it runs one review-account thread per blocked review, which is far fewer than a second full `ab`. The derived artifact is written beside its source as `<stem>.repass-<stamp>.json`, records the source artifact hash and the re-pass prompt identifier (`severity-repass@<hash>`), and saves each re-pass thread, trace, prompt, and raw result under `severityRepass` on the sample. The command prints which findings were lowered and then the usual decision page with A as the aligned source and B as the derived run, so the same PROMISING, REGRESSION, and KEEP A rule applies. No finding-match judge or usage lookup runs.
+This is a paid command: it runs one review-account thread per blocked review, which is far fewer than a second full `ab`. The derived artifact is written beside its source as `<stem>.repass-<stamp>.json`, records the source artifact hash and the re-pass prompt identifier (`severity-repass@<hash>`), and saves each re-pass thread, trace, prompt, ratings, and raw result under `severityRepass` on the sample; reading the artifact checks that the ratings are exactly what the raw result said about exactly the findings that blocked. The command prints which findings were lowered and then the usual decision page with A as the aligned source and B as the derived run, so the same PROMISING, REGRESSION, and KEEP A rule applies. No finding-match judge or usage lookup runs.
 
 ### Outer loop
 

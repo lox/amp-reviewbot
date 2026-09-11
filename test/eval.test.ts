@@ -2774,39 +2774,111 @@ describe("eval severity re-pass", () => {
     evalRunSchema.parse(JSON.parse(JSON.stringify(result.run)))
   })
 
-  it("discards a rule-breaking re-pass from the scorecard but keeps its review", async () => {
+  it("keeps the block when the re-pass broke the review rules, at re-pass time and in the scorecard", async () => {
     const cases = [repassCase("lowered", control, 1)]
     const sourceRun = sourceRunFor(cases, [completed("lowered", 1, control, "failure", [highFinding], [])])
+    const lowering = JSON.stringify({ ratings: [{ index: 0, severity: "low", reason: "Cosmetic." }] })
+    const peeking = async () => ({
+      status: "completed" as const,
+      rawResult: lowering,
+      threadId: "T-repass",
+      models: ["test-reviewer"],
+      trace: [traceSystemMessage(), toolMessage("shell_command", { command: "gh pr view 1 --comments" })],
+      retries: 0,
+    })
+
+    const result = await repassRun(sourceRun, Buffer.from(JSON.stringify(sourceRun)), packFor(cases), repassOptions, peeking)
+
+    assert.equal(result.failed, 1)
+    assert.equal(result.evidenceBoundaryViolations, 1)
+    const sample = result.run.samples[0]!
+    assert.equal(sample.status, "completed")
+    if (sample.status !== "completed") return
+    assert.equal(sample.conclusion, "failure", "a rating built on forbidden evidence cannot remove the block")
+    assert.equal(sample.severityRepass?.status, "error")
+    assert.match(sample.severityRepass?.status === "error" ? sample.severityRepass.error : "", /did not follow the review rules/)
+    assert.deepEqual(result.changes, [{ caseId: "lowered", before: "BLOCK", after: "BLOCK", lowered: [] }])
+    evalRunSchema.parse(JSON.parse(JSON.stringify(result.run)))
+
+    // An artifact saved before this check, or checked under newer rules, is
+    // caught again when the scorecard is read; the review itself stays counted.
+    const honest = await repassRun(
+      sourceRun,
+      Buffer.from(JSON.stringify(sourceRun)),
+      packFor(cases),
+      repassOptions,
+      fakeReview({ lowered: lowering }, { lowered: 1 }),
+    )
+    const contaminated = structuredClone(honest.run)
+    const saved = contaminated.samples[0]!
+    if (saved.status !== "completed" || saved.severityRepass === undefined) assert.fail("re-pass missing")
+    assert.equal(saved.conclusion, "neutral")
+    saved.severityRepass.trace = [traceSystemMessage(), toolMessage("shell_command", { command: "gh pr view 1" })]
+    const { run: excluded, excluded: count } = excludeRuleBreakingReviews(contaminated)
+    assert.equal(count, 0, "the review itself followed the rules and stays counted")
+    const kept = excluded.samples[0]!
+    assert.equal(kept.status, "completed")
+    if (kept.status !== "completed") return
+    assert.equal(kept.conclusion, "failure")
+    assert.equal(kept.retainedResult.findings[0]!.severity, "high")
+    assert.equal(kept.severityRepass?.status, "error")
+    assert.match(formatReport(contaminated), /wrongly blocked: 1 of 1/i)
+  })
+
+  it("refuses a run that reviewed each version more than once", async () => {
+    const cases = [repassCase("blocked", control, 1)]
+    const sourceRun = makeRun(
+      cases,
+      3,
+      [1, 2, 3].map((sample) => ({
+        ...completed("blocked", sample, control, "failure", [highFinding], []),
+        sourceSetupPrompt: buildSourceSetupPrompt(preparation),
+      })),
+    )
+
+    await assert.rejects(
+      repassRun(sourceRun, Buffer.from(JSON.stringify(sourceRun)), packFor(cases), repassOptions, fakeReview({}, {})),
+      /reviewed each version 3 times/,
+    )
+  })
+
+  it("rejects saved ratings that disagree with the raw re-pass result", async () => {
+    const cases = [repassCase("lowered", control, 1)]
+    const sourceRun = sourceRunFor(cases, [completed("lowered", 1, control, "failure", [highFinding, highFinding], [])])
     const result = await repassRun(
       sourceRun,
       Buffer.from(JSON.stringify(sourceRun)),
       packFor(cases),
       repassOptions,
       fakeReview(
-        { lowered: JSON.stringify({ ratings: [{ index: 0, severity: "low", reason: "Cosmetic." }] }) },
+        {
+          lowered: JSON.stringify({
+            ratings: [
+              { index: 0, severity: "high", reason: "Confirmed." },
+              { index: 1, severity: "low", reason: "Cosmetic." },
+            ],
+          }),
+        },
         { lowered: 1 },
       ),
     )
-    const repassed = result.run.samples[0]!
-    assert.equal(repassed.status === "completed" && repassed.conclusion, "neutral")
+    const honest = JSON.parse(JSON.stringify(result.run))
+    assert.equal(honest.samples[0].conclusion, "failure", "one confirmed high still blocks")
 
-    const contaminated = structuredClone(result.run)
-    const sample = contaminated.samples[0]!
-    if (sample.status !== "completed" || sample.severityRepass === undefined) assert.fail("re-pass missing")
-    // Without a kept trace the saved violation list is the evidence, as for reviews.
-    delete sample.severityRepass.trace
-    sample.severityRepass.evidenceBoundaryViolations = ["inspected pull request #1 through GitHub"]
+    // Ratings edited to lower the confirmed finding too, with the retained
+    // result and conclusion made consistent with the edit.
+    const tampered = structuredClone(honest)
+    tampered.samples[0].severityRepass.ratings[0].severity = "low"
+    tampered.samples[0].retainedResult.findings[0].severity = "low"
+    tampered.samples[0].conclusion = "neutral"
+    assert.throws(() => evalRunSchema.parse(tampered), /ratings do not match its raw result/)
 
-    const { run: excluded, excluded: count } = excludeRuleBreakingReviews(contaminated)
-    assert.equal(count, 0, "the review itself followed the rules and stays counted")
-    const kept = excluded.samples[0]!
-    assert.equal(kept.status, "completed")
-    if (kept.status !== "completed") return
-    assert.equal(kept.conclusion, "failure", "the review's own high severity decides the block again")
-    assert.equal(kept.retainedResult.findings[0]!.severity, "high")
-    assert.equal(kept.severityRepass?.status, "error")
-    assert.match(kept.severityRepass?.status === "error" ? kept.severityRepass.error : "", /did not follow the review rules/)
-    assert.match(formatReport(contaminated), /wrongly blocked: 1 of 1/i)
+    // A raw result that rates a finding which never blocked is not evidence.
+    const offTarget = structuredClone(honest)
+    offTarget.samples[0].severityRepass.rawResult = JSON.stringify({
+      ratings: [{ index: 5, severity: "low", reason: "Nothing here." }],
+    })
+    assert.throws(() => evalRunSchema.parse(offTarget), /not a valid rating of the blocking findings/)
   })
 
   it("refuses to re-pass a run that was already re-passed", async () => {

@@ -3,9 +3,11 @@ import { isDeepStrictEqual } from "node:util"
 import { z } from "zod"
 import {
   applySeverityRatings,
+  blockingFindingIndices,
   checkConclusion,
   finalizeReview,
   parseReviewResult,
+  parseSeverityRepassResult,
   reviewResultSchema,
   severityRepassResultSchema,
 } from "../src/review.js"
@@ -764,15 +766,29 @@ function validateCompletedSample(
   if (finalized && parsedResult) {
     let retained = finalized.result
     if (sample.severityRepass?.status === "completed") {
+      // The raw re-pass output is the evidence: the saved ratings must be
+      // exactly what it said about exactly the findings that blocked.
+      let ratings: ReturnType<typeof parseSeverityRepassResult> | undefined
       try {
-        retained = applySeverityRatings(finalized.result, sample.severityRepass.ratings)
+        ratings = parseSeverityRepassResult(
+          sample.severityRepass.rawResult,
+          blockingFindingIndices(finalized.result, "high"),
+        )
       } catch {
         context.addIssue({
           code: "custom",
-          path: ["samples", sampleIndex, "severityRepass", "ratings"],
-          message: "severity re-pass rates a finding that was not retained",
+          path: ["samples", sampleIndex, "severityRepass", "rawResult"],
+          message: "severity re-pass raw result is not a valid rating of the blocking findings",
         })
       }
+      if (ratings && !isDeepStrictEqual(sample.severityRepass.ratings, ratings)) {
+        context.addIssue({
+          code: "custom",
+          path: ["samples", sampleIndex, "severityRepass", "ratings"],
+          message: "severity re-pass ratings do not match its raw result",
+        })
+      }
+      if (ratings) retained = applySeverityRatings(finalized.result, ratings)
     }
     const consistent =
       isDeepStrictEqual(sample.parsedResult, parsedResult) &&

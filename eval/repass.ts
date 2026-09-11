@@ -84,6 +84,13 @@ export async function repassRun(
   if (sourceRun.repassedFrom !== undefined) {
     throw new Error("This run was already re-passed; re-pass the original review artifact instead")
   }
+  // The decision page pairs versions by case and would keep one repeat per
+  // case, so only single-sample artifacts (every `ab` result) are comparable.
+  if (sourceRun.requestedSamplesPerCase !== 1) {
+    throw new Error(
+      `This run reviewed each version ${sourceRun.requestedSamplesPerCase} times; re-pass an ab artifact or a run with --samples 1`,
+    )
+  }
   const cases = new Map(sourceRun.cases.map((evalCase) => [evalCase.id, evalCase]))
   const targets = sourceRun.samples.filter(
     (sample): sample is Extract<EvalSample, { status: "completed" }> =>
@@ -194,6 +201,14 @@ async function repassSample(
     }
     if (review.status === "error") {
       repass = { ...common, ...evidence, status: "error", error: review.error }
+    } else if (evidence.evidenceBoundaryViolations.length > 0) {
+      // A rating built on evidence the rules forbid cannot remove a block.
+      repass = {
+        ...common,
+        ...evidence,
+        status: "error",
+        error: `did not follow the review rules: ${evidence.evidenceBoundaryViolations.join("; ")}`,
+      }
     } else {
       try {
         const ratings = parseSeverityRepassResult(review.rawResult, indices)
