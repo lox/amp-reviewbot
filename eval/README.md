@@ -129,7 +129,7 @@ The rule counts only versions both prompts completed. A blocking gain is a block
 - **REGRESSION:** net blocking loss of at least 2, or at least 1 net new wrong block.
 - **KEEP A:** every other result, including an incomplete result that cannot earn PROMISING B.
 
-KEEP A is a finished experiment, not a reason to enlarge or rerun it. Use the full `run`, `finish`, `report`, and `compare` path when you need repeat stability, issue matching, advisory recall, clean-version silence, sign tests, or usage accounting.
+KEEP A is a finished experiment, not a reason to enlarge or rerun it. Record every decision page in [docs/eval-experiments.md](../docs/eval-experiments.md) and read it before writing a new variant. Use the full `run`, `finish`, `report`, and `compare` path when you need repeat stability, issue matching, advisory recall, clean-version silence, sign tests, or usage accounting.
 
 After pack labels or membership change, re-score one or more saved artifacts without running a reviewer or finding-match judge:
 
