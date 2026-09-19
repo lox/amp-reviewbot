@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "@ampcode/sdk": "0.1.0-20260823161614-g3631dc6",
+    "@typesafe-ai/sdk": "0.6.0",
     "octokit": "5.0.5",
     "pg": "8.23.0",
     "pino": "10.3.1",

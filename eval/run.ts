@@ -19,7 +19,8 @@ import type { ReviewFinding, ReviewJob } from "../src/types.js"
 import { pinnedModel, reviewMode } from "../src/amp.js"
 import { checkReviewTrace, modelsFromTrace } from "./evidence.js"
 import { formatAbDecision, interleavedAbTasks, loadFrozenSet, type AbVariant } from "./ab.js"
-import { judgeIssue, type AmpVersions } from "./judge.js"
+import { judgeIssue, type AmpVersions, type IssueMatcher } from "./judge.js"
+import { createJevMatcher, jevMatchThreshold } from "./jev.js"
 import { checkPack, describePack, loadPack } from "./pack.js"
 import { formatReport } from "./report.js"
 import { formatComparison } from "./compare.js"
@@ -45,6 +46,7 @@ import { scoreRun, type EvalScore } from "./score.js"
 
 const execFileAsync = promisify(execFile)
 const failOn = "high" as const
+type MatcherName = "amp" | "jev"
 
 type RunOptions = {
   packPath: string
@@ -56,6 +58,8 @@ type RunOptions = {
   concurrency: number
   timeoutMs: number
   judgeTimeoutMs: number
+  matcher: MatcherName
+  jevThreshold: number
   orderSeed: string
   split: NonNullable<EvalCase["split"]>
   versions: VersionKind[]
@@ -67,6 +71,9 @@ type FinishOptions = {
   judgeCache: string
   concurrency: number
   timeoutMs: number
+  matcher: MatcherName
+  jevThreshold: number
+  rematch: boolean
 }
 
 type AbOptions = {
@@ -133,10 +140,10 @@ async function main(): Promise<void> {
     try {
       console.log("Finishing saved finding comparisons...")
       const { run, attempted } = await finishJudgements(
-        sourceRun,
+        options.rematch ? withoutJudgements(sourceRun) : sourceRun,
         options,
         await installedAmpVersions(),
-        judgeIssue,
+        issueMatcher(options.matcher, options.jevThreshold),
         (finished, total, succeeded) => {
           console.log(
             `[${finished}/${total}] Finding comparison ${succeeded ? "completed" : "did not complete"}`,
@@ -380,7 +387,7 @@ async function runEvaluation(
       timeoutMs: options.judgeTimeoutMs,
     },
     { sdkVersion: reviewer.sdkVersion, cliVersion: reviewer.cliVersion },
-    judgeIssue,
+    issueMatcher(options.matcher, options.jevThreshold),
     (matched, total, succeeded) => {
       console.log(
         `[${matched}/${total}] Finding comparison ${succeeded ? "completed" : "did not complete"}`,
@@ -510,7 +517,7 @@ export async function finishJudgements(
   sourceRun: EvalRun,
   options: Pick<FinishOptions, "judgeCache" | "concurrency" | "timeoutMs">,
   versions: AmpVersions,
-  judge: typeof judgeIssue = judgeIssue,
+  judge: IssueMatcher = judgeIssue,
   onProgress?: FinishProgress,
 ): Promise<{ run: EvalRun; attempted: number }> {
   const samples = structuredClone(sourceRun.samples)
@@ -813,6 +820,8 @@ async function mapConcurrent<Input, Output>(
 
 function runOptions(args: string[]): RunOptions {
   const packPath = requiredInput(args, "--corpus")
+  const matcher = matcherFlag(args)
+  const jevThreshold = thresholdFlag(args, matcher)
   if (flag(args, "--project")) {
     throw new Error("Remove --project; evaluation reviews now run without an Amp project")
   }
@@ -828,6 +837,7 @@ function runOptions(args: string[]): RunOptions {
       "Set AMP_EVAL_REVIEWER_API_KEY to a separate account that cannot access the example pack",
     )
   }
+  requireMatcherCredentials(matcher)
 
   const samplesPerCase = positiveInteger(flag(args, "--samples") ?? "3", "--samples", 20)
   const concurrency = positiveInteger(flag(args, "--concurrency") ?? "2", "--concurrency", 10)
@@ -858,6 +868,8 @@ function runOptions(args: string[]): RunOptions {
     concurrency,
     timeoutMs: timeoutMinutes * 60_000,
     judgeTimeoutMs: judgeTimeoutMinutes * 60_000,
+    matcher,
+    jevThreshold,
     orderSeed: flag(args, "--order-seed") ?? randomBytes(16).toString("hex"),
     split,
     versions,
@@ -955,9 +967,12 @@ function positionalArgs(args: string[]): string[] {
 
 function finishOptions(args: string[]): FinishOptions {
   const runPath = requiredInput(args, "--run")
-  if (process.env.AMP_API_KEY) {
+  const matcher = matcherFlag(args)
+  const jevThreshold = thresholdFlag(args, matcher)
+  if (matcher === "amp" && process.env.AMP_API_KEY) {
     throw new Error("Unset AMP_API_KEY; finishing uses the authenticated local Amp CLI")
   }
+  requireMatcherCredentials(matcher)
   delete process.env.AMP_EVAL_REVIEWER_API_KEY
   const concurrency = positiveInteger(flag(args, "--concurrency") ?? "2", "--concurrency", 10)
   const timeoutMinutes = positiveInteger(
@@ -973,7 +988,54 @@ function finishOptions(args: string[]): FinishOptions {
     judgeCache: resolve(cacheRoot, "judge"),
     concurrency,
     timeoutMs: timeoutMinutes * 60_000,
+    matcher,
+    jevThreshold,
+    rematch: hasFlag(args, "--rematch"),
   }
+}
+
+function matcherFlag(args: string[]): MatcherName {
+  const matcher = flag(args, "--matcher") ?? "amp"
+  if (matcher !== "amp" && matcher !== "jev") throw new Error("--matcher must be amp or jev")
+  return matcher
+}
+
+function thresholdFlag(args: string[], matcher: MatcherName): number {
+  const configured = flag(args, "--jev-threshold")
+  if (configured !== undefined && matcher !== "jev") {
+    throw new Error("--jev-threshold requires --matcher jev")
+  }
+  const threshold = configured === undefined ? jevMatchThreshold : Number(configured)
+  if (!Number.isFinite(threshold) || threshold < 0 || threshold > 1) {
+    throw new Error("--jev-threshold must be a number from 0 through 1")
+  }
+  return threshold
+}
+
+function requireMatcherCredentials(matcher: MatcherName): void {
+  if (matcher === "jev" && !process.env.TYPESAFE_API_KEY) {
+    throw new Error("Set TYPESAFE_API_KEY to use --matcher jev")
+  }
+}
+
+function issueMatcher(matcher: MatcherName, threshold: number): IssueMatcher {
+  return matcher === "jev" ? createJevMatcher(threshold) : judgeIssue
+}
+
+function withoutJudgements(run: EvalRun): EvalRun {
+  return evalRunSchema.parse({
+    ...run,
+    samples: run.samples.map((sample) => {
+      if (sample.status !== "completed") return sample
+      return {
+        ...sample,
+        durationMs: sample.reviewDurationMs ?? sample.durationMs,
+        matchingDurationMs: undefined,
+        judgements: [],
+        judgementErrors: [],
+      }
+    }),
+  })
 }
 
 function requiredInput(args: string[], oldFlag: string): string {
@@ -988,6 +1050,10 @@ function flag(args: string[], name: string): string | undefined {
   const value = args[index + 1]
   if (!value || value.startsWith("--")) throw new Error(`Missing value for ${name}`)
   return value
+}
+
+function hasFlag(args: string[], name: string): boolean {
+  return args.includes(name)
 }
 
 function positiveInteger(value: string, name: string, maximum: number): number {
@@ -1119,9 +1185,9 @@ function formatDuration(milliseconds: number): string {
 function printHelp(): void {
   console.log(`Usage:
   npm run eval -- check PACK
-  npm run eval -- run PACK [--samples 3] [--concurrency 2] [--split development|holdout] [--versions blocking,control]
+  npm run eval -- run PACK [--samples 3] [--concurrency 2] [--split development|holdout] [--versions blocking,control] [--matcher amp|jev]
   npm run eval -- ab PACK SET A_VARIANT B_VARIANT [--concurrency 3] [--split development|holdout]
-  npm run eval -- finish RUN.json [--concurrency 2]
+  npm run eval -- finish RUN.json [--concurrency 2] [--matcher amp|jev] [--rematch]
   npm run eval -- report RUN.json
   npm run eval -- compare A.json B.json
   npm run eval -- rescore PACK RUN.json [RUN.json ...]

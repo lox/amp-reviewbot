@@ -31,6 +31,15 @@ const inFlightVotes = new Map<string, Promise<void>>()
 
 type ExecuteAmp = typeof execute
 
+export type IssueMatcher = (
+  caseId: string,
+  issue: ExpectedIssue,
+  findings: ReviewFinding[],
+  cacheDirectory: string,
+  versions: AmpVersions,
+  signal: AbortSignal,
+) => Promise<EvalJudgement>
+
 export type AmpVersions = {
   sdkVersion: string
   cliVersion: string

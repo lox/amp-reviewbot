@@ -249,16 +249,20 @@ export const corpusSchema = z
 const judgementFields = {
   issueId: z.string().min(1),
   matchingFindingIndices: z.array(z.number().int().nonnegative()),
-  votes: z.array(z.array(z.number().int().nonnegative())).min(2).max(3),
+  votes: z.array(z.array(z.number().int().nonnegative())).min(1).max(3),
   disagreement: z.boolean(),
   models: z.array(z.string()),
+  probabilities: z.array(z.number().min(0).max(1)).optional(),
   provenance: z.object({
+    provider: z.enum(["amp", "typesafe"]).optional(),
     version: z.string(),
     mode: z.string(),
     model: z.string().optional(),
     sdkVersion: z.string(),
     cliVersion: z.string().optional(),
     project: z.string().nullable(),
+    apiVersion: z.string().optional(),
+    threshold: z.number().min(0).max(1).optional(),
     prompt: z.string().optional(),
     responseSchema: z.string().optional(),
     promptHash: z.string(),
@@ -266,7 +270,23 @@ const judgementFields = {
   }),
 }
 
-const judgementSchema = z.object(judgementFields).strict()
+const judgementSchema = z.object(judgementFields).strict().superRefine((judgement, context) => {
+  if (judgement.provenance.provider === "typesafe") {
+    if (judgement.votes.length !== 1) {
+      context.addIssue({
+        code: "custom",
+        path: ["votes"],
+        message: "TypeSafe judgements must record one thresholded decision",
+      })
+    }
+  } else if (judgement.votes.length < 2) {
+    context.addIssue({
+      code: "custom",
+      path: ["votes"],
+      message: "Amp judgements must record at least two votes",
+    })
+  }
+})
 
 /**
  * What Amp billed for the thread that produced the review, as reported by
@@ -666,6 +686,7 @@ export const evalRunSchema = z
                 run.reviewer.protocol === "research-enabled-target-frozen-v3" ||
                 run.reviewer.protocol === "research-enabled-target-frozen-v4" ||
                 run.reviewer.protocol === "research-enabled-target-frozen-v5") &&
+              provenance.provider !== "typesafe" &&
               provenance.cliVersion === undefined
             ) {
               context.addIssue({
@@ -678,6 +699,7 @@ export const evalRunSchema = z
               (run.reviewer.protocol === "research-enabled-target-frozen-v3" ||
                 run.reviewer.protocol === "research-enabled-target-frozen-v4" ||
                 run.reviewer.protocol === "research-enabled-target-frozen-v5") &&
+              provenance.provider !== "typesafe" &&
               (provenance.mode !== "reviewbot-judge-v1" ||
                 provenance.model !== "openai/gpt-5.6-sol")
             ) {
@@ -836,6 +858,29 @@ function validateCompletedSample(
         path: ["samples", sampleIndex, "judgements", judgementIndex],
         message: "judgement references a finding that was not retained",
       })
+    }
+    if (judgement.provenance.provider === "typesafe") {
+      const threshold = judgement.provenance.threshold
+      const probabilities = judgement.probabilities
+      const expectedMatches = probabilities?.flatMap((probability, findingIndex) =>
+        threshold !== undefined && probability >= threshold ? [findingIndex] : [],
+      )
+      if (
+        judgement.provenance.apiVersion === undefined ||
+        threshold === undefined ||
+        probabilities === undefined ||
+        probabilities.length !== findingCount ||
+        expectedMatches === undefined ||
+        !isDeepStrictEqual(judgement.matchingFindingIndices, expectedMatches) ||
+        !isDeepStrictEqual(judgement.votes, [expectedMatches]) ||
+        judgement.disagreement
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["samples", sampleIndex, "judgements", judgementIndex],
+          message: "TypeSafe judgement does not match its saved probabilities, threshold, or provenance",
+        })
+      }
     }
   })
   sample.judgementErrors.forEach((result, resultIndex) => {

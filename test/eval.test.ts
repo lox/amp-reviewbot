@@ -13,6 +13,12 @@ import { AmpOptionsSchema, type StreamMessage } from "@ampcode/sdk"
 import { checkReviewTrace, modelsFromTrace } from "../eval/evidence.js"
 import { formatAbDecision, interleavedAbTasks, loadFrozenSet } from "../eval/ab.js"
 import { judgeIssue, resolveMatchingVotes } from "../eval/judge.js"
+import {
+  jevMatchThreshold,
+  jevModel,
+  judgeIssueWithJev,
+  type SystemOne,
+} from "../eval/jev.js"
 import { checkPack, exampleSchema, loadPack } from "../eval/pack.js"
 import { chanceSentence, formatComparison } from "../eval/compare.js"
 import { excludeRuleBreakingReviews, formatReport, reviewResources } from "../eval/report.js"
@@ -3017,6 +3023,146 @@ describe("eval severity re-pass", () => {
 describe("eval judging", () => {
   it("uses a majority only for disputed finding matches", () => {
     assert.deepEqual(resolveMatchingVotes([[0, 2], [1, 2], [0, 2]]), [0, 2])
+  })
+
+  it("batches indexed Jev questions and preserves duplicate and multiple matches", async () => {
+    const cacheDirectory = await mkdtemp(join(tmpdir(), "amp-reviewbot-jev-"))
+    let calls = 0
+    const systemOne: SystemOne = async (request) => {
+      calls += 1
+      assert.equal(request.model, jevModel)
+      assert.deepEqual(Object.keys(request.questions), ["finding_0", "finding_1", "finding_2"])
+      assert.deepEqual(
+        Object.values(request.questions).map((question) =>
+          typeof question.instructions === "object" && question.instructions !== null &&
+          !Array.isArray(question.instructions)
+            ? question.instructions.candidateFindingIndex
+            : undefined,
+        ),
+        [0, 1, 2],
+      )
+      return {
+        model: jevModel,
+        // Deliberately reverse property order: answer IDs, not enumeration order,
+        // must map probabilities back to candidate finding indices.
+        answers: {
+          finding_2: { type: "noul", noul: 0.1 },
+          finding_1: { type: "noul", noul: 0.99 },
+          finding_0: { type: "noul", noul: 0.81 },
+        },
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }
+    }
+    const duplicate = { ...highFinding }
+    const nonmatch = lowFinding
+
+    try {
+      const result = await judgeIssueWithJev(
+        "blocking",
+        blocking.issues[0]!,
+        [highFinding, duplicate, nonmatch],
+        cacheDirectory,
+        new AbortController().signal,
+        jevMatchThreshold,
+        systemOne,
+      )
+      assert.equal(calls, 1)
+      assert.deepEqual(result.matchingFindingIndices, [0, 1])
+      assert.deepEqual(result.votes, [[0, 1]])
+      assert.deepEqual(result.probabilities, [0.81, 0.99, 0.1])
+      assert.equal(result.provenance.provider, "typesafe")
+      assert.equal(result.provenance.apiVersion, "v1")
+      assert.equal(result.provenance.model, jevModel)
+      assert.equal(result.provenance.threshold, jevMatchThreshold)
+      assert.match(result.provenance.prompt!, /candidateFindingIndex/)
+
+      const artifact = makeRun([evalCase("blocking", blocking)], 1, [{
+        ...completed("blocking", 1, blocking, "failure", [highFinding, duplicate, nonmatch], []),
+        judgements: [result],
+      }])
+      assert.doesNotThrow(() => evalRunSchema.parse(artifact))
+      const drifted = structuredClone(artifact)
+      if (drifted.samples[0]?.status !== "completed") assert.fail("expected completed sample")
+      drifted.samples[0].judgements[0]!.provenance.threshold = 0.9
+      assert.throws(
+        () => evalRunSchema.parse(drifted),
+        /does not match its saved probabilities, threshold, or provenance/,
+      )
+    } finally {
+      await rm(cacheDirectory, { recursive: true, force: true })
+    }
+  })
+
+  it("treats the Jev threshold as inclusive and keeps it in the cache identity", async () => {
+    const cacheDirectory = await mkdtemp(join(tmpdir(), "amp-reviewbot-jev-"))
+    let calls = 0
+    const systemOne: SystemOne = async () => {
+      calls += 1
+      return {
+        model: jevModel,
+        answers: { finding_0: { type: "noul", noul: 0.8 } },
+      }
+    }
+
+    try {
+      const match = () => judgeIssueWithJev(
+        "blocking",
+        blocking.issues[0]!,
+        [highFinding],
+        cacheDirectory,
+        new AbortController().signal,
+        0.8,
+        systemOne,
+      )
+      assert.deepEqual((await match()).matchingFindingIndices, [0])
+      assert.deepEqual((await match()).matchingFindingIndices, [0])
+      assert.equal(calls, 1, "identical matcher configuration should use the cache")
+
+      const stricter = await judgeIssueWithJev(
+        "blocking",
+        blocking.issues[0]!,
+        [highFinding],
+        cacheDirectory,
+        new AbortController().signal,
+        0.81,
+        systemOne,
+      )
+      assert.deepEqual(stricter.matchingFindingIndices, [])
+      assert.equal(calls, 2, "changing the threshold must not reuse the old cache entry")
+      assert.equal(stricter.provenance.threshold, 0.81)
+    } finally {
+      await rm(cacheDirectory, { recursive: true, force: true })
+    }
+  })
+
+  it("rejects missing and malformed Jev answers", async (context) => {
+    for (const [name, answers] of [
+      ["missing", { finding_0: { type: "noul", noul: 0.9 } }],
+      ["malformed", {
+        finding_0: { type: "noul", noul: 0.9 },
+        finding_1: { type: "noul", noul: 2 },
+      }],
+    ] as const) {
+      await context.test(name, async () => {
+        const cacheDirectory = await mkdtemp(join(tmpdir(), "amp-reviewbot-jev-"))
+        try {
+          await assert.rejects(
+            judgeIssueWithJev(
+              "blocking",
+              blocking.issues[0]!,
+              [highFinding, { ...highFinding }],
+              cacheDirectory,
+              new AbortController().signal,
+              jevMatchThreshold,
+              async () => ({ model: jevModel, answers }),
+            ),
+            /finding_1|too_big|expected/i,
+          )
+        } finally {
+          await rm(cacheDirectory, { recursive: true, force: true })
+        }
+      })
+    }
   })
 
   it("checks finding matches without requiring a source project", async () => {
