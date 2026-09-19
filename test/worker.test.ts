@@ -317,8 +317,11 @@ describe("cleanup for finished review threads", () => {
 
   it("blocks new reviews, drains active reviews, and still makes cleanup progress", async () => {
     const { workers, archived, looked, stored } = workersWith(
-      [{ threadId: "T-pending", needsArchive: true, needsUsage: true }],
-      { "T-pending": { usage } },
+      [
+        { threadId: "T-pending", needsArchive: true, needsUsage: true },
+        { threadId: "T-next", needsArchive: true, needsUsage: true },
+      ],
+      { "T-pending": { usage }, "T-next": { usage } },
     )
     const state = workers as unknown as {
       active: Set<AbortController>
@@ -342,8 +345,8 @@ describe("cleanup for finished review threads", () => {
     await cleanup
 
     assert.deepEqual(archived, ["T-pending"], "a saturated queue cannot starve archival")
-    assert.deepEqual(looked, ["T-pending"], "each pass also advances usage before yielding")
-    assert.deepEqual(stored, [{ threadId: "T-pending", usage }])
+    assert.deepEqual(looked, [], "cleanup yields before usage or another archival can age a claimed review")
+    assert.deepEqual(stored, [])
   })
 
   it("leaves a thread uncollected when storing valid usage fails, so it is retried instead of recorded as an error", async () => {

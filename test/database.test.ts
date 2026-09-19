@@ -267,7 +267,7 @@ describe("review thread usage persistence", () => {
 
     const text = queries[0]!.text
     assert.match(text, /archived_at IS NULL OR review_threads\.usage_collected_at IS NULL/)
-    assert.match(text, /ORDER BY \(review_threads\.archived_at IS NULL\) DESC, review_threads\.created_at(?: ASC)?\s/)
+    assert.match(text, /ORDER BY \(review_threads\.archived_at IS NULL\) DESC, review_threads\.created_at DESC/)
     assert.match(text, /review_jobs\.status IN \('succeeded', 'failed', 'cancelled'\)/)
     assert.doesNotMatch(text, /'running'/, "a running job's thread is still accruing usage")
     assert.deepEqual(queries[0]!.values, [20])

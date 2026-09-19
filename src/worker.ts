@@ -576,16 +576,18 @@ export class ReviewWorkers {
     }
   }
 
-  private async archiveThreadForCleanup(cleanup: PendingThreadCleanup, log: Logger): Promise<boolean> {
-    if (!cleanup.needsArchive) return true
-    try {
-      await this.archiveThread(cleanup.threadId)
-      await this.database.setThreadArchived(cleanup.threadId)
-      return true
-    } catch (error) {
-      log.warn({ err: error, threadId: cleanup.threadId }, "failed to archive Amp review thread")
-      return false
+  private async cleanupThread(cleanup: PendingThreadCleanup, log: Logger): Promise<void> {
+    if (cleanup.needsArchive) {
+      try {
+        await this.archiveThread(cleanup.threadId)
+        await this.database.setThreadArchived(cleanup.threadId)
+      } catch (error) {
+        log.warn({ err: error, threadId: cleanup.threadId }, "failed to archive Amp review thread")
+        return
+      }
+      if (this.reviewsWaiting > 0) return
     }
+    if (cleanup.needsUsage) await this.collectThreadUsage(cleanup.threadId, log)
   }
 
   /**
@@ -629,16 +631,9 @@ export class ReviewWorkers {
       const pending = await this.database.pendingThreadCleanup(threadCleanupBatchSize)
       if (pending.length === 0) return
       this.logger.warn({ threads: pending.length }, "cleaning up Amp review threads left by a worker")
-      const usagePending: string[] = []
       for (const cleanup of pending) {
         if (this.stopping) return
-        if (await this.archiveThreadForCleanup(cleanup, this.logger)) {
-          if (cleanup.needsUsage) usagePending.push(cleanup.threadId)
-        }
-      }
-      for (const threadId of usagePending) {
-        if (this.stopping) return
-        await this.collectThreadUsage(threadId, this.logger)
+        await this.cleanupThread(cleanup, this.logger)
         if (this.reviewsWaiting > 0) return
       }
     })

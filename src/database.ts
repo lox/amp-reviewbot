@@ -396,7 +396,7 @@ export class Database {
        JOIN review_jobs ON review_jobs.id = review_threads.job_id
        WHERE (review_threads.archived_at IS NULL OR review_threads.usage_collected_at IS NULL)
          AND review_jobs.status IN ('succeeded', 'failed', 'cancelled')
-       ORDER BY (review_threads.archived_at IS NULL) DESC, review_threads.created_at
+       ORDER BY (review_threads.archived_at IS NULL) DESC, review_threads.created_at DESC
        LIMIT $1`,
       [limit],
     )
