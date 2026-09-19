@@ -319,6 +319,19 @@ export function reviewPromptIdentifier(name: string, build: (job: ReviewJob) => 
   return `${name}@${createHash("sha256").update(build(placeholder)).digest("hex").slice(0, 12)}`
 }
 
+/**
+ * The identifier of the production prompt. The evaluation reviews a prepared
+ * source copy and its `current` variant hashes that form of the prompt, so
+ * production hashes the same form: the prepared-source boundary is the only
+ * difference, and the shared identifier is what lets `review_results` rows
+ * be read against docs/eval-experiments.md.
+ */
+export function currentReviewPromptIdentifier(failOn: Severity): string {
+  return reviewPromptIdentifier("current", (job) =>
+    buildReviewPrompt(job, { failOn, preparedSource: true }),
+  )
+}
+
 export function parseReviewResult(text: string): ReviewResult {
   const trimmed = text.trim()
   const fenced = /^```(?:json)?\s*([\s\S]*?)\s*```$/i.exec(trimmed)

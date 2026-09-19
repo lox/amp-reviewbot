@@ -8,7 +8,7 @@ import { agentModeFromMessage, reviewMode } from "./amp.js"
 import { resolveAmpProject, type Config } from "./config.js"
 import { Database } from "./database.js"
 import { GitHubClient } from "./github.js"
-import { buildReviewPrompt, parseReviewResult, reviewPromptIdentifier, reviewThreadTitle } from "./review.js"
+import { buildReviewPrompt, currentReviewPromptIdentifier, parseReviewResult, reviewThreadTitle } from "./review.js"
 import { readThreadUsage, type ThreadUsageLookup } from "./thread-usage.js"
 import type { ReviewJob } from "./types.js"
 
@@ -214,9 +214,7 @@ export class ReviewWorkers {
     private readonly logger: Logger,
     private readonly readUsage: typeof readThreadUsage = readThreadUsage,
   ) {
-    this.promptIdentifier = reviewPromptIdentifier("current", (job) =>
-      buildReviewPrompt(job, { failOn: config.failOn }),
-    )
+    this.promptIdentifier = currentReviewPromptIdentifier(config.failOn)
   }
 
   start(): void {

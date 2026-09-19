@@ -8,6 +8,7 @@ import { z } from "zod"
 import {
   buildReviewPrompt,
   buildSourceSetupPrompt,
+  currentReviewPromptIdentifier,
   finalizeReview,
   parseReviewResult,
   reviewPromptIdentifier,
@@ -1070,9 +1071,10 @@ export async function loadPromptVariant(input: string): Promise<{
   build: (job: ReviewJob) => string
 }> {
   if (input === "current") {
-    return promptVariant("current", (job) =>
-      buildReviewPrompt(job, { failOn, preparedSource: true }),
-    )
+    return {
+      identifier: currentReviewPromptIdentifier(failOn),
+      build: (job) => buildReviewPrompt(job, { failOn, preparedSource: true }),
+    }
   }
   if (input === "pre-severity-guide") {
     const guide = `\n${severityGuide(failOn)}\n`
