@@ -10,11 +10,34 @@ mise_data_dir="${MISE_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/mise}"
 shim_dir="${MISE_SHIMS_DIR:-$mise_data_dir/shims}"
 local_bin="$HOME/.local/bin"
 
+# Pinned release and checksums from its SHASUMS256.txt. Setup runs where
+# orb credentials may be present, so download the versioned artifact and
+# verify it instead of piping a mutable installer script into sh. Bump the
+# version and both checksums together.
+mise_version="v2026.9.11"
+declare -A mise_sha256=(
+  [x86_64]="02a19e4a5eda23cda916503ad09dbc608a249fe7a7d5686c5a74ff3a7ce3b7e0"
+  [aarch64]="d781ce1b4daad6ead469b0a57fef4bfb49c4e02025dc88111ff1bfaa8c90aad9"
+)
+
 printf 'Installing mise...\n'
 mise_bin="$(command -v mise || true)"
 if [[ -z "$mise_bin" ]]; then
-  # Pinned so every fresh orb installs the same release; bump deliberately.
-  curl -fsSL https://mise.run | MISE_VERSION="${MISE_VERSION:-v2026.9.11}" sh
+  arch="$(uname -m)"
+  case "$arch" in
+    x86_64) mise_arch="x64" ;;
+    aarch64 | arm64) arch="aarch64"; mise_arch="arm64" ;;
+    *) printf 'No pinned mise checksum for architecture %s.\n' "$arch" >&2; exit 1 ;;
+  esac
+  archive="mise-$mise_version-linux-$mise_arch.tar.gz"
+  tmp_dir="$(mktemp -d)"
+  trap 'rm -rf "$tmp_dir"' EXIT
+  curl -fsSL -o "$tmp_dir/$archive" \
+    "https://github.com/jdx/mise/releases/download/$mise_version/$archive"
+  printf '%s  %s\n' "${mise_sha256[$arch]}" "$tmp_dir/$archive" | sha256sum --check --quiet
+  tar -xzf "$tmp_dir/$archive" -C "$tmp_dir"
+  mkdir -p "$local_bin"
+  install -m 0755 "$tmp_dir/mise/bin/mise" "$local_bin/mise"
   mise_bin="$local_bin/mise"
 fi
 
