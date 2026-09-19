@@ -6,7 +6,7 @@ import type { StreamMessage } from "@ampcode/sdk"
 import type { Logger } from "pino"
 import { agentModeFromMessage, reviewMode } from "./amp.js"
 import { resolveAmpProject, type Config } from "./config.js"
-import { Database } from "./database.js"
+import { Database, type PendingThreadCleanup } from "./database.js"
 import { GitHubClient, type OpenPullRequest } from "./github.js"
 import { buildReviewPrompt, currentReviewPromptIdentifier, parseReviewResult, reviewThreadTitle } from "./review.js"
 import { readThreadUsage, type ThreadUsageLookup } from "./thread-usage.js"
@@ -16,8 +16,8 @@ const execFileAsync = promisify(execFile)
 const ampRetryDelaysMs = [5_000, 20_000]
 const staleRecoveryIntervalMs = 60_000
 const maxJobAttempts = 3
-const uncollectedUsageBatchSize = 20
-const usageCollectionIntervalMs = 60_000
+const threadCleanupBatchSize = 20
+const threadCleanupIntervalMs = 60_000
 const reconcileIntervalMs = 5 * 60_000
 // A head pushed more recently than this may still have its webhook in flight.
 const reconcileMinimumAgeMs = 5 * 60_000
@@ -29,6 +29,7 @@ const defaultRetryPrompt =
   "Complete the review if necessary, then return only the final review JSON in the required schema."
 
 type ExecuteAmp = typeof execute
+type ArchiveThread = (threadId: string) => Promise<void>
 
 type ExecuteReviewOptions = {
   prompt: string
@@ -206,6 +207,9 @@ export class ReviewWorkers {
   private readonly loops: Promise<void>[] = []
   private readonly recoveryController = new AbortController()
   private readonly promptIdentifier: string
+  private readonly activeDrainWaiters = new Set<() => void>()
+  private cleanupBarrier: Promise<void> | undefined
+  private reviewsWaiting = 0
 
   constructor(
     private readonly config: Config,
@@ -213,6 +217,7 @@ export class ReviewWorkers {
     private readonly github: GitHubClient,
     private readonly logger: Logger,
     private readonly readUsage: typeof readThreadUsage = readThreadUsage,
+    private readonly archiveThread: ArchiveThread = archiveReviewThread,
   ) {
     this.promptIdentifier = currentReviewPromptIdentifier(config.failOn)
   }
@@ -222,7 +227,7 @@ export class ReviewWorkers {
       this.loops.push(this.loop(index))
     }
     this.loops.push(this.recoveryLoop())
-    this.loops.push(this.usageLoop())
+    this.loops.push(this.cleanupLoop())
     this.loops.push(this.reconcileLoop())
   }
 
@@ -300,24 +305,19 @@ export class ReviewWorkers {
     }
   }
 
-  /**
-   * Runs separately from stale-job recovery because each usage lookup may wait
-   * on the Amp CLI for up to 30 seconds; a degraded lookup must not delay
-   * requeueing interrupted reviews.
-   */
-  private async usageLoop(): Promise<void> {
+  private async cleanupLoop(): Promise<void> {
     while (!this.stopping) {
       try {
-        await this.collectUncollectedUsage()
+        await sleep(threadCleanupIntervalMs, this.recoveryController.signal)
       } catch (error) {
-        this.logger.error({ err: error }, "usage collection for finished reviews failed")
+        if (this.stopping) return
+        throw new Error("Thread cleanup interrupted", { cause: error })
       }
 
       try {
-        await sleep(usageCollectionIntervalMs, this.recoveryController.signal)
-      } catch {
-        if (this.stopping) return
-        throw new Error("Usage collection interrupted")
+        await this.collectPendingThreadCleanup()
+      } catch (error) {
+        this.logger.error({ err: error }, "thread cleanup for finished reviews failed")
       }
     }
   }
@@ -401,6 +401,14 @@ export class ReviewWorkers {
           await sleep(1_000)
           continue
         }
+        if (this.cleanupBarrier) {
+          this.reviewsWaiting += 1
+          try {
+            await this.cleanupBarrier
+          } finally {
+            this.reviewsWaiting -= 1
+          }
+        }
         if (this.stopping) {
           await this.database.requeue(job.id)
           break
@@ -428,8 +436,6 @@ export class ReviewWorkers {
   private async review(initialJob: ReviewJob, logger: Logger): Promise<void> {
     let job = initialJob
     let checkRunId = job.checkRunId
-    // Every thread this review used, including one abandoned by a fresh restart.
-    const threadIds = new Set(job.ampThreadId ? [job.ampThreadId] : [])
     const controller = new AbortController()
     const log = logger.child({ jobId: job.id, repository: job.repositoryFullName, pr: job.pullNumber })
     this.active.add(controller)
@@ -472,7 +478,6 @@ export class ReviewWorkers {
         visibility: this.config.ampThreadVisibility,
         logger: log,
         onThread: async (threadId) => {
-          threadIds.add(threadId)
           job = { ...job, ampThreadId: threadId }
           await this.database.setThread(job.id, threadId)
           try {
@@ -563,24 +568,23 @@ export class ReviewWorkers {
     } finally {
       clearTimeout(timeout)
       clearInterval(cancellationPoll)
-      try {
-        for (const threadId of await this.database.reviewThreadIds(job.id)) threadIds.add(threadId)
-      } catch (error) {
-        log.warn({ err: error }, "failed to load all Amp review threads for usage collection")
-      }
-      for (const threadId of threadIds) {
-        try {
-          await execFileAsync(
-            resolve("node_modules", ".bin", "amp"),
-            ["threads", "archive", threadId],
-            { timeout: 30_000 },
-          )
-        } catch (error) {
-          log.warn({ err: error, threadId }, "failed to archive Amp review thread")
-        }
-        await this.collectThreadUsage(threadId, log)
-      }
       this.active.delete(controller)
+      if (this.active.size === 0) {
+        for (const resolve of this.activeDrainWaiters) resolve()
+        this.activeDrainWaiters.clear()
+      }
+    }
+  }
+
+  private async archiveThreadForCleanup(cleanup: PendingThreadCleanup, log: Logger): Promise<boolean> {
+    if (!cleanup.needsArchive) return true
+    try {
+      await this.archiveThread(cleanup.threadId)
+      await this.database.setThreadArchived(cleanup.threadId)
+      return true
+    } catch (error) {
+      log.warn({ err: error, threadId: cleanup.threadId }, "failed to archive Amp review thread")
+      return false
     }
   }
 
@@ -588,7 +592,7 @@ export class ReviewWorkers {
    * Looks up and stores what Amp billed for one review thread. A failed lookup
    * is stored as the error so the thread is not retried forever. A failed
    * database write stores nothing, so the row stays uncollected and the usage
-   * loop retries it instead of losing a lookup that succeeded.
+   * cleanup retries it instead of losing a lookup that succeeded.
    */
   private async collectThreadUsage(threadId: string, log: Logger): Promise<void> {
     let lookup: ThreadUsageLookup
@@ -618,20 +622,54 @@ export class ReviewWorkers {
     }
   }
 
-  /**
-   * Collects usage for threads whose job finished without a usage lookup, for
-   * example because the worker exited between finishing the job and reading
-   * its usage. Bounded per pass so one backlog cannot hold the loop for long.
-   */
-  private async collectUncollectedUsage(): Promise<void> {
-    const threadIds = await this.database.uncollectedThreadIds(uncollectedUsageBatchSize)
-    if (threadIds.length === 0) return
-    this.logger.warn({ threads: threadIds.length }, "collecting Amp review usage left by an interrupted worker")
-    for (const threadId of threadIds) {
+  private async collectPendingThreadCleanup(): Promise<void> {
+    await this.withCleanupBarrier(async () => {
+      await this.waitForActiveReviews()
       if (this.stopping) return
-      await this.collectThreadUsage(threadId, this.logger)
+      const pending = await this.database.pendingThreadCleanup(threadCleanupBatchSize)
+      if (pending.length === 0) return
+      this.logger.warn({ threads: pending.length }, "cleaning up Amp review threads left by a worker")
+      const usagePending: string[] = []
+      for (const cleanup of pending) {
+        if (this.stopping) return
+        if (await this.archiveThreadForCleanup(cleanup, this.logger)) {
+          if (cleanup.needsUsage) usagePending.push(cleanup.threadId)
+        }
+      }
+      for (const threadId of usagePending) {
+        if (this.stopping) return
+        await this.collectThreadUsage(threadId, this.logger)
+        if (this.reviewsWaiting > 0) return
+      }
+    })
+  }
+
+  private async waitForActiveReviews(): Promise<void> {
+    if (this.active.size === 0) return
+    await new Promise<void>((resolve) => this.activeDrainWaiters.add(resolve))
+  }
+
+  private async withCleanupBarrier(operation: () => Promise<void>): Promise<void> {
+    let release = () => {}
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    this.cleanupBarrier = barrier
+    try {
+      await operation()
+    } finally {
+      release()
+      if (this.cleanupBarrier === barrier) this.cleanupBarrier = undefined
     }
   }
+}
+
+async function archiveReviewThread(threadId: string): Promise<void> {
+  await execFileAsync(
+    resolve("node_modules", ".bin", "amp"),
+    ["threads", "archive", threadId],
+    { timeout: 30_000 },
+  )
 }
 
 type StaleReason = { check: string; job: string }

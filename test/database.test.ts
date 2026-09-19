@@ -62,10 +62,11 @@ describe("review context persistence", () => {
 
     await database.migrate()
 
-    assert.equal(queries.length, 4)
+    assert.equal(queries.length, 5)
     assert.match(queries[1]!, /ADD COLUMN IF NOT EXISTS pull_request_title/)
     assert.match(queries[2]!, /CREATE TABLE IF NOT EXISTS review_threads/)
     assert.match(queries[3]!, /CREATE TABLE IF NOT EXISTS review_results/)
+    assert.match(queries[4]!, /ADD COLUMN IF NOT EXISTS archived_at/)
   })
 
   it("allows one in-flight job per head, except for check re-runs", async () => {
@@ -258,17 +259,28 @@ describe("review thread usage persistence", () => {
     assert.deepEqual(queries[0]!.values, ["T-review", 1.25, 0.75, JSON.stringify(usage)])
   })
 
-  it("lists only never-collected threads of finished jobs", async () => {
+  it("lists unfinished archival or usage work only for finished jobs", async () => {
     const queries: Array<{ text: string; values?: unknown[] }> = []
     const database = databaseWithQueries(queries)
 
-    await database.uncollectedThreadIds(20)
+    await database.pendingThreadCleanup(20)
 
     const text = queries[0]!.text
-    assert.match(text, /usage_collected_at IS NULL/)
+    assert.match(text, /archived_at IS NULL OR review_threads\.usage_collected_at IS NULL/)
+    assert.match(text, /ORDER BY \(review_threads\.archived_at IS NULL\) DESC, review_threads\.created_at(?: ASC)?\s/)
     assert.match(text, /review_jobs\.status IN \('succeeded', 'failed', 'cancelled'\)/)
     assert.doesNotMatch(text, /'running'/, "a running job's thread is still accruing usage")
     assert.deepEqual(queries[0]!.values, [20])
+  })
+
+  it("records successful archival separately from usage collection", async () => {
+    const queries: Array<{ text: string; values?: unknown[] }> = []
+    const database = databaseWithQueries(queries)
+
+    await database.setThreadArchived("T-review")
+
+    assert.match(queries[0]!.text, /SET archived_at = NOW\(\)/)
+    assert.deepEqual(queries[0]!.values, ["T-review"])
   })
 })
 
