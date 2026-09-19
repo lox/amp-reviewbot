@@ -103,6 +103,12 @@ export class Database {
     await this.pool.query("SELECT 1")
   }
 
+  /**
+   * Returns null for a redelivered webhook and for a head that already has a
+   * queued or running job, which the reconciler may have created first; the
+   * partial unique index in migration 004 enforces the latter so a late
+   * delivery cannot race a reconciliation pass into a second review.
+   */
   async enqueue(input: NewReviewJob): Promise<ReviewJob | null> {
     const result = await this.pool.query<JobRow>(
       `INSERT INTO review_jobs (
@@ -110,7 +116,7 @@ export class Database {
          repository_full_name, pull_number, base_sha, head_sha, amp_project,
          pull_request_title, pull_request_body, base_ref, head_ref, check_run_id
        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-       ON CONFLICT (source_delivery_id) DO NOTHING
+       ON CONFLICT DO NOTHING
        RETURNING *`,
       [
         input.sourceDeliveryId,
@@ -167,9 +173,10 @@ export class Database {
   /**
    * Queues a review for a pull request head that has no job at all, for
    * example because GitHub delivered its webhook while the service was
-   * restarting. The existence check runs inside the insert so two passes
-   * cannot both queue it; a head that already has any job, whatever its
-   * status, is left alone. Unlike a webhook, this never supersedes other
+   * restarting. A head that already has any job, whatever its status, is left
+   * alone: the existence check covers completed jobs, and the in-flight unique
+   * index covers a webhook or pass that inserts concurrently, since this check
+   * only sees committed rows. Unlike a webhook, this never supersedes other
    * heads: the listing it came from may be stale, and cancelling a newer
    * head's job would leave that head without a review for good. A stale
    * reconciled job cancels itself when the worker compares it with the
@@ -186,7 +193,7 @@ export class Database {
        WHERE NOT EXISTS (
          SELECT 1 FROM review_jobs WHERE repository_id = $4 AND pull_number = $6 AND head_sha = $8
        )
-       ON CONFLICT (source_delivery_id) DO NOTHING
+       ON CONFLICT DO NOTHING
        RETURNING *`,
       [
         input.sourceDeliveryId,

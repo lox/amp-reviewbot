@@ -67,6 +67,45 @@ describe("review context persistence", () => {
     assert.match(queries[2]!, /CREATE TABLE IF NOT EXISTS review_threads/)
     assert.match(queries[3]!, /CREATE TABLE IF NOT EXISTS review_results/)
   })
+
+  it("allows one in-flight job per head, except for check re-runs", async () => {
+    const queries: string[] = []
+    const database = Object.create(Database.prototype) as Database
+    Object.defineProperty(database, "pool", {
+      value: { query: async (text: string) => queries.push(text) },
+    })
+
+    await database.migrate()
+
+    assert.match(
+      queries[3]!,
+      /CREATE UNIQUE INDEX IF NOT EXISTS review_jobs_inflight_head_idx\s+ON review_jobs \(repository_id, pull_number, head_sha\)\s+WHERE status IN \('queued', 'running'\) AND event_type <> 'check_run.rerequested'/,
+    )
+  })
+
+  it("treats a head that is already in flight like a redelivered webhook", async () => {
+    const queries: Array<{ text: string; values?: unknown[] }> = []
+    const database = databaseWithQueries(queries)
+
+    await database.enqueue({
+      sourceDeliveryId: "delivery-3",
+      eventType: "pull_request.synchronize",
+      installationId: "1",
+      repositoryId: "2",
+      repositoryFullName: "lox/example",
+      pullNumber: 42,
+      baseSha: "base-sha",
+      headSha: "head-sha",
+      ampProject: "lox/example",
+      pullRequestContext: null,
+    })
+
+    // A targeted clause would raise on the in-flight index instead of
+    // absorbing it, and the webhook handler would report an error for a head
+    // the reconciler had already queued.
+    assert.match(queries[0]!.text, /ON CONFLICT DO NOTHING/)
+    assert.doesNotMatch(queries[0]!.text, /ON CONFLICT \(source_delivery_id\)/)
+  })
 })
 
 describe("missing review reconciliation", () => {
