@@ -23,5 +23,17 @@ fi
 printf 'Installing tool versions...\n'
 time "$mise_bin" install
 
+# Agent shell commands run as non-login bash with a fixed PATH that includes
+# ~/.local/bin but not the mise shim directory, so ~/.bash_profile never
+# applies to them. Link the shims into ~/.local/bin so node/npm/npx resolve
+# to the mise-managed versions there too.
+shim_dir="${MISE_SHIMS_DIR:-$HOME/.local/share/mise/shims}"
+mkdir -p "$HOME/.local/bin"
+for shim in node npm npx corepack; do
+  if [[ -e "$shim_dir/$shim" ]]; then
+    ln -sfn "$shim_dir/$shim" "$HOME/.local/bin/$shim"
+  fi
+done
+
 printf 'Installing npm dependencies...\n'
 time "$mise_bin" exec -- npm ci
