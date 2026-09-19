@@ -320,11 +320,14 @@ export function reviewPromptIdentifier(name: string, build: (job: ReviewJob) => 
 }
 
 /**
- * The identifier of the production prompt. The evaluation reviews a prepared
- * source copy and its `current` variant hashes that form of the prompt, so
- * production hashes the same form: the prepared-source boundary is the only
- * difference, and the shared identifier is what lets `review_results` rows
- * be read against docs/eval-experiments.md.
+ * Names the review instructions production runs. The evaluation reviews a
+ * prepared source copy and its `current` variant hashes that form of the
+ * prompt; production hashes the same form so `review_results` rows can be
+ * read against docs/eval-experiments.md. The two forms differ only in how
+ * the source is obtained (a test pins that everything from the methodology
+ * onward is identical), so a change to production's checkout sentence alone
+ * does not change the identifier. That is intended: the identifier tracks
+ * what the reviewer is asked to judge, not how the code reaches it.
  */
 export function currentReviewPromptIdentifier(failOn: Severity): string {
   return reviewPromptIdentifier("current", (job) =>

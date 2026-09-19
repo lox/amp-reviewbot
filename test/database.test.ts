@@ -93,26 +93,40 @@ describe("missing review reconciliation", () => {
     assert.match(insert.text, /WHERE NOT EXISTS \(\s*SELECT 1 FROM review_jobs WHERE repository_id = \$4 AND pull_number = \$6 AND head_sha = \$8/)
     assert.deepEqual([insert.values![3], insert.values![5], insert.values![7]], ["2", 42, "head-sha"])
     assert.equal(job?.id, "1")
-    assert.match(queries[1]!.text, /Superseded by a newer pull request revision/)
-    assert.deepEqual(queries[1]!.values, ["2", 42, "head-sha"])
+    assert.equal(
+      queries.length,
+      1,
+      "a reconciled head never supersedes other heads: its listing may predate a newer push whose job must survive",
+    )
   })
 
-  it("does not supersede other heads when the insert found an existing job", async () => {
+  it("returns null when the insert found an existing job", async () => {
+    const database = Object.create(Database.prototype) as Database
+    Object.defineProperty(database, "pool", { value: { query: async () => ({ rows: [] }) } })
+
+    assert.equal(await database.enqueueMissing(input), null)
+  })
+
+  it("describes each known repository by its most recent job", async () => {
     const queries: Array<{ text: string; values?: unknown[] }> = []
     const database = Object.create(Database.prototype) as Database
     Object.defineProperty(database, "pool", {
       value: {
         async query(text: string, values?: unknown[]) {
           queries.push({ text, ...(values ? { values } : {}) })
-          return { rows: [] }
+          return {
+            rows: [{ installation_id: "7", repository_id: "2", repository_full_name: "lox/renamed" }],
+          }
         },
       },
     })
 
-    const job = await database.enqueueMissing(input)
+    const repositories = await database.knownRepositories()
 
-    assert.equal(job, null)
-    assert.equal(queries.length, 1, "no supersede update after a no-op insert")
+    assert.match(queries[0]!.text, /SELECT DISTINCT ON \(repository_id\)[\s\S]*ORDER BY repository_id, id DESC/)
+    assert.deepEqual(repositories, [
+      { installationId: "7", repositoryId: "2", repositoryFullName: "lox/renamed" },
+    ])
   })
 })
 

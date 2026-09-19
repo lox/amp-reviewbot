@@ -17,13 +17,13 @@ Three layers, cheapest and most durable first. Each one is a plain Postgres tabl
 
 `prompt_identifier` is `reviewPromptIdentifier("current", ...)`, the same `name@hash` the eval prints (`current@da7f479098f7` at the time of writing). Production rows and eval experiments in [eval-experiments.md](../eval-experiments.md) can therefore be joined on the exact prompt text.
 
-The reconciler runs every five minutes in `ReviewWorkers.reconcileLoop`. It lists every open, non-draft pull request the GitHub App installation can see, keeps only repositories that already have a row in `review_jobs`, and queues a review for any head between five minutes and seven days old that has no job for that repo / PR / head. Queued jobs use `sourceDeliveryId = reconcile:<repoId>:<pr>:<headSha>` and `eventType = reconcile.missing_review`, and are logged at warn so a dropped delivery is visible. At most ten jobs are queued per pass.
+The reconciler runs every five minutes in `ReviewWorkers.reconcileLoop`. For each repository that already has a row in `review_jobs` (addressed by the installation and name of its latest job), it lists the open, non-draft pull requests and queues a review for any head between five minutes and seven days old that has no job for that repo / PR / head. Queued jobs use `sourceDeliveryId = reconcile:<repoId>:<pr>:<headSha>` and `eventType = reconcile.missing_review`, and are logged at warn so a dropped delivery is visible. At most ten jobs are queued per pass.
 
 Settled choices:
 
-- Only repositories with prior jobs are reconciled, so installing the app on a repository with a large backlog of open PRs does not review all of them. The first webhook opts the repository in.
+- Only repositories with prior jobs are reconciled, so installing the app on a repository with a large backlog of open PRs does not review all of them. The first webhook opts the repository in. Listing per known repository rather than per installation also means one API call per repository per pass, and a repository that can no longer be read (uninstalled, suspended installation, renamed) is logged and skipped without ending the pass.
 - The minimum age exists because a push five seconds ago may still have its webhook in flight; the maximum age bounds the backfill after a long outage. Both use the PR's `updated_at`, which also moves on comments, so a stale PR that receives a comment becomes eligible. That is acceptable: a never-reviewed open PR in an opted-in repository should get a review.
-- Reconciled jobs go through the same `enqueue` path as webhooks, including superseding jobs for other heads of the same PR.
+- A reconciled job never supersedes other heads. The listing it came from may be seconds stale; if a newer head's webhook job landed in between, cancelling it would leave that head without a review for good (the reconciler skips heads that already have a job of any status). Instead, the worker re-reads the pull request before reviewing and cancels a job whose PR is closed, a draft, or on a newer head. That check already existed for the head; the closed/draft case was added so a PR closed between listing and review is not billed.
 
 ### Layer 2: survive deploys
 

@@ -127,6 +127,61 @@ describe("completed check output", () => {
   })
 })
 
+describe("pull request state", () => {
+  function clientWithPulls(get: Record<string, unknown>, list: Record<string, unknown>[] = []) {
+    const client = new GitHubClient({ githubAppId: 123, githubPrivateKey: "test-key", failOn: "high" } as Config)
+    const octokit = {
+      rest: { pulls: { get: async () => ({ data: get }), list: "list" } },
+      paginate: async (route: unknown) => (route === "list" ? list : []),
+    }
+    Object.defineProperty(client, "app", { value: { getInstallationOctokit: async () => octokit } })
+    return client
+  }
+
+  it("reports the head of an open, non-draft pull request", async () => {
+    const client = clientWithPulls({ state: "open", draft: false, head: { sha: "abc" } })
+    assert.equal(await client.currentHead(job), "abc")
+  })
+
+  it("reports no reviewable head once the pull request is closed or a draft", async () => {
+    assert.equal(
+      await clientWithPulls({ state: "closed", draft: false, head: { sha: "abc" } }).currentHead(job),
+      null,
+    )
+    assert.equal(
+      await clientWithPulls({ state: "open", draft: true, head: { sha: "abc" } }).currentHead(job),
+      null,
+    )
+  })
+
+  it("lists open pull requests without drafts, keeping the context a webhook would have frozen", async () => {
+    const client = clientWithPulls({}, [
+      {
+        number: 7,
+        draft: false,
+        title: "Change",
+        body: null,
+        updated_at: "2026-09-19T11:00:00Z",
+        base: { sha: "base", ref: "main" },
+        head: { sha: "head", ref: "topic" },
+      },
+      { number: 8, draft: true, title: "Draft", body: "", updated_at: "2026-09-19T11:00:00Z", base: { sha: "b", ref: "main" }, head: { sha: "h", ref: "wip" } },
+    ])
+
+    const pulls = await client.openPullRequests({ installationId: "1", repositoryId: "2", repositoryFullName: "lox/example" })
+
+    assert.deepEqual(pulls, [
+      {
+        pullNumber: 7,
+        baseSha: "base",
+        headSha: "head",
+        updatedAt: new Date("2026-09-19T11:00:00Z"),
+        pullRequestContext: { title: "Change", body: null, baseRef: "main", headRef: "topic" },
+      },
+    ])
+  })
+})
+
 describe("parseChangedLines", () => {
   it("returns right-side line numbers for additions across hunks", () => {
     const patch = `@@ -2,4 +2,5 @@

@@ -3,9 +3,10 @@ import { describe, it } from "node:test"
 import type { ExecuteOptions, StreamMessage } from "@ampcode/sdk"
 import pino from "pino"
 import { reviewMode } from "../src/amp.js"
-import type { Database, NewReviewJob } from "../src/database.js"
+import type { Database, KnownRepository, NewReviewJob } from "../src/database.js"
 import type { GitHubClient, OpenPullRequest } from "../src/github.js"
 import type { ThreadUsage } from "../src/thread-usage.js"
+import type { ReviewJob } from "../src/types.js"
 import {
   executeReviewWithRetries,
   isAmpCancellationError,
@@ -337,12 +338,11 @@ describe("usage collection for finished reviews", () => {
 describe("missing review reconciliation", () => {
   const minute = 60_000
   const now = Date.parse("2026-09-19T12:00:00Z")
+  const example: KnownRepository = { installationId: "1", repositoryId: "2", repositoryFullName: "lox/example" }
+  const other: KnownRepository = { installationId: "1", repositoryId: "9", repositoryFullName: "lox/other" }
 
   function pull(overrides: Partial<OpenPullRequest> & { pullNumber: number }): OpenPullRequest {
     return {
-      installationId: "1",
-      repositoryId: "2",
-      repositoryFullName: "lox/example",
       baseSha: "base",
       headSha: `head-${overrides.pullNumber}`,
       updatedAt: new Date(now - 30 * minute),
@@ -351,12 +351,15 @@ describe("missing review reconciliation", () => {
     }
   }
 
-  function workersWith(known: string[], pulls: OpenPullRequest[]) {
+  function workersWith(
+    repositories: KnownRepository[],
+    pullsFor: (repository: KnownRepository) => Promise<OpenPullRequest[]>,
+  ) {
     const enqueued: NewReviewJob[] = []
-    let listed = 0
+    const listed: string[] = []
     const database = {
-      async knownRepositoryIds() {
-        return new Set(known)
+      async knownRepositories() {
+        return repositories
       },
       async enqueueMissing(input: NewReviewJob) {
         enqueued.push(input)
@@ -364,9 +367,9 @@ describe("missing review reconciliation", () => {
       },
     } as unknown as Database
     const github = {
-      async openPullRequests() {
-        listed += 1
-        return pulls
+      async openPullRequests(repository: KnownRepository) {
+        listed.push(repository.repositoryFullName)
+        return pullsFor(repository)
       },
     } as unknown as GitHubClient
     const workers = new ReviewWorkers(
@@ -380,36 +383,35 @@ describe("missing review reconciliation", () => {
       (workers as unknown as { reconcileMissingReviews(now: () => number): Promise<void> }).reconcileMissingReviews(
         () => now,
       )
-    return { reconcile, enqueued, listed: () => listed, workers }
+    return { reconcile, enqueued, listed }
   }
 
-  it("queues only heads of known repositories that are old enough to have missed their webhook but not stale", async () => {
-    const { reconcile, enqueued } = workersWith(
-      ["2"],
-      [
-        pull({ pullNumber: 1 }),
-        pull({ pullNumber: 2, updatedAt: new Date(now - 4 * minute) }),
-        pull({ pullNumber: 3, updatedAt: new Date(now - 8 * 24 * 60 * minute) }),
-        pull({ pullNumber: 4, repositoryId: "9", repositoryFullName: "lox/never-seen" }),
-      ],
-    )
+  it("queues heads old enough to have missed their webhook but not stale, from the repository's last known coordinates", async () => {
+    const { reconcile, enqueued } = workersWith([example], async () => [
+      pull({ pullNumber: 1 }),
+      pull({ pullNumber: 2, updatedAt: new Date(now - 4 * minute) }),
+      pull({ pullNumber: 3, updatedAt: new Date(now - 8 * 24 * 60 * minute) }),
+    ])
 
     await reconcile()
 
     assert.deepEqual(
       enqueued.map((job) => job.pullNumber),
       [1],
-      "a fresh push may still be in flight; a week-old head predates the gap; unknown repositories are not backfilled",
+      "a fresh push may still have its webhook in flight; a week-old head predates the gap",
     )
-    assert.equal(enqueued[0]!.sourceDeliveryId, "reconcile:2:1:head-1")
-    assert.equal(enqueued[0]!.eventType, "reconcile.missing_review")
-    assert.equal(enqueued[0]!.ampProject, "lox/example-project")
-    assert.deepEqual(enqueued[0]!.pullRequestContext, { title: "Change", body: null, baseRef: "main", headRef: "topic" })
+    const job = enqueued[0]!
+    assert.equal(job.sourceDeliveryId, "reconcile:2:1:head-1")
+    assert.equal(job.eventType, "reconcile.missing_review")
+    assert.deepEqual(
+      [job.installationId, job.repositoryId, job.repositoryFullName, job.ampProject],
+      ["1", "2", "lox/example", "lox/example-project"],
+    )
+    assert.deepEqual(job.pullRequestContext, { title: "Change", body: null, baseRef: "main", headRef: "topic" })
   })
 
   it("queues at most ten reviews per pass", async () => {
-    const { reconcile, enqueued } = workersWith(
-      ["2"],
+    const { reconcile, enqueued } = workersWith([example], async () =>
       Array.from({ length: 12 }, (_, index) => pull({ pullNumber: index + 1 })),
     )
 
@@ -418,13 +420,58 @@ describe("missing review reconciliation", () => {
     assert.equal(enqueued.length, 10)
   })
 
-  it("does not list pull requests before any repository has sent a webhook", async () => {
-    const { reconcile, enqueued, listed } = workersWith([], [pull({ pullNumber: 1 })])
+  it("skips a repository it can no longer list and continues with the rest", async () => {
+    const { reconcile, enqueued, listed } = workersWith([other, example], async (repository) => {
+      if (repository === other) throw new Error("installation suspended")
+      return [pull({ pullNumber: 1 })]
+    })
 
     await reconcile()
 
-    assert.equal(listed(), 0)
+    assert.deepEqual(listed, ["lox/other", "lox/example"])
+    assert.deepEqual(enqueued.map((job) => job.repositoryFullName), ["lox/example"])
+  })
+
+  it("does not list anything before any repository has sent a webhook", async () => {
+    const { reconcile, enqueued, listed } = workersWith([], async () => [pull({ pullNumber: 1 })])
+
+    await reconcile()
+
+    assert.deepEqual(listed, [])
     assert.deepEqual(enqueued, [])
+  })
+})
+
+describe("stale job detection", () => {
+  const job = {
+    id: "1",
+    repositoryFullName: "lox/example",
+    pullNumber: 1,
+    headSha: "head-1",
+  } as ReviewJob
+
+  function staleReason(currentHead: string | null) {
+    const workers = new ReviewWorkers(
+      { workerConcurrency: 1, reviewTimeoutMs: 1, failOn: "high", ampProjects: {} } as never,
+      {} as Database,
+      { currentHead: async () => currentHead } as unknown as GitHubClient,
+      pino({ level: "silent" }),
+      async () => ({ unavailable: "not used" }),
+    )
+    return (
+      workers as unknown as {
+        staleReason(job: ReviewJob): Promise<{ check: string; job: string } | null>
+      }
+    ).staleReason(job)
+  }
+
+  it("lets a job whose head is still current proceed", async () => {
+    assert.equal(await staleReason("head-1"), null)
+  })
+
+  it("cancels for a newer head, and separately for a closed or draft pull request", async () => {
+    assert.equal((await staleReason("head-2"))?.check, "A newer pull request revision is available.")
+    assert.equal((await staleReason(null))?.check, "The pull request is closed or a draft.")
   })
 })
 

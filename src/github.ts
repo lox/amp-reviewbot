@@ -1,5 +1,6 @@
 import { App } from "octokit"
 import type { Config } from "./config.js"
+import type { KnownRepository } from "./database.js"
 import type { ReviewFinding, ReviewJob, ReviewResult, Severity } from "./types.js"
 import { finalizeReview, type FinalizedReview } from "./review.js"
 
@@ -17,15 +18,7 @@ const severityLabel: Record<Severity, string> = {
   low: "Low",
 }
 
-export type OpenPullRequest = Pick<
-  ReviewJob,
-  | "installationId"
-  | "repositoryId"
-  | "repositoryFullName"
-  | "pullNumber"
-  | "baseSha"
-  | "headSha"
-> & {
+export type OpenPullRequest = Pick<ReviewJob, "pullNumber" | "baseSha" | "headSha"> & {
   updatedAt: Date
   pullRequestContext: NonNullable<ReviewJob["pullRequestContext"]>
 }
@@ -77,58 +70,38 @@ export class GitHubClient {
     })
   }
 
-  /**
-   * Every open, non-draft pull request in every repository this app is
-   * installed on. Used to find heads whose webhook never arrived.
-   */
-  async openPullRequests(): Promise<OpenPullRequest[]> {
-    const installations = await this.app.octokit.paginate(
-      this.app.octokit.rest.apps.listInstallations,
-      { per_page: 100 },
-    )
-    const pulls: OpenPullRequest[] = []
-    for (const installation of installations) {
-      const octokit = await this.app.getInstallationOctokit(installation.id)
-      const repositories = await octokit.paginate(
-        octokit.rest.apps.listReposAccessibleToInstallation,
-        { per_page: 100 },
-      )
-      for (const repository of repositories) {
-        if (repository.archived) continue
-        const { owner, repo } = splitRepository(repository.full_name)
-        const open = await octokit.paginate(octokit.rest.pulls.list, {
-          owner,
-          repo,
-          state: "open",
-          per_page: 100,
-        })
-        for (const pull of open) {
-          if (pull.draft) continue
-          pulls.push({
-            installationId: String(installation.id),
-            repositoryId: String(repository.id),
-            repositoryFullName: repository.full_name,
-            pullNumber: pull.number,
-            baseSha: pull.base.sha,
-            headSha: pull.head.sha,
-            updatedAt: new Date(pull.updated_at),
-            pullRequestContext: {
-              title: pull.title,
-              body: pull.body,
-              baseRef: pull.base.ref,
-              headRef: pull.head.ref,
-            },
-          })
-        }
-      }
-    }
-    return pulls
+  /** The open, non-draft pull requests of one repository. */
+  async openPullRequests(repository: KnownRepository): Promise<OpenPullRequest[]> {
+    const { owner, repo } = splitRepository(repository.repositoryFullName)
+    const octokit = await this.app.getInstallationOctokit(Number(repository.installationId))
+    const open = await octokit.paginate(octokit.rest.pulls.list, {
+      owner,
+      repo,
+      state: "open",
+      per_page: 100,
+    })
+    return open
+      .filter((pull) => !pull.draft)
+      .map((pull) => ({
+        pullNumber: pull.number,
+        baseSha: pull.base.sha,
+        headSha: pull.head.sha,
+        updatedAt: new Date(pull.updated_at),
+        pullRequestContext: {
+          title: pull.title,
+          body: pull.body,
+          baseRef: pull.base.ref,
+          headRef: pull.head.ref,
+        },
+      }))
   }
 
-  async currentHead(job: ReviewJob): Promise<string> {
+  /** The head a review of this pull request should target now, or null once it is closed or a draft. */
+  async currentHead(job: ReviewJob): Promise<string | null> {
     const { owner, repo } = splitRepository(job.repositoryFullName)
     const octokit = await this.app.getInstallationOctokit(Number(job.installationId))
     const response = await octokit.rest.pulls.get({ owner, repo, pull_number: job.pullNumber })
+    if (response.data.state !== "open" || response.data.draft) return null
     return response.data.head.sha
   }
 

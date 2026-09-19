@@ -7,7 +7,7 @@ import type { Logger } from "pino"
 import { agentModeFromMessage, reviewMode } from "./amp.js"
 import { resolveAmpProject, type Config } from "./config.js"
 import { Database } from "./database.js"
-import { GitHubClient } from "./github.js"
+import { GitHubClient, type OpenPullRequest } from "./github.js"
 import { buildReviewPrompt, currentReviewPromptIdentifier, parseReviewResult, reviewThreadTitle } from "./review.js"
 import { readThreadUsage, type ThreadUsageLookup } from "./thread-usage.js"
 import type { ReviewJob } from "./types.js"
@@ -318,36 +318,47 @@ export class ReviewWorkers {
   /**
    * Only repositories that have already sent this service a webhook are
    * reconciled, so installing the app on a repository with a long backlog of
-   * open pull requests does not review all of them.
+   * open pull requests does not review all of them. Each repository is listed
+   * on its own; one that can no longer be read (uninstalled, suspended,
+   * renamed) is logged and skipped rather than ending the pass.
    */
   private async reconcileMissingReviews(now: () => number = Date.now): Promise<void> {
-    const knownRepositories = await this.database.knownRepositoryIds()
-    if (knownRepositories.size === 0) return
-    const pulls = await this.github.openPullRequests()
     let queued = 0
-    for (const pull of pulls) {
+    for (const repository of await this.database.knownRepositories()) {
       if (this.stopping || queued >= reconcileBatchSize) return
-      if (!knownRepositories.has(pull.repositoryId)) continue
-      const age = now() - pull.updatedAt.getTime()
-      if (age < reconcileMinimumAgeMs || age > reconcileMaximumAgeMs) continue
-      const job = await this.database.enqueueMissing({
-        sourceDeliveryId: `reconcile:${pull.repositoryId}:${pull.pullNumber}:${pull.headSha}`,
-        eventType: "reconcile.missing_review",
-        installationId: pull.installationId,
-        repositoryId: pull.repositoryId,
-        repositoryFullName: pull.repositoryFullName,
-        pullNumber: pull.pullNumber,
-        baseSha: pull.baseSha,
-        headSha: pull.headSha,
-        ampProject: resolveAmpProject(this.config, pull.repositoryFullName),
-        pullRequestContext: pull.pullRequestContext,
-      })
-      if (job) {
-        queued += 1
+      let pulls: OpenPullRequest[]
+      try {
+        pulls = await this.github.openPullRequests(repository)
+      } catch (error) {
         this.logger.warn(
-          { jobId: job.id, repository: job.repositoryFullName, pr: job.pullNumber, headSha: job.headSha },
-          "review queued by reconciliation; no webhook delivery reached this service",
+          { err: error, repository: repository.repositoryFullName },
+          "could not list pull requests for reconciliation",
         )
+        continue
+      }
+      for (const pull of pulls) {
+        if (this.stopping || queued >= reconcileBatchSize) return
+        const age = now() - pull.updatedAt.getTime()
+        if (age < reconcileMinimumAgeMs || age > reconcileMaximumAgeMs) continue
+        const job = await this.database.enqueueMissing({
+          sourceDeliveryId: `reconcile:${repository.repositoryId}:${pull.pullNumber}:${pull.headSha}`,
+          eventType: "reconcile.missing_review",
+          installationId: repository.installationId,
+          repositoryId: repository.repositoryId,
+          repositoryFullName: repository.repositoryFullName,
+          pullNumber: pull.pullNumber,
+          baseSha: pull.baseSha,
+          headSha: pull.headSha,
+          ampProject: resolveAmpProject(this.config, repository.repositoryFullName),
+          pullRequestContext: pull.pullRequestContext,
+        })
+        if (job) {
+          queued += 1
+          this.logger.warn(
+            { jobId: job.id, repository: job.repositoryFullName, pr: job.pullNumber, headSha: job.headSha },
+            "review queued by reconciliation; no webhook delivery reached this service",
+          )
+        }
       }
     }
   }
@@ -371,6 +382,18 @@ export class ReviewWorkers {
         await sleep(2_000)
       }
     }
+  }
+
+  /**
+   * Why this job no longer deserves a review, or null while it still does.
+   * A reconciled job comes from a listing that may be seconds stale, so the
+   * pull request is re-read rather than trusted.
+   */
+  private async staleReason(job: ReviewJob): Promise<StaleReason | null> {
+    const head = await this.github.currentHead(job)
+    if (head === null) return notReviewable
+    if (head !== job.headSha) return headChanged
+    return null
   }
 
   private async review(initialJob: ReviewJob, logger: Logger): Promise<void> {
@@ -405,9 +428,10 @@ export class ReviewWorkers {
       const activeCheckRunId = checkRunId
       await this.github.startCheck(job, activeCheckRunId)
 
-      if ((await this.github.currentHead(job)) !== job.headSha) {
-        await this.github.cancelCheck(job, activeCheckRunId, "A newer pull request revision is available.")
-        await this.database.finish(job.id, "cancelled", "Pull request head changed")
+      const staleBeforeReview = await this.staleReason(job)
+      if (staleBeforeReview) {
+        await this.github.cancelCheck(job, activeCheckRunId, staleBeforeReview.check)
+        await this.database.finish(job.id, "cancelled", staleBeforeReview.job)
         return
       }
 
@@ -433,16 +457,16 @@ export class ReviewWorkers {
           if ((await this.database.status(job.id)) === "cancelled") {
             throw new Error("Review superseded")
           }
-          if ((await this.github.currentHead(job)) !== job.headSha) {
-            throw new PullRequestHeadChangedError()
-          }
+          const stale = await this.staleReason(job)
+          if (stale) throw new PullRequestStaleError(stale)
         },
       })
 
       if ((await this.database.status(job.id)) === "cancelled") throw new Error("Review superseded")
-      if ((await this.github.currentHead(job)) !== job.headSha) {
-        await this.github.cancelCheck(job, activeCheckRunId, "A newer pull request revision is available.")
-        await this.database.finish(job.id, "cancelled", "Pull request head changed")
+      const staleAfterReview = await this.staleReason(job)
+      if (staleAfterReview) {
+        await this.github.cancelCheck(job, activeCheckRunId, staleAfterReview.check)
+        await this.database.finish(job.id, "cancelled", staleAfterReview.job)
         return
       }
 
@@ -470,9 +494,9 @@ export class ReviewWorkers {
         "review completed",
       )
     } catch (error) {
-      if (error instanceof PullRequestHeadChangedError && checkRunId) {
-        await this.github.cancelCheck(job, checkRunId, "A newer pull request revision is available.")
-        await this.database.finish(job.id, "cancelled", "Pull request head changed")
+      if (error instanceof PullRequestStaleError && checkRunId) {
+        await this.github.cancelCheck(job, checkRunId, error.reason.check)
+        await this.database.finish(job.id, "cancelled", error.reason.job)
         return
       }
       if (error instanceof AmpReviewCancelledError) {
@@ -581,7 +605,22 @@ export class ReviewWorkers {
   }
 }
 
-class PullRequestHeadChangedError extends Error {}
+type StaleReason = { check: string; job: string }
+
+const headChanged: StaleReason = {
+  check: "A newer pull request revision is available.",
+  job: "Pull request head changed",
+}
+const notReviewable: StaleReason = {
+  check: "The pull request is closed or a draft.",
+  job: "Pull request closed or converted to draft",
+}
+
+class PullRequestStaleError extends Error {
+  constructor(readonly reason: StaleReason) {
+    super(reason.job)
+  }
+}
 
 function errorMessage(error: unknown): string {
   return (error instanceof Error ? error.message : String(error)).slice(0, 8_000)

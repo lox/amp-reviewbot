@@ -149,6 +149,36 @@ describe("buildReviewPrompt", () => {
     assert.doesNotMatch(buildReviewPrompt(job, { failOn: "high" }), /pull-request-context/)
   })
 
+  it("differs from the evaluation form only in how the source is obtained, so one identifier can name both", () => {
+    const job: ReviewJob = {
+      id: "job-1",
+      sourceDeliveryId: "delivery-1",
+      eventType: "pull_request.opened",
+      installationId: "1",
+      repositoryId: "2",
+      repositoryFullName: "lox/example",
+      pullNumber: 42,
+      baseSha: "base-sha",
+      headSha: "head-sha",
+      ampProject: "lox/example",
+      pullRequestContext: null,
+      checkRunId: null,
+      ampThreadId: null,
+      status: "queued",
+      attempts: 0,
+    }
+    const methodologyStart = "\n\nThe review methodology below"
+    const [productionSetup, productionReview] = buildReviewPrompt(job, { failOn: "high" }).split(methodologyStart)
+    const [evaluationSetup, evaluationReview] = buildReviewPrompt(job, { failOn: "high", preparedSource: true }).split(
+      methodologyStart,
+    )
+
+    assert.equal(productionReview, evaluationReview, "review instructions and schema must be identical")
+    assert.notEqual(productionSetup, evaluationSetup)
+    assert.match(productionSetup!, /fetch and check out exactly the head SHA/)
+    assert.match(evaluationSetup!, /Trusted source boundary/)
+  })
+
   it("gives the setup hook its command and makes the prepared source observable", () => {
     const job: ReviewJob = {
       id: "job-1",

@@ -34,6 +34,11 @@ export type NewReviewJob = Omit<
   checkRunId?: string
 }
 
+export type KnownRepository = Pick<
+  ReviewJob,
+  "installationId" | "repositoryId" | "repositoryFullName"
+>
+
 export type StaleJobRecovery = {
   requeued: number
   exhausted: ReviewJob[]
@@ -126,16 +131,37 @@ export class Database {
     )
     const row = result.rows[0]
     if (!row) return null
-    await this.supersedeOtherHeads(input)
+
+    await this.pool.query(
+      `UPDATE review_jobs
+       SET status = 'cancelled', completed_at = NOW(), updated_at = NOW(),
+           error = 'Superseded by a newer pull request revision'
+       WHERE repository_id = $1 AND pull_number = $2 AND head_sha <> $3
+         AND status IN ('queued', 'running')`,
+      [input.repositoryId, input.pullNumber, input.headSha],
+    )
+
     return mapJob(row)
   }
 
-  /** Repositories that have ever queued a review here, by GitHub repository ID. */
-  async knownRepositoryIds(): Promise<Set<string>> {
-    const result = await this.pool.query<{ repository_id: string }>(
-      "SELECT DISTINCT repository_id FROM review_jobs",
+  /**
+   * Every repository that has queued a review here, with the installation and
+   * name from its most recent job so a renamed or reinstalled repository is
+   * addressed the way GitHub last described it.
+   */
+  async knownRepositories(): Promise<KnownRepository[]> {
+    const result = await this.pool.query<
+      Pick<JobRow, "installation_id" | "repository_id" | "repository_full_name">
+    >(
+      `SELECT DISTINCT ON (repository_id) installation_id, repository_id, repository_full_name
+       FROM review_jobs
+       ORDER BY repository_id, id DESC`,
     )
-    return new Set(result.rows.map((row) => String(row.repository_id)))
+    return result.rows.map((row) => ({
+      installationId: String(row.installation_id),
+      repositoryId: String(row.repository_id),
+      repositoryFullName: row.repository_full_name,
+    }))
   }
 
   /**
@@ -143,7 +169,11 @@ export class Database {
    * example because GitHub delivered its webhook while the service was
    * restarting. The existence check runs inside the insert so two passes
    * cannot both queue it; a head that already has any job, whatever its
-   * status, is left alone.
+   * status, is left alone. Unlike a webhook, this never supersedes other
+   * heads: the listing it came from may be stale, and cancelling a newer
+   * head's job would leave that head without a review for good. A stale
+   * reconciled job cancels itself when the worker compares it with the
+   * current head.
    */
   async enqueueMissing(input: NewReviewJob): Promise<ReviewJob | null> {
     const result = await this.pool.query<JobRow>(
@@ -175,22 +205,7 @@ export class Database {
       ],
     )
     const row = result.rows[0]
-    if (!row) return null
-    await this.supersedeOtherHeads(input)
-    return mapJob(row)
-  }
-
-  private async supersedeOtherHeads(
-    input: Pick<NewReviewJob, "repositoryId" | "pullNumber" | "headSha">,
-  ): Promise<void> {
-    await this.pool.query(
-      `UPDATE review_jobs
-       SET status = 'cancelled', completed_at = NOW(), updated_at = NOW(),
-           error = 'Superseded by a newer pull request revision'
-       WHERE repository_id = $1 AND pull_number = $2 AND head_sha <> $3
-         AND status IN ('queued', 'running')`,
-      [input.repositoryId, input.pullNumber, input.headSha],
-    )
+    return row ? mapJob(row) : null
   }
 
   async enqueueRerun(
