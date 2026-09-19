@@ -77,9 +77,20 @@ describe("review context persistence", () => {
 
     await database.migrate()
 
-    assert.match(
-      queries[3]!,
+    const migration = queries[3]!
+    const dedupe = migration.search(/UPDATE review_jobs\s+SET status = 'cancelled'/)
+    const index = migration.search(
       /CREATE UNIQUE INDEX IF NOT EXISTS review_jobs_inflight_head_idx\s+ON review_jobs \(repository_id, pull_number, head_sha\)\s+WHERE status IN \('queued', 'running'\) AND event_type <> 'check_run.rerequested'/,
+    )
+    assert.ok(index > 0)
+    assert.ok(
+      dedupe > 0 && dedupe < index,
+      "duplicates the old schema allowed must be cancelled before the index is built, or startup fails",
+    )
+    assert.match(
+      migration.slice(dedupe, index),
+      /ORDER BY CASE WHEN status = 'running' THEN 0 ELSE 1 END, id/,
+      "the surviving job is the one already running",
     )
   })
 
