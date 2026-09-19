@@ -48,7 +48,7 @@ The example data, recorded issues, focused tests, paired versions, and previous 
 
 Result files from before the current access rules are labelled `OLDER RULES` in the report and flagged by `compare`; do not compare them with current runs.
 
-## Amp mode and model
+## Reviewer and finding matcher models
 
 Production and evaluation reviews use the tracked `reviewbot-v1` Amp mode. It extends built-in `medium`, preserving that mode's prompt and tools, while pinning the main reviewer and Oracle to `openai/gpt-5.6-sol` at their existing reasoning levels. Finding comparisons similarly extend `high` through `reviewbot-judge-v1` and pin their main model and Oracle.
 
@@ -57,6 +57,10 @@ Every Amp account involved must install the exact [`pinned-models.js`](../plugin
 Amp still chooses models for specialist tools such as Search and Librarian. One plugin setting covers all specialists, so overriding it would replace their deliberately different routing and make the test less like production. The result therefore names the pinned main model without claiming that every supporting model is fixed.
 
 Each result records the configured mode and model plus the exact Amp SDK and CLI versions. It also saves model IDs from the event stream when Amp reports them. Current Amp streams sometimes omit those IDs; an empty list means “not reported,” not “no model was used.”
+
+Finding comparison defaults to the incumbent Amp majority matcher: two votes, plus a third only when the first two disagree. `--matcher jev` explicitly selects the experimental TypeSafe System One matcher instead. It sends one batched request per expected issue, with one binary (`noul`) question per candidate finding, then includes every finding whose match probability is at least the configured threshold. The initial, deliberately conservative threshold is `0.8`; it has not been validated as an accuracy-optimal threshold and is not the default matcher. Override it only for an explicit experiment with `--jev-threshold NUMBER`.
+
+The Jev integration pins model `jev-1.13.0`, TypeSafe API `v1`, and `@typesafe-ai/sdk` `0.6.0` rather than following a moving model alias. Saved judgements include the per-finding probabilities and identify the provider, matcher version, model, API and SDK versions, threshold, full request/question definitions, response schema, and their hashes. Those values also participate in the cache key. Existing artifacts without a provider remain Amp judgements and keep their historical interpretation.
 
 ## Commands
 
@@ -86,7 +90,36 @@ npm run eval -- run /path/to/review-eval-pack \
   --concurrency 2
 ```
 
-Do not set `AMP_API_KEY`; the evaluation uses the authenticated local CLI to compare findings with recorded issues and rejects an `AMP_API_KEY` inherited from the shell. Confirm that the separate review identity cannot access the example pack before running either group.
+Do not set `AMP_API_KEY`; by default the evaluation uses the authenticated local CLI to compare findings with recorded issues and rejects an `AMP_API_KEY` inherited from the shell. Confirm that the separate review identity cannot access the example pack before running either group. To run the experimental matcher instead, set `TYPESAFE_API_KEY` and add `--matcher jev`; the separate `AMP_EVAL_REVIEWER_API_KEY` is still required for the review phase.
+
+### Validate the experimental Jev matcher
+
+Do not infer accuracy from a successful API call. Compare Jev against the incumbent on the exact same saved reviews before considering a threshold or model change. Given a completed Amp-matched artifact, rematch a derived copy with Jev; `--rematch` clears only the derived copy's finding judgements and matching duration, never the source review or artifact:
+
+```sh
+export TYPESAFE_API_KEY="early-access-key"
+npm run eval -- finish .eval-runs/AMP.json \
+  --matcher jev \
+  --rematch \
+  --output .eval-runs/JEV.json
+npm run eval -- compare .eval-runs/AMP.json .eval-runs/JEV.json
+```
+
+The comparison should warn that the matcher setups differ. Extract the decisions, diff them, and manually inspect every disagreement against the expected issue, retained finding, source, the incumbent's two or three votes, and Jev's saved probabilities:
+
+```sh
+jq -r '.samples[] | select(.status == "completed") | . as $s |
+  .judgements[] | [$s.caseId, $s.sample, .issueId,
+  (.matchingFindingIndices | join(","))] | @tsv' \
+  .eval-runs/AMP.json > /tmp/amp-matches.tsv
+jq -r '.samples[] | select(.status == "completed") | . as $s |
+  .judgements[] | [$s.caseId, $s.sample, .issueId,
+  (.matchingFindingIndices | join(","))] | @tsv' \
+  .eval-runs/JEV.json > /tmp/jev-matches.tsv
+diff -u /tmp/amp-matches.tsv /tmp/jev-matches.tsv
+```
+
+Record false matches, missed matches, and boundary cases separately. Tune a threshold only on the development set, predeclare it before checking holdout examples, and rerun with `--jev-threshold`. A threshold change gets a distinct cache entry and provenance record. Jev outputs are typed, not guaranteed semantically correct.
 
 Read a saved result without making network or model calls:
 
@@ -163,7 +196,7 @@ If reviews finish but checking their findings is interrupted, finish only those 
 npm run eval -- finish .eval-runs/RUN.json
 ```
 
-This uses the local CLI login and does not use `AMP_EVAL_REVIEWER_API_KEY`. It writes a new result, keeps the original unchanged, and records the original file's hash so the two can be compared exactly.
+This uses the incumbent matcher and local CLI login by default and does not use `AMP_EVAL_REVIEWER_API_KEY`. Pass `--matcher jev` with `TYPESAFE_API_KEY` to finish with Jev instead. It writes a new result, keeps the original unchanged, and records the original file's hash so the two can be compared exactly. Normally only unfinished issues are matched; `--rematch` deliberately replaces all finding judgements in the derived artifact so two matchers or thresholds can be compared on identical saved reviews.
 
 ## Reading a result
 
