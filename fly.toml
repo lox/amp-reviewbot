@@ -4,6 +4,12 @@ primary_region = "syd"
 [build]
   dockerfile = "Dockerfile"
 
+# Boot the new machine and wait for /healthz before the old one stops, so a
+# deploy never leaves GitHub webhooks without a listener. GitHub does not retry
+# deliveries that fail while the only machine is restarting.
+[deploy]
+  strategy = "bluegreen"
+
 [env]
   PORT = "8080"
   WORKER_CONCURRENCY = "1"
