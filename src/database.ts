@@ -44,6 +44,9 @@ export type StaleJobRecovery = {
   exhausted: ReviewJob[]
 }
 
+/** Error text migration 004 writes on the duplicates it cancels; keep in sync. */
+const duplicateInFlightError = "Duplicate in-flight review for the same pull request head"
+
 function mapJob(row: JobRow): ReviewJob {
   return {
     id: row.id,
@@ -320,6 +323,28 @@ export class Database {
     } finally {
       client.release()
     }
+  }
+
+  /**
+   * Duplicates cancelled by migration 004 that owned a GitHub check when they
+   * were cancelled. Nothing else ever refers to such a check, so the recovery
+   * loop closes it and then calls `markDuplicateCheckClosed`.
+   */
+  async orphanedDuplicateChecks(): Promise<ReviewJob[]> {
+    const result = await this.pool.query<JobRow>(
+      `SELECT * FROM review_jobs
+       WHERE status = 'cancelled' AND check_run_id IS NOT NULL AND error = $1
+       ORDER BY id`,
+      [duplicateInFlightError],
+    )
+    return result.rows.map(mapJob)
+  }
+
+  async markDuplicateCheckClosed(jobId: string): Promise<void> {
+    await this.pool.query(
+      "UPDATE review_jobs SET error = $2, updated_at = NOW() WHERE id = $1",
+      [jobId, `${duplicateInFlightError}; check closed`],
+    )
   }
 
   async setCheckRun(jobId: string, checkRunId: string): Promise<void> {

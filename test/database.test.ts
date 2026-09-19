@@ -89,8 +89,13 @@ describe("review context persistence", () => {
     )
     assert.match(
       migration.slice(dedupe, index),
-      /WHERE position > 1 AND status = 'queued' AND check_run_id IS NULL/,
-      "only queued jobs without a GitHub check may be cancelled in SQL; nobody would close a check owned by a running or requeued job",
+      /WHERE status IN \('queued', 'running'\) AND event_type <> 'check_run.rerequested'\s+\) ranked\s+WHERE position > 1\s+\)/,
+      "every surplus duplicate is cancelled, running ones included, so startup never depends on historical rows",
+    )
+    assert.match(
+      migration.slice(dedupe, index),
+      /error = 'Duplicate in-flight review for the same pull request head'/,
+      "the worker finds cancelled duplicates that still own a check by this text",
     )
     assert.match(
       migration.slice(dedupe, index),

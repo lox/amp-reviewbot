@@ -442,6 +442,78 @@ describe("missing review reconciliation", () => {
   })
 })
 
+describe("orphaned duplicate check cleanup", () => {
+  function duplicate(id: string, checkRunId: string): ReviewJob {
+    return {
+      id,
+      sourceDeliveryId: `delivery-${id}`,
+      eventType: "pull_request.synchronize",
+      installationId: "1",
+      repositoryId: "2",
+      repositoryFullName: "lox/example",
+      pullNumber: 7,
+      baseSha: "base",
+      headSha: "head",
+      ampProject: "lox/example",
+      pullRequestContext: null,
+      checkRunId,
+      ampThreadId: null,
+      status: "cancelled",
+      attempts: 1,
+    }
+  }
+
+  function workersWith(orphaned: ReviewJob[], options: { failCheckFor?: string[] } = {}) {
+    const marked: string[] = []
+    const cancelled: Array<{ jobId: string; checkRunId: string; reason: string }> = []
+    const database = {
+      async orphanedDuplicateChecks() {
+        return orphaned
+      },
+      async markDuplicateCheckClosed(jobId: string) {
+        marked.push(jobId)
+      },
+    } as unknown as Database
+    const github = {
+      async cancelCheck(job: ReviewJob, checkRunId: string, reason: string) {
+        if (options.failCheckFor?.includes(checkRunId)) throw new Error("GitHub unavailable")
+        cancelled.push({ jobId: job.id, checkRunId, reason })
+      },
+    } as unknown as GitHubClient
+    const workers = new ReviewWorkers(
+      { workerConcurrency: 1, reviewTimeoutMs: 1, failOn: "high" } as never,
+      database,
+      github,
+      pino({ level: "silent" }),
+      async () => ({ unavailable: "not used" }),
+    )
+    const close = () =>
+      (workers as unknown as { closeOrphanedDuplicateChecks(): Promise<void> }).closeOrphanedDuplicateChecks()
+    return { close, cancelled, marked }
+  }
+
+  it("closes the check of each duplicate the migration cancelled, then marks the job so it is not revisited", async () => {
+    const { close, cancelled, marked } = workersWith([duplicate("10", "100"), duplicate("11", "110")])
+
+    await close()
+
+    assert.deepEqual(cancelled.map((call) => call.checkRunId), ["100", "110"])
+    assert.match(cancelled[0]!.reason, /duplicate review for this revision/)
+    assert.deepEqual(marked, ["10", "11"])
+  })
+
+  it("leaves a job unmarked when GitHub rejects the cancellation so the next pass retries it", async () => {
+    const { close, cancelled, marked } = workersWith([duplicate("10", "100"), duplicate("11", "110")], {
+      failCheckFor: ["100"],
+    })
+
+    await close()
+
+    assert.deepEqual(cancelled.map((call) => call.checkRunId), ["110"])
+    assert.deepEqual(marked, ["11"], "only a closed check is recorded as closed")
+  })
+})
+
 describe("stale job detection", () => {
   const job = {
     id: "1",

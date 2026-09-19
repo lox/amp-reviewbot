@@ -22,29 +22,27 @@ CREATE INDEX IF NOT EXISTS review_results_created_idx
 --
 -- Earlier schemas allowed such duplicates (two deliveries for one head, for
 -- example a reopen after a dropped close), and the index would refuse to build
--- over them. Cancel the surplus queued jobs first: a queued job has no GitHub
--- check yet, so nothing outside the database refers to it. A running job owns
--- an in-progress check that only a worker can close, so it is never cancelled
--- here, and neither is a requeued job that kept its check. If two such jobs
--- share a head the index fails to build with the duplicated key in the error,
--- the new machine never becomes healthy so the old one keeps serving, and the
--- deploy is retried once those jobs have finished or been recovered. The
--- surviving job per head is the running one, else the one with a check, else
--- the oldest. The whole file runs as one implicit transaction, and once the
--- index exists this update finds nothing.
+-- over them, so every surplus duplicate is cancelled first: startup must never
+-- depend on what historical rows happen to look like. The surviving job per
+-- head is the running one, else the one that owns a check, else the oldest. A
+-- cancelled duplicate that already owned a GitHub check (it was running, or
+-- was requeued and kept its check) would leave that check in progress forever;
+-- the worker's recovery loop finds such rows by the error text below and
+-- closes their checks. The whole file runs as one implicit transaction, and
+-- once the index exists this update finds nothing.
 UPDATE review_jobs
 SET status = 'cancelled', completed_at = NOW(), updated_at = NOW(),
     error = 'Duplicate in-flight review for the same pull request head'
 WHERE id IN (
   SELECT id FROM (
-    SELECT id, status, check_run_id, ROW_NUMBER() OVER (
+    SELECT id, ROW_NUMBER() OVER (
       PARTITION BY repository_id, pull_number, head_sha
       ORDER BY status <> 'running', check_run_id IS NULL, id
     ) AS position
     FROM review_jobs
     WHERE status IN ('queued', 'running') AND event_type <> 'check_run.rerequested'
   ) ranked
-  WHERE position > 1 AND status = 'queued' AND check_run_id IS NULL
+  WHERE position > 1
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS review_jobs_inflight_head_idx

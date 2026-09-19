@@ -263,10 +263,39 @@ export class ReviewWorkers {
       }
 
       try {
+        await this.closeOrphanedDuplicateChecks()
+      } catch (error) {
+        this.logger.error({ err: error }, "duplicate review check cleanup failed")
+      }
+
+      try {
         await sleep(staleRecoveryIntervalMs, this.recoveryController.signal)
       } catch {
         if (this.stopping) return
         throw new Error("Stale review recovery interrupted")
+      }
+    }
+  }
+
+  /**
+   * Migration 004 cancels surplus in-flight duplicates in SQL so that its
+   * unique index always builds; a duplicate that was running, or requeued with
+   * its check, leaves a GitHub check nobody else will finish. Close those here
+   * rather than during startup, so a GitHub outage cannot keep the service
+   * from coming up. A failure is logged and retried on the next pass.
+   */
+  private async closeOrphanedDuplicateChecks(): Promise<void> {
+    for (const job of await this.database.orphanedDuplicateChecks()) {
+      try {
+        await this.github.cancelCheck(
+          job,
+          job.checkRunId!,
+          "A duplicate review for this revision was already in progress.",
+        )
+        await this.database.markDuplicateCheckClosed(job.id)
+        this.logger.warn({ jobId: job.id, checkRunId: job.checkRunId }, "closed check of a cancelled duplicate review")
+      } catch (error) {
+        this.logger.error({ err: error, jobId: job.id }, "failed to close check of a cancelled duplicate review")
       }
     }
   }
