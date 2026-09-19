@@ -2,8 +2,9 @@ import { readFile } from "node:fs/promises"
 import { resolve } from "node:path"
 import { Pool, type PoolClient } from "pg"
 import type { Config } from "./config.js"
+import type { FinalizedReview } from "./review.js"
 import type { ThreadUsage } from "./thread-usage.js"
-import type { JobStatus, ReviewJob } from "./types.js"
+import type { JobStatus, ReviewJob, Severity } from "./types.js"
 
 type JobRow = {
   id: string
@@ -78,7 +79,12 @@ export class Database {
   }
 
   async migrate(): Promise<void> {
-    for (const file of ["001_initial.sql", "002_review_context.sql", "003_review_threads.sql"]) {
+    for (const file of [
+      "001_initial.sql",
+      "002_review_context.sql",
+      "003_review_threads.sql",
+      "004_review_results.sql",
+    ]) {
       const sql = await readFile(resolve("migrations", file), "utf8")
       await this.pool.query(sql)
     }
@@ -120,7 +126,63 @@ export class Database {
     )
     const row = result.rows[0]
     if (!row) return null
+    await this.supersedeOtherHeads(input)
+    return mapJob(row)
+  }
 
+  /** Repositories that have ever queued a review here, by GitHub repository ID. */
+  async knownRepositoryIds(): Promise<Set<string>> {
+    const result = await this.pool.query<{ repository_id: string }>(
+      "SELECT DISTINCT repository_id FROM review_jobs",
+    )
+    return new Set(result.rows.map((row) => String(row.repository_id)))
+  }
+
+  /**
+   * Queues a review for a pull request head that has no job at all, for
+   * example because GitHub delivered its webhook while the service was
+   * restarting. The existence check runs inside the insert so two passes
+   * cannot both queue it; a head that already has any job, whatever its
+   * status, is left alone.
+   */
+  async enqueueMissing(input: NewReviewJob): Promise<ReviewJob | null> {
+    const result = await this.pool.query<JobRow>(
+      `INSERT INTO review_jobs (
+         source_delivery_id, event_type, installation_id, repository_id,
+         repository_full_name, pull_number, base_sha, head_sha, amp_project,
+         pull_request_title, pull_request_body, base_ref, head_ref
+       )
+       SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
+       WHERE NOT EXISTS (
+         SELECT 1 FROM review_jobs WHERE repository_id = $4 AND pull_number = $6 AND head_sha = $8
+       )
+       ON CONFLICT (source_delivery_id) DO NOTHING
+       RETURNING *`,
+      [
+        input.sourceDeliveryId,
+        input.eventType,
+        input.installationId,
+        input.repositoryId,
+        input.repositoryFullName,
+        input.pullNumber,
+        input.baseSha,
+        input.headSha,
+        input.ampProject,
+        input.pullRequestContext?.title ?? null,
+        input.pullRequestContext?.body ?? null,
+        input.pullRequestContext?.baseRef ?? null,
+        input.pullRequestContext?.headRef ?? null,
+      ],
+    )
+    const row = result.rows[0]
+    if (!row) return null
+    await this.supersedeOtherHeads(input)
+    return mapJob(row)
+  }
+
+  private async supersedeOtherHeads(
+    input: Pick<NewReviewJob, "repositoryId" | "pullNumber" | "headSha">,
+  ): Promise<void> {
     await this.pool.query(
       `UPDATE review_jobs
        SET status = 'cancelled', completed_at = NOW(), updated_at = NOW(),
@@ -129,8 +191,6 @@ export class Database {
          AND status IN ('queued', 'running')`,
       [input.repositoryId, input.pullNumber, input.headSha],
     )
-
-    return mapJob(row)
   }
 
   async enqueueRerun(
@@ -308,6 +368,44 @@ export class Database {
        SET usage_error = $2, usage_collected_at = NOW()
        WHERE thread_id = $1 AND usage_details IS NULL`,
       [threadId, error],
+    )
+  }
+
+  /**
+   * Records what a completed review reported, after changed-line filtering,
+   * so block rates and finding severities can be queried without opening
+   * GitHub checks or Amp threads.
+   */
+  async setResult(
+    jobId: string,
+    review: FinalizedReview,
+    context: { failOn: Severity; promptIdentifier: string },
+  ): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO review_results (
+         job_id, conclusion, fail_on, prompt_identifier, summary,
+         blocking_findings, advisory_findings, omitted_findings, findings
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       ON CONFLICT (job_id) DO UPDATE SET
+         conclusion = EXCLUDED.conclusion,
+         fail_on = EXCLUDED.fail_on,
+         prompt_identifier = EXCLUDED.prompt_identifier,
+         summary = EXCLUDED.summary,
+         blocking_findings = EXCLUDED.blocking_findings,
+         advisory_findings = EXCLUDED.advisory_findings,
+         omitted_findings = EXCLUDED.omitted_findings,
+         findings = EXCLUDED.findings`,
+      [
+        jobId,
+        review.conclusion,
+        context.failOn,
+        context.promptIdentifier,
+        review.result.summary,
+        review.blocking,
+        review.result.findings.length - review.blocking,
+        review.omitted,
+        JSON.stringify(review.result.findings),
+      ],
     )
   }
 

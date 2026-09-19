@@ -62,9 +62,92 @@ describe("review context persistence", () => {
 
     await database.migrate()
 
-    assert.equal(queries.length, 3)
+    assert.equal(queries.length, 4)
     assert.match(queries[1]!, /ADD COLUMN IF NOT EXISTS pull_request_title/)
     assert.match(queries[2]!, /CREATE TABLE IF NOT EXISTS review_threads/)
+    assert.match(queries[3]!, /CREATE TABLE IF NOT EXISTS review_results/)
+  })
+})
+
+describe("missing review reconciliation", () => {
+  const input: NewReviewJob = {
+    sourceDeliveryId: "reconcile:2:42:head-sha",
+    eventType: "reconcile.missing_review",
+    installationId: "1",
+    repositoryId: "2",
+    repositoryFullName: "lox/example",
+    pullNumber: 42,
+    baseSha: "base-sha",
+    headSha: "head-sha",
+    ampProject: "lox/example",
+    pullRequestContext: { title: "Example change", body: null, baseRef: "main", headRef: "example-change" },
+  }
+
+  it("inserts only when no job exists for the same repository, pull, and head", async () => {
+    const queries: Array<{ text: string; values?: unknown[] }> = []
+    const database = databaseWithQueries(queries)
+
+    const job = await database.enqueueMissing(input)
+
+    const insert = queries[0]!
+    assert.match(insert.text, /WHERE NOT EXISTS \(\s*SELECT 1 FROM review_jobs WHERE repository_id = \$4 AND pull_number = \$6 AND head_sha = \$8/)
+    assert.deepEqual([insert.values![3], insert.values![5], insert.values![7]], ["2", 42, "head-sha"])
+    assert.equal(job?.id, "1")
+    assert.match(queries[1]!.text, /Superseded by a newer pull request revision/)
+    assert.deepEqual(queries[1]!.values, ["2", 42, "head-sha"])
+  })
+
+  it("does not supersede other heads when the insert found an existing job", async () => {
+    const queries: Array<{ text: string; values?: unknown[] }> = []
+    const database = Object.create(Database.prototype) as Database
+    Object.defineProperty(database, "pool", {
+      value: {
+        async query(text: string, values?: unknown[]) {
+          queries.push({ text, ...(values ? { values } : {}) })
+          return { rows: [] }
+        },
+      },
+    })
+
+    const job = await database.enqueueMissing(input)
+
+    assert.equal(job, null)
+    assert.equal(queries.length, 1, "no supersede update after a no-op insert")
+  })
+})
+
+describe("review result persistence", () => {
+  it("stores the finalized conclusion, counts, and retained findings", async () => {
+    const queries: Array<{ text: string; values?: unknown[] }> = []
+    const database = databaseWithQueries(queries)
+    const finding = {
+      severity: "high" as const,
+      title: "Lost write",
+      message: "The write is dropped.",
+      suggestion: "Keep it.",
+      path: "src/a.ts",
+      startLine: 3,
+    }
+    const advisory = { ...finding, severity: "medium" as const, title: "Naming" }
+
+    await database.setResult(
+      "7",
+      { result: { summary: "One blocker.", findings: [finding, advisory] }, omitted: 2, blocking: 1, conclusion: "failure" },
+      { failOn: "high", promptIdentifier: "current@abc123def456" },
+    )
+
+    assert.match(queries[0]!.text, /INSERT INTO review_results/)
+    assert.deepEqual(queries[0]!.values!.slice(0, 8), [
+      "7",
+      "failure",
+      "high",
+      "current@abc123def456",
+      "One blocker.",
+      1,
+      1,
+      2,
+    ])
+    assert.deepEqual(JSON.parse(queries[0]!.values![8] as string), [finding, advisory])
   })
 })
 

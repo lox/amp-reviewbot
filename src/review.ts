@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import { readFileSync } from "node:fs"
 import { resolve } from "node:path"
 import { z } from "zod"
@@ -291,6 +292,33 @@ export function reviewThreadTitle(
   return `Review ${job.repositoryFullName}#${job.pullNumber}`
 }
 
+/**
+ * Names a prompt by hashing the text it produces for one fixed placeholder
+ * job, so any wording change yields a new identifier while job-specific
+ * coordinates do not. Production records this beside each review result;
+ * the evaluation uses the same function for its prompt variants.
+ */
+export function reviewPromptIdentifier(name: string, build: (job: ReviewJob) => string): string {
+  const placeholder: ReviewJob = {
+    id: "prompt-identifier",
+    sourceDeliveryId: "prompt-identifier",
+    eventType: "prompt-identifier",
+    installationId: "0",
+    repositoryId: "0",
+    repositoryFullName: "example/repository",
+    pullNumber: 1,
+    baseSha: "0".repeat(40),
+    headSha: "1".repeat(40),
+    ampProject: "no-project",
+    pullRequestContext: null,
+    checkRunId: null,
+    ampThreadId: null,
+    status: "running",
+    attempts: 1,
+  }
+  return `${name}@${createHash("sha256").update(build(placeholder)).digest("hex").slice(0, 12)}`
+}
+
 export function parseReviewResult(text: string): ReviewResult {
   const trimmed = text.trim()
   const fenced = /^```(?:json)?\s*([\s\S]*?)\s*```$/i.exec(trimmed)
@@ -321,21 +349,26 @@ export function isBlockingSeverity(severity: Severity, failOn: Severity): boolea
   return severityRank[severity] >= severityRank[failOn]
 }
 
+export type FinalizedReview = {
+  /** Findings that survived changed-line filtering, with the original summary. */
+  result: ReviewResult
+  omitted: number
+  blocking: number
+  conclusion: "success" | "neutral" | "failure"
+}
+
 export function finalizeReview(
   result: ReviewResult,
   changedLines: ReadonlyMap<string, ReadonlySet<number>>,
   failOn: Severity,
-): {
-  result: ReviewResult
-  omitted: number
-  conclusion: "success" | "neutral" | "failure"
-} {
+): FinalizedReview {
   const findings = result.findings.filter((finding) =>
     changedLines.get(finding.path)?.has(finding.startLine),
   )
   return {
     result: { ...result, findings },
     omitted: result.findings.length - findings.length,
+    blocking: findings.filter((finding) => isBlockingSeverity(finding.severity, failOn)).length,
     conclusion: checkConclusion({ ...result, findings }, failOn),
   }
 }

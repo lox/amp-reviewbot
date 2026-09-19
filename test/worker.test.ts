@@ -3,8 +3,8 @@ import { describe, it } from "node:test"
 import type { ExecuteOptions, StreamMessage } from "@ampcode/sdk"
 import pino from "pino"
 import { reviewMode } from "../src/amp.js"
-import type { Database } from "../src/database.js"
-import type { GitHubClient } from "../src/github.js"
+import type { Database, NewReviewJob } from "../src/database.js"
+import type { GitHubClient, OpenPullRequest } from "../src/github.js"
 import type { ThreadUsage } from "../src/thread-usage.js"
 import {
   executeReviewWithRetries,
@@ -331,6 +331,100 @@ describe("usage collection for finished reviews", () => {
     await (workers as unknown as { collectUncollectedUsage(): Promise<void> }).collectUncollectedUsage()
 
     assert.deepEqual(stored, [], "a stopping worker leaves the backlog for the next process")
+  })
+})
+
+describe("missing review reconciliation", () => {
+  const minute = 60_000
+  const now = Date.parse("2026-09-19T12:00:00Z")
+
+  function pull(overrides: Partial<OpenPullRequest> & { pullNumber: number }): OpenPullRequest {
+    return {
+      installationId: "1",
+      repositoryId: "2",
+      repositoryFullName: "lox/example",
+      baseSha: "base",
+      headSha: `head-${overrides.pullNumber}`,
+      updatedAt: new Date(now - 30 * minute),
+      pullRequestContext: { title: "Change", body: null, baseRef: "main", headRef: "topic" },
+      ...overrides,
+    }
+  }
+
+  function workersWith(known: string[], pulls: OpenPullRequest[]) {
+    const enqueued: NewReviewJob[] = []
+    let listed = 0
+    const database = {
+      async knownRepositoryIds() {
+        return new Set(known)
+      },
+      async enqueueMissing(input: NewReviewJob) {
+        enqueued.push(input)
+        return { ...input, id: String(enqueued.length), checkRunId: null, ampThreadId: null, status: "queued", attempts: 0 }
+      },
+    } as unknown as Database
+    const github = {
+      async openPullRequests() {
+        listed += 1
+        return pulls
+      },
+    } as unknown as GitHubClient
+    const workers = new ReviewWorkers(
+      { workerConcurrency: 1, reviewTimeoutMs: 1, failOn: "high", ampProjects: { "lox/example": "lox/example-project" } } as never,
+      database,
+      github,
+      pino({ level: "silent" }),
+      async () => ({ unavailable: "not used" }),
+    )
+    const reconcile = () =>
+      (workers as unknown as { reconcileMissingReviews(now: () => number): Promise<void> }).reconcileMissingReviews(
+        () => now,
+      )
+    return { reconcile, enqueued, listed: () => listed, workers }
+  }
+
+  it("queues only heads of known repositories that are old enough to have missed their webhook but not stale", async () => {
+    const { reconcile, enqueued } = workersWith(
+      ["2"],
+      [
+        pull({ pullNumber: 1 }),
+        pull({ pullNumber: 2, updatedAt: new Date(now - 4 * minute) }),
+        pull({ pullNumber: 3, updatedAt: new Date(now - 8 * 24 * 60 * minute) }),
+        pull({ pullNumber: 4, repositoryId: "9", repositoryFullName: "lox/never-seen" }),
+      ],
+    )
+
+    await reconcile()
+
+    assert.deepEqual(
+      enqueued.map((job) => job.pullNumber),
+      [1],
+      "a fresh push may still be in flight; a week-old head predates the gap; unknown repositories are not backfilled",
+    )
+    assert.equal(enqueued[0]!.sourceDeliveryId, "reconcile:2:1:head-1")
+    assert.equal(enqueued[0]!.eventType, "reconcile.missing_review")
+    assert.equal(enqueued[0]!.ampProject, "lox/example-project")
+    assert.deepEqual(enqueued[0]!.pullRequestContext, { title: "Change", body: null, baseRef: "main", headRef: "topic" })
+  })
+
+  it("queues at most ten reviews per pass", async () => {
+    const { reconcile, enqueued } = workersWith(
+      ["2"],
+      Array.from({ length: 12 }, (_, index) => pull({ pullNumber: index + 1 })),
+    )
+
+    await reconcile()
+
+    assert.equal(enqueued.length, 10)
+  })
+
+  it("does not list pull requests before any repository has sent a webhook", async () => {
+    const { reconcile, enqueued, listed } = workersWith([], [pull({ pullNumber: 1 })])
+
+    await reconcile()
+
+    assert.equal(listed(), 0)
+    assert.deepEqual(enqueued, [])
   })
 })
 

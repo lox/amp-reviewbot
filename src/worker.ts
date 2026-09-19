@@ -5,10 +5,10 @@ import { execute } from "@ampcode/sdk"
 import type { StreamMessage } from "@ampcode/sdk"
 import type { Logger } from "pino"
 import { agentModeFromMessage, reviewMode } from "./amp.js"
-import type { Config } from "./config.js"
+import { resolveAmpProject, type Config } from "./config.js"
 import { Database } from "./database.js"
 import { GitHubClient } from "./github.js"
-import { buildReviewPrompt, parseReviewResult, reviewThreadTitle } from "./review.js"
+import { buildReviewPrompt, parseReviewResult, reviewPromptIdentifier, reviewThreadTitle } from "./review.js"
 import { readThreadUsage, type ThreadUsageLookup } from "./thread-usage.js"
 import type { ReviewJob } from "./types.js"
 
@@ -18,6 +18,13 @@ const staleRecoveryIntervalMs = 60_000
 const maxJobAttempts = 3
 const uncollectedUsageBatchSize = 20
 const usageCollectionIntervalMs = 60_000
+const reconcileIntervalMs = 5 * 60_000
+// A head pushed more recently than this may still have its webhook in flight.
+const reconcileMinimumAgeMs = 5 * 60_000
+// Older pull requests predate the gap being repaired; a missed webhook is
+// noticed well within a week.
+const reconcileMaximumAgeMs = 7 * 24 * 60 * 60_000
+const reconcileBatchSize = 10
 const defaultRetryPrompt =
   "Complete the review if necessary, then return only the final review JSON in the required schema."
 
@@ -198,6 +205,7 @@ export class ReviewWorkers {
   private readonly active = new Set<AbortController>()
   private readonly loops: Promise<void>[] = []
   private readonly recoveryController = new AbortController()
+  private readonly promptIdentifier: string
 
   constructor(
     private readonly config: Config,
@@ -205,7 +213,11 @@ export class ReviewWorkers {
     private readonly github: GitHubClient,
     private readonly logger: Logger,
     private readonly readUsage: typeof readThreadUsage = readThreadUsage,
-  ) {}
+  ) {
+    this.promptIdentifier = reviewPromptIdentifier("current", (job) =>
+      buildReviewPrompt(job, { failOn: config.failOn }),
+    )
+  }
 
   start(): void {
     for (let index = 0; index < this.config.workerConcurrency; index += 1) {
@@ -213,6 +225,7 @@ export class ReviewWorkers {
     }
     this.loops.push(this.recoveryLoop())
     this.loops.push(this.usageLoop())
+    this.loops.push(this.reconcileLoop())
   }
 
   async stop(): Promise<void> {
@@ -278,6 +291,65 @@ export class ReviewWorkers {
       } catch {
         if (this.stopping) return
         throw new Error("Usage collection interrupted")
+      }
+    }
+  }
+
+  /**
+   * GitHub does not retry webhook deliveries that fail, and a deploy restarts
+   * the only listener. Periodically list the open pull requests this app can
+   * see and queue a review for any head that has no job at all.
+   */
+  private async reconcileLoop(): Promise<void> {
+    while (!this.stopping) {
+      try {
+        await this.reconcileMissingReviews()
+      } catch (error) {
+        this.logger.error({ err: error }, "review reconciliation failed")
+      }
+
+      try {
+        await sleep(reconcileIntervalMs, this.recoveryController.signal)
+      } catch {
+        if (this.stopping) return
+        throw new Error("Review reconciliation interrupted")
+      }
+    }
+  }
+
+  /**
+   * Only repositories that have already sent this service a webhook are
+   * reconciled, so installing the app on a repository with a long backlog of
+   * open pull requests does not review all of them.
+   */
+  private async reconcileMissingReviews(now: () => number = Date.now): Promise<void> {
+    const knownRepositories = await this.database.knownRepositoryIds()
+    if (knownRepositories.size === 0) return
+    const pulls = await this.github.openPullRequests()
+    let queued = 0
+    for (const pull of pulls) {
+      if (this.stopping || queued >= reconcileBatchSize) return
+      if (!knownRepositories.has(pull.repositoryId)) continue
+      const age = now() - pull.updatedAt.getTime()
+      if (age < reconcileMinimumAgeMs || age > reconcileMaximumAgeMs) continue
+      const job = await this.database.enqueueMissing({
+        sourceDeliveryId: `reconcile:${pull.repositoryId}:${pull.pullNumber}:${pull.headSha}`,
+        eventType: "reconcile.missing_review",
+        installationId: pull.installationId,
+        repositoryId: pull.repositoryId,
+        repositoryFullName: pull.repositoryFullName,
+        pullNumber: pull.pullNumber,
+        baseSha: pull.baseSha,
+        headSha: pull.headSha,
+        ampProject: resolveAmpProject(this.config, pull.repositoryFullName),
+        pullRequestContext: pull.pullRequestContext,
+      })
+      if (job) {
+        queued += 1
+        this.logger.warn(
+          { jobId: job.id, repository: job.repositoryFullName, pr: job.pullNumber, headSha: job.headSha },
+          "review queued by reconciliation; no webhook delivery reached this service",
+        )
       }
     }
   }
@@ -379,9 +451,26 @@ export class ReviewWorkers {
       const result = parseReviewResult(finalText)
       const changedLines = await this.github.changedLines(job)
       controller.signal.throwIfAborted()
-      await this.github.completeCheck(job, activeCheckRunId, result, changedLines)
+      const finalized = await this.github.completeCheck(job, activeCheckRunId, result, changedLines)
+      try {
+        await this.database.setResult(job.id, finalized, {
+          failOn: this.config.failOn,
+          promptIdentifier: this.promptIdentifier,
+        })
+      } catch (error) {
+        // The check is already published; a missing result row only weakens monitoring.
+        log.warn({ err: error }, "failed to record review result")
+      }
       await this.database.finish(job.id, "succeeded")
-      log.info({ findings: result.findings.length }, "review completed")
+      log.info(
+        {
+          conclusion: finalized.conclusion,
+          findings: finalized.result.findings.length,
+          blocking: finalized.blocking,
+          omitted: finalized.omitted,
+        },
+        "review completed",
+      )
     } catch (error) {
       if (error instanceof PullRequestHeadChangedError && checkRunId) {
         await this.github.cancelCheck(job, checkRunId, "A newer pull request revision is available.")

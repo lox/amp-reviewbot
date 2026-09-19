@@ -1,7 +1,7 @@
 import { App } from "octokit"
 import type { Config } from "./config.js"
 import type { ReviewFinding, ReviewJob, ReviewResult, Severity } from "./types.js"
-import { finalizeReview, isBlockingSeverity } from "./review.js"
+import { finalizeReview, type FinalizedReview } from "./review.js"
 
 const annotationLevel: Record<Severity, "failure" | "warning" | "notice"> = {
   critical: "failure",
@@ -15,6 +15,19 @@ const severityLabel: Record<Severity, string> = {
   high: "High",
   medium: "Medium",
   low: "Low",
+}
+
+export type OpenPullRequest = Pick<
+  ReviewJob,
+  | "installationId"
+  | "repositoryId"
+  | "repositoryFullName"
+  | "pullNumber"
+  | "baseSha"
+  | "headSha"
+> & {
+  updatedAt: Date
+  pullRequestContext: NonNullable<ReviewJob["pullRequestContext"]>
 }
 
 export class GitHubClient {
@@ -64,6 +77,54 @@ export class GitHubClient {
     })
   }
 
+  /**
+   * Every open, non-draft pull request in every repository this app is
+   * installed on. Used to find heads whose webhook never arrived.
+   */
+  async openPullRequests(): Promise<OpenPullRequest[]> {
+    const installations = await this.app.octokit.paginate(
+      this.app.octokit.rest.apps.listInstallations,
+      { per_page: 100 },
+    )
+    const pulls: OpenPullRequest[] = []
+    for (const installation of installations) {
+      const octokit = await this.app.getInstallationOctokit(installation.id)
+      const repositories = await octokit.paginate(
+        octokit.rest.apps.listReposAccessibleToInstallation,
+        { per_page: 100 },
+      )
+      for (const repository of repositories) {
+        if (repository.archived) continue
+        const { owner, repo } = splitRepository(repository.full_name)
+        const open = await octokit.paginate(octokit.rest.pulls.list, {
+          owner,
+          repo,
+          state: "open",
+          per_page: 100,
+        })
+        for (const pull of open) {
+          if (pull.draft) continue
+          pulls.push({
+            installationId: String(installation.id),
+            repositoryId: String(repository.id),
+            repositoryFullName: repository.full_name,
+            pullNumber: pull.number,
+            baseSha: pull.base.sha,
+            headSha: pull.head.sha,
+            updatedAt: new Date(pull.updated_at),
+            pullRequestContext: {
+              title: pull.title,
+              body: pull.body,
+              baseRef: pull.base.ref,
+              headRef: pull.head.ref,
+            },
+          })
+        }
+      }
+    }
+    return pulls
+  }
+
   async currentHead(job: ReviewJob): Promise<string> {
     const { owner, repo } = splitRepository(job.repositoryFullName)
     const octokit = await this.app.getInstallationOctokit(Number(job.installationId))
@@ -90,15 +151,12 @@ export class GitHubClient {
     checkRunId: string,
     result: ReviewResult,
     changedLines: Map<string, Set<number>>,
-  ): Promise<void> {
+  ): Promise<FinalizedReview> {
     const { owner, repo } = splitRepository(job.repositoryFullName)
     const octokit = await this.app.getInstallationOctokit(Number(job.installationId))
     const finalized = finalizeReview(result, changedLines, this.config.failOn)
     const findings = finalized.result.findings
-    const blocking = findings.filter((finding) =>
-      isBlockingSeverity(finding.severity, this.config.failOn),
-    ).length
-    const title = checkTitle(blocking, findings.length - blocking)
+    const title = checkTitle(finalized.blocking, findings.length - finalized.blocking)
     const summary = [
       finalized.omitted === 0 ? result.summary : "",
       finalized.omitted > 0
@@ -139,6 +197,7 @@ export class GitHubClient {
         }),
       },
     })
+    return finalized
   }
 
   async cancelCheck(job: ReviewJob, checkRunId: string, reason: string): Promise<void> {

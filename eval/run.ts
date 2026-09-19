@@ -10,6 +10,7 @@ import {
   buildSourceSetupPrompt,
   finalizeReview,
   parseReviewResult,
+  reviewPromptIdentifier,
   reviewThreadTitle,
   severityGuide,
 } from "../src/review.js"
@@ -1087,27 +1088,7 @@ export async function loadPromptVariant(input: string): Promise<{
 }
 
 function promptVariant(name: string, build: (job: ReviewJob) => string) {
-  const identifyingJob: ReviewJob = {
-    id: "prompt-identifier",
-    sourceDeliveryId: "prompt-identifier",
-    eventType: "eval.prompt-identifier",
-    installationId: "0",
-    repositoryId: "0",
-    repositoryFullName: "example/repository",
-    pullNumber: 1,
-    baseSha: "0".repeat(40),
-    headSha: "1".repeat(40),
-    ampProject: "no-project",
-    pullRequestContext: null,
-    checkRunId: null,
-    ampThreadId: null,
-    status: "running",
-    attempts: 1,
-  }
-  return {
-    identifier: `${name}@${hash(build(identifyingJob)).slice(0, 12)}`,
-    build,
-  }
+  return { identifier: reviewPromptIdentifier(name, build), build }
 }
 
 async function installedAmpVersions(): Promise<AmpVersions> {
