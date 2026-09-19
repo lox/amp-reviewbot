@@ -22,22 +22,29 @@ CREATE INDEX IF NOT EXISTS review_results_created_idx
 --
 -- Earlier schemas allowed such duplicates (two deliveries for one head, for
 -- example a reopen after a dropped close), and the index would refuse to build
--- over them. Cancel all but one job in each group first, preferring to keep a
--- job that is already running; the whole file runs as one implicit
--- transaction, and once the index exists this update finds nothing.
+-- over them. Cancel the surplus queued jobs first: a queued job has no GitHub
+-- check yet, so nothing outside the database refers to it. A running job owns
+-- an in-progress check that only a worker can close, so it is never cancelled
+-- here, and neither is a requeued job that kept its check. If two such jobs
+-- share a head the index fails to build with the duplicated key in the error,
+-- the new machine never becomes healthy so the old one keeps serving, and the
+-- deploy is retried once those jobs have finished or been recovered. The
+-- surviving job per head is the running one, else the one with a check, else
+-- the oldest. The whole file runs as one implicit transaction, and once the
+-- index exists this update finds nothing.
 UPDATE review_jobs
 SET status = 'cancelled', completed_at = NOW(), updated_at = NOW(),
     error = 'Duplicate in-flight review for the same pull request head'
 WHERE id IN (
   SELECT id FROM (
-    SELECT id, ROW_NUMBER() OVER (
+    SELECT id, status, check_run_id, ROW_NUMBER() OVER (
       PARTITION BY repository_id, pull_number, head_sha
-      ORDER BY CASE WHEN status = 'running' THEN 0 ELSE 1 END, id
+      ORDER BY status <> 'running', check_run_id IS NULL, id
     ) AS position
     FROM review_jobs
     WHERE status IN ('queued', 'running') AND event_type <> 'check_run.rerequested'
   ) ranked
-  WHERE position > 1
+  WHERE position > 1 AND status = 'queued' AND check_run_id IS NULL
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS review_jobs_inflight_head_idx

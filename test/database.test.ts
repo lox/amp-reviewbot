@@ -89,8 +89,13 @@ describe("review context persistence", () => {
     )
     assert.match(
       migration.slice(dedupe, index),
-      /ORDER BY CASE WHEN status = 'running' THEN 0 ELSE 1 END, id/,
-      "the surviving job is the one already running",
+      /WHERE position > 1 AND status = 'queued' AND check_run_id IS NULL/,
+      "only queued jobs without a GitHub check may be cancelled in SQL; nobody would close a check owned by a running or requeued job",
+    )
+    assert.match(
+      migration.slice(dedupe, index),
+      /ORDER BY status <> 'running', check_run_id IS NULL, id/,
+      "the surviving job is the running one, else the one that owns a check, else the oldest",
     )
   })
 
@@ -173,7 +178,11 @@ describe("missing review reconciliation", () => {
 
     const repositories = await database.knownRepositories()
 
-    assert.match(queries[0]!.text, /SELECT DISTINCT ON \(repository_id\)[\s\S]*ORDER BY repository_id, id DESC/)
+    assert.match(
+      queries[0]!.text,
+      /SELECT DISTINCT ON \(repository_id\)[\s\S]*WHERE event_type LIKE 'pull_request\.%'\s+ORDER BY repository_id, id DESC/,
+      "re-run and reconciled jobs copy coordinates from older rows and must not become the newest",
+    )
     assert.deepEqual(repositories, [
       { installationId: "7", repositoryId: "2", repositoryFullName: "lox/renamed" },
     ])

@@ -152,8 +152,11 @@ export class Database {
 
   /**
    * Every repository that has queued a review here, with the installation and
-   * name from its most recent job so a renamed or reinstalled repository is
-   * addressed the way GitHub last described it.
+   * name from its most recent pull request webhook so a renamed or reinstalled
+   * repository is addressed the way GitHub last described it. Only webhook
+   * jobs count: a check re-run copies its coordinates from an older job and a
+   * reconciled job copies them from this query, so either could otherwise
+   * make an obsolete installation the repository's newest row.
    */
   async knownRepositories(): Promise<KnownRepository[]> {
     const result = await this.pool.query<
@@ -161,6 +164,7 @@ export class Database {
     >(
       `SELECT DISTINCT ON (repository_id) installation_id, repository_id, repository_full_name
        FROM review_jobs
+       WHERE event_type LIKE 'pull_request.%'
        ORDER BY repository_id, id DESC`,
     )
     return result.rows.map((row) => ({
