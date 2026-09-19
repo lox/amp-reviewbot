@@ -4,36 +4,49 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
+# Same directory defaults as mise itself, so a custom MISE_DATA_DIR or
+# XDG_DATA_HOME still points the script at the shims mise actually wrote.
+mise_data_dir="${MISE_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/mise}"
+shim_dir="${MISE_SHIMS_DIR:-$mise_data_dir/shims}"
+local_bin="$HOME/.local/bin"
+
 printf 'Installing mise...\n'
 mise_bin="$(command -v mise || true)"
 if [[ -z "$mise_bin" ]]; then
-  curl https://mise.run | sh
-  mise_bin="$HOME/.local/bin/mise"
+  # Pinned so every fresh orb installs the same release; bump deliberately.
+  curl -fsSL https://mise.run | MISE_VERSION="${MISE_VERSION:-v2026.9.11}" sh
+  mise_bin="$local_bin/mise"
 fi
 
 profile_marker='# amp-reviewbot mise'
 if ! grep -Fqx "$profile_marker" "$HOME/.bash_profile" 2>/dev/null; then
-  cat >> "$HOME/.bash_profile" <<'EOF'
+  cat >> "$HOME/.bash_profile" <<EOF
 
 # amp-reviewbot mise
-export PATH="$HOME/.local/bin:$HOME/.local/share/mise/shims:$PATH"
+export PATH="$local_bin:$shim_dir:\$PATH"
 EOF
 fi
 
 printf 'Installing tool versions...\n'
 time "$mise_bin" install
+"$mise_bin" reshim
 
 # Agent shell commands run as non-login bash with a fixed PATH that includes
 # ~/.local/bin but not the mise shim directory, so ~/.bash_profile never
 # applies to them. Link the shims into ~/.local/bin so node/npm/npx resolve
 # to the mise-managed versions there too.
-shim_dir="${MISE_SHIMS_DIR:-$HOME/.local/share/mise/shims}"
-mkdir -p "$HOME/.local/bin"
+mkdir -p "$local_bin"
 for shim in node npm npx corepack; do
-  if [[ -e "$shim_dir/$shim" ]]; then
-    ln -sfn "$shim_dir/$shim" "$HOME/.local/bin/$shim"
+  if [[ ! -e "$shim_dir/$shim" ]]; then
+    printf 'mise did not create the %s shim in %s\n' "$shim" "$shim_dir" >&2
+    exit 1
   fi
 done
+if [[ "$(cd "$shim_dir" && pwd -P)" != "$(cd "$local_bin" && pwd -P)" ]]; then
+  for shim in node npm npx corepack; do
+    ln -sfn "$shim_dir/$shim" "$local_bin/$shim"
+  done
+fi
 
 printf 'Installing npm dependencies...\n'
 time "$mise_bin" exec -- npm ci
