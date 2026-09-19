@@ -265,6 +265,25 @@ export class Database {
     return result.rows.map((row) => row.thread_id)
   }
 
+  /**
+   * Threads of finished jobs whose usage was never looked up, oldest first. A
+   * worker that exits between finishing a job and reading its usage leaves
+   * these behind; the recovery loop collects them.
+   */
+  async uncollectedThreadIds(limit: number): Promise<string[]> {
+    const result = await this.pool.query<{ thread_id: string }>(
+      `SELECT review_threads.thread_id
+       FROM review_threads
+       JOIN review_jobs ON review_jobs.id = review_threads.job_id
+       WHERE review_threads.usage_collected_at IS NULL
+         AND review_jobs.status IN ('succeeded', 'failed', 'cancelled')
+       ORDER BY review_threads.created_at
+       LIMIT $1`,
+      [limit],
+    )
+    return result.rows.map((row) => row.thread_id)
+  }
+
   async setThreadUsage(threadId: string, usage: ThreadUsage): Promise<void> {
     await this.pool.query(
       `UPDATE review_threads

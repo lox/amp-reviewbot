@@ -12,6 +12,10 @@ CREATE TABLE IF NOT EXISTS review_threads (
 CREATE INDEX IF NOT EXISTS review_threads_job_idx
   ON review_threads (job_id, created_at);
 
+CREATE INDEX IF NOT EXISTS review_threads_uncollected_idx
+  ON review_threads (created_at)
+  WHERE usage_collected_at IS NULL;
+
 INSERT INTO review_threads (job_id, thread_id)
 SELECT id, amp_thread_id
 FROM review_jobs

@@ -96,6 +96,19 @@ describe("review thread usage persistence", () => {
     assert.match(queries[0]!.text, /estimated_provider_cost_at_list_price_usd/)
     assert.deepEqual(queries[0]!.values, ["T-review", 1.25, 0.75, JSON.stringify(usage)])
   })
+
+  it("lists only never-collected threads of finished jobs", async () => {
+    const queries: Array<{ text: string; values?: unknown[] }> = []
+    const database = databaseWithQueries(queries)
+
+    await database.uncollectedThreadIds(20)
+
+    const text = queries[0]!.text
+    assert.match(text, /usage_collected_at IS NULL/)
+    assert.match(text, /review_jobs\.status IN \('succeeded', 'failed', 'cancelled'\)/)
+    assert.doesNotMatch(text, /'running'/, "a running job's thread is still accruing usage")
+    assert.deepEqual(queries[0]!.values, [20])
+  })
 })
 
 describe("stale review recovery", () => {

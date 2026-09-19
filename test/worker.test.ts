@@ -3,10 +3,14 @@ import { describe, it } from "node:test"
 import type { ExecuteOptions, StreamMessage } from "@ampcode/sdk"
 import pino from "pino"
 import { reviewMode } from "../src/amp.js"
+import type { Database } from "../src/database.js"
+import type { GitHubClient } from "../src/github.js"
+import type { ThreadUsage } from "../src/thread-usage.js"
 import {
   executeReviewWithRetries,
   isAmpCancellationError,
   isTransientAmpError,
+  ReviewWorkers,
 } from "../src/worker.js"
 
 const validResult = JSON.stringify({ summary: "Review complete", findings: [] })
@@ -236,6 +240,79 @@ describe("executeReviewWithRetries", () => {
       /Failed to persist Amp thread/,
     )
     assert.equal(fake.calls.length, 1)
+  })
+})
+
+describe("usage collection for finished reviews", () => {
+  const usage: ThreadUsage = {
+    costUsd: 0.5,
+    inputTokens: 10,
+    outputTokens: 5,
+    requests: 1,
+    subscriptionUsed: false,
+  }
+
+  function workersWith(uncollected: string[], lookups: Record<string, { usage: ThreadUsage } | { unavailable: string }>) {
+    const stored: Array<{ threadId: string; usage?: ThreadUsage; error?: string }> = []
+    const requests: number[] = []
+    const database = {
+      async uncollectedThreadIds(limit: number) {
+        requests.push(limit)
+        return uncollected
+      },
+      async setThreadUsage(threadId: string, collected: ThreadUsage) {
+        stored.push({ threadId, usage: collected })
+      },
+      async setThreadUsageError(threadId: string, error: string) {
+        stored.push({ threadId, error })
+      },
+    } as unknown as Database
+    const looked: string[] = []
+    const workers = new ReviewWorkers(
+      { workerConcurrency: 1, reviewTimeoutMs: 1 } as never,
+      database,
+      {} as GitHubClient,
+      pino({ level: "silent" }),
+      async (threadId) => {
+        looked.push(threadId)
+        return lookups[threadId] ?? { unavailable: "not stubbed" }
+      },
+    )
+    return { workers, stored, looked, requests }
+  }
+
+  it("stores usage for threads an interrupted worker left behind and records lookups that fail", async () => {
+    const { workers, stored, looked, requests } = workersWith(["T-done", "T-gone"], {
+      "T-done": { usage },
+      "T-gone": { unavailable: "Usage information is currently unavailable for this thread" },
+    })
+
+    await (workers as unknown as { collectUncollectedUsage(): Promise<void> }).collectUncollectedUsage()
+
+    assert.deepEqual(requests, [20], "one bounded batch per recovery pass")
+    assert.deepEqual(looked, ["T-done", "T-gone"])
+    assert.deepEqual(stored, [
+      { threadId: "T-done", usage },
+      { threadId: "T-gone", error: "Usage information is currently unavailable for this thread" },
+    ])
+  })
+
+  it("does nothing when every finished thread already has usage", async () => {
+    const { workers, stored, looked } = workersWith([], {})
+
+    await (workers as unknown as { collectUncollectedUsage(): Promise<void> }).collectUncollectedUsage()
+
+    assert.deepEqual(looked, [])
+    assert.deepEqual(stored, [])
+  })
+
+  it("stops collecting once the service is shutting down", async () => {
+    const { workers, stored } = workersWith(["T-1", "T-2"], { "T-1": { usage }, "T-2": { usage } })
+    await workers.stop()
+
+    await (workers as unknown as { collectUncollectedUsage(): Promise<void> }).collectUncollectedUsage()
+
+    assert.deepEqual(stored, [], "a stopping worker leaves the backlog for the next process")
   })
 })
 

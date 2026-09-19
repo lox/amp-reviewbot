@@ -16,6 +16,7 @@ const execFileAsync = promisify(execFile)
 const ampRetryDelaysMs = [5_000, 20_000]
 const staleRecoveryIntervalMs = 60_000
 const maxJobAttempts = 3
+const uncollectedUsageBatchSize = 20
 const defaultRetryPrompt =
   "Complete the review if necessary, then return only the final review JSON in the required schema."
 
@@ -202,6 +203,7 @@ export class ReviewWorkers {
     private readonly database: Database,
     private readonly github: GitHubClient,
     private readonly logger: Logger,
+    private readonly readUsage: typeof readThreadUsage = readThreadUsage,
   ) {}
 
   start(): void {
@@ -245,6 +247,12 @@ export class ReviewWorkers {
         }
       } catch (error) {
         this.logger.error({ err: error }, "stale review recovery failed")
+      }
+
+      try {
+        await this.collectUncollectedUsage()
+      } catch (error) {
+        this.logger.error({ err: error }, "usage collection for finished reviews failed")
       }
 
       try {
@@ -412,33 +420,53 @@ export class ReviewWorkers {
         } catch (error) {
           log.warn({ err: error, threadId }, "failed to archive Amp review thread")
         }
-        try {
-          const lookup = await readThreadUsage(threadId)
-          if (!("usage" in lookup)) throw new Error(lookup.unavailable)
-          await this.database.setThreadUsage(threadId, lookup.usage)
-          log.info(
-            {
-              threadId,
-              ampUsageUsd: lookup.usage.costUsd,
-              estimatedProviderCostAtListPriceUsd:
-                lookup.usage.estimatedProviderCostAtListPriceUsd,
-            },
-            "Amp review usage collected",
-          )
-        } catch (error) {
-          const reason = errorMessage(error)
-          log.warn({ err: error, threadId }, "failed to collect Amp review usage")
-          try {
-            await this.database.setThreadUsageError(threadId, reason)
-          } catch (databaseError) {
-            log.warn(
-              { err: databaseError, threadId },
-              "failed to persist Amp review usage error",
-            )
-          }
-        }
+        await this.collectThreadUsage(threadId, log)
       }
       this.active.delete(controller)
+    }
+  }
+
+  /**
+   * Looks up and stores what Amp billed for one review thread. A failed lookup
+   * is stored as the error so the thread is not retried forever; a failure to
+   * store anything leaves the row for the recovery loop to pick up.
+   */
+  private async collectThreadUsage(threadId: string, log: Logger): Promise<void> {
+    try {
+      const lookup = await this.readUsage(threadId)
+      if (!("usage" in lookup)) throw new Error(lookup.unavailable)
+      await this.database.setThreadUsage(threadId, lookup.usage)
+      log.info(
+        {
+          threadId,
+          ampUsageUsd: lookup.usage.costUsd,
+          estimatedProviderCostAtListPriceUsd: lookup.usage.estimatedProviderCostAtListPriceUsd,
+        },
+        "Amp review usage collected",
+      )
+    } catch (error) {
+      const reason = errorMessage(error)
+      log.warn({ err: error, threadId }, "failed to collect Amp review usage")
+      try {
+        await this.database.setThreadUsageError(threadId, reason)
+      } catch (databaseError) {
+        log.warn({ err: databaseError, threadId }, "failed to persist Amp review usage error")
+      }
+    }
+  }
+
+  /**
+   * Collects usage for threads whose job finished without a usage lookup, for
+   * example because the worker exited between finishing the job and reading
+   * its usage. Bounded per pass so one backlog cannot stall stale-job recovery.
+   */
+  private async collectUncollectedUsage(): Promise<void> {
+    const threadIds = await this.database.uncollectedThreadIds(uncollectedUsageBatchSize)
+    if (threadIds.length === 0) return
+    this.logger.warn({ threads: threadIds.length }, "collecting Amp review usage left by an interrupted worker")
+    for (const threadId of threadIds) {
+      if (this.stopping) return
+      await this.collectThreadUsage(threadId, this.logger)
     }
   }
 }
