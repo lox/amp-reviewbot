@@ -1,7 +1,8 @@
 import { App } from "octokit"
 import type { Config } from "./config.js"
+import type { KnownRepository } from "./database.js"
 import type { ReviewFinding, ReviewJob, ReviewResult, Severity } from "./types.js"
-import { finalizeReview, isBlockingSeverity } from "./review.js"
+import { finalizeReview, type FinalizedReview } from "./review.js"
 
 const annotationLevel: Record<Severity, "failure" | "warning" | "notice"> = {
   critical: "failure",
@@ -15,6 +16,11 @@ const severityLabel: Record<Severity, string> = {
   high: "High",
   medium: "Medium",
   low: "Low",
+}
+
+export type OpenPullRequest = Pick<ReviewJob, "pullNumber" | "baseSha" | "headSha"> & {
+  updatedAt: Date
+  pullRequestContext: NonNullable<ReviewJob["pullRequestContext"]>
 }
 
 export class GitHubClient {
@@ -64,10 +70,38 @@ export class GitHubClient {
     })
   }
 
-  async currentHead(job: ReviewJob): Promise<string> {
+  /** The open, non-draft pull requests of one repository. */
+  async openPullRequests(repository: KnownRepository): Promise<OpenPullRequest[]> {
+    const { owner, repo } = splitRepository(repository.repositoryFullName)
+    const octokit = await this.app.getInstallationOctokit(Number(repository.installationId))
+    const open = await octokit.paginate(octokit.rest.pulls.list, {
+      owner,
+      repo,
+      state: "open",
+      per_page: 100,
+    })
+    return open
+      .filter((pull) => !pull.draft)
+      .map((pull) => ({
+        pullNumber: pull.number,
+        baseSha: pull.base.sha,
+        headSha: pull.head.sha,
+        updatedAt: new Date(pull.updated_at),
+        pullRequestContext: {
+          title: pull.title,
+          body: pull.body,
+          baseRef: pull.base.ref,
+          headRef: pull.head.ref,
+        },
+      }))
+  }
+
+  /** The head a review of this pull request should target now, or null once it is closed or a draft. */
+  async currentHead(job: ReviewJob): Promise<string | null> {
     const { owner, repo } = splitRepository(job.repositoryFullName)
     const octokit = await this.app.getInstallationOctokit(Number(job.installationId))
     const response = await octokit.rest.pulls.get({ owner, repo, pull_number: job.pullNumber })
+    if (response.data.state !== "open" || response.data.draft) return null
     return response.data.head.sha
   }
 
@@ -90,15 +124,12 @@ export class GitHubClient {
     checkRunId: string,
     result: ReviewResult,
     changedLines: Map<string, Set<number>>,
-  ): Promise<void> {
+  ): Promise<FinalizedReview> {
     const { owner, repo } = splitRepository(job.repositoryFullName)
     const octokit = await this.app.getInstallationOctokit(Number(job.installationId))
     const finalized = finalizeReview(result, changedLines, this.config.failOn)
     const findings = finalized.result.findings
-    const blocking = findings.filter((finding) =>
-      isBlockingSeverity(finding.severity, this.config.failOn),
-    ).length
-    const title = checkTitle(blocking, findings.length - blocking)
+    const title = checkTitle(finalized.blocking, findings.length - finalized.blocking)
     const summary = [
       finalized.omitted === 0 ? result.summary : "",
       finalized.omitted > 0
@@ -139,6 +170,7 @@ export class GitHubClient {
         }),
       },
     })
+    return finalized
   }
 
   async cancelCheck(job: ReviewJob, checkRunId: string, reason: string): Promise<void> {

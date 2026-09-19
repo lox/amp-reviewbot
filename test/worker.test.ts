@@ -3,9 +3,10 @@ import { describe, it } from "node:test"
 import type { ExecuteOptions, StreamMessage } from "@ampcode/sdk"
 import pino from "pino"
 import { reviewMode } from "../src/amp.js"
-import type { Database } from "../src/database.js"
-import type { GitHubClient } from "../src/github.js"
+import type { Database, KnownRepository, NewReviewJob } from "../src/database.js"
+import type { GitHubClient, OpenPullRequest } from "../src/github.js"
 import type { ThreadUsage } from "../src/thread-usage.js"
+import type { ReviewJob } from "../src/types.js"
 import {
   executeReviewWithRetries,
   isAmpCancellationError,
@@ -331,6 +332,218 @@ describe("usage collection for finished reviews", () => {
     await (workers as unknown as { collectUncollectedUsage(): Promise<void> }).collectUncollectedUsage()
 
     assert.deepEqual(stored, [], "a stopping worker leaves the backlog for the next process")
+  })
+})
+
+describe("missing review reconciliation", () => {
+  const minute = 60_000
+  const now = Date.parse("2026-09-19T12:00:00Z")
+  const example: KnownRepository = { installationId: "1", repositoryId: "2", repositoryFullName: "lox/example" }
+  const other: KnownRepository = { installationId: "1", repositoryId: "9", repositoryFullName: "lox/other" }
+
+  function pull(overrides: Partial<OpenPullRequest> & { pullNumber: number }): OpenPullRequest {
+    return {
+      baseSha: "base",
+      headSha: `head-${overrides.pullNumber}`,
+      updatedAt: new Date(now - 30 * minute),
+      pullRequestContext: { title: "Change", body: null, baseRef: "main", headRef: "topic" },
+      ...overrides,
+    }
+  }
+
+  function workersWith(
+    repositories: KnownRepository[],
+    pullsFor: (repository: KnownRepository) => Promise<OpenPullRequest[]>,
+  ) {
+    const enqueued: NewReviewJob[] = []
+    const listed: string[] = []
+    const database = {
+      async knownRepositories() {
+        return repositories
+      },
+      async enqueueMissing(input: NewReviewJob) {
+        enqueued.push(input)
+        return { ...input, id: String(enqueued.length), checkRunId: null, ampThreadId: null, status: "queued", attempts: 0 }
+      },
+    } as unknown as Database
+    const github = {
+      async openPullRequests(repository: KnownRepository) {
+        listed.push(repository.repositoryFullName)
+        return pullsFor(repository)
+      },
+    } as unknown as GitHubClient
+    const workers = new ReviewWorkers(
+      { workerConcurrency: 1, reviewTimeoutMs: 1, failOn: "high", ampProjects: { "lox/example": "lox/example-project" } } as never,
+      database,
+      github,
+      pino({ level: "silent" }),
+      async () => ({ unavailable: "not used" }),
+    )
+    const reconcile = () =>
+      (workers as unknown as { reconcileMissingReviews(now: () => number): Promise<void> }).reconcileMissingReviews(
+        () => now,
+      )
+    return { reconcile, enqueued, listed }
+  }
+
+  it("queues heads old enough to have missed their webhook but not stale, from the repository's last known coordinates", async () => {
+    const { reconcile, enqueued } = workersWith([example], async () => [
+      pull({ pullNumber: 1 }),
+      pull({ pullNumber: 2, updatedAt: new Date(now - 4 * minute) }),
+      pull({ pullNumber: 3, updatedAt: new Date(now - 8 * 24 * 60 * minute) }),
+    ])
+
+    await reconcile()
+
+    assert.deepEqual(
+      enqueued.map((job) => job.pullNumber),
+      [1],
+      "a fresh push may still have its webhook in flight; a week-old head predates the gap",
+    )
+    const job = enqueued[0]!
+    assert.equal(job.sourceDeliveryId, "reconcile:2:1:head-1")
+    assert.equal(job.eventType, "reconcile.missing_review")
+    assert.deepEqual(
+      [job.installationId, job.repositoryId, job.repositoryFullName, job.ampProject],
+      ["1", "2", "lox/example", "lox/example-project"],
+    )
+    assert.deepEqual(job.pullRequestContext, { title: "Change", body: null, baseRef: "main", headRef: "topic" })
+  })
+
+  it("queues at most ten reviews per pass", async () => {
+    const { reconcile, enqueued } = workersWith([example], async () =>
+      Array.from({ length: 12 }, (_, index) => pull({ pullNumber: index + 1 })),
+    )
+
+    await reconcile()
+
+    assert.equal(enqueued.length, 10)
+  })
+
+  it("skips a repository it can no longer list and continues with the rest", async () => {
+    const { reconcile, enqueued, listed } = workersWith([other, example], async (repository) => {
+      if (repository === other) throw new Error("installation suspended")
+      return [pull({ pullNumber: 1 })]
+    })
+
+    await reconcile()
+
+    assert.deepEqual(listed, ["lox/other", "lox/example"])
+    assert.deepEqual(enqueued.map((job) => job.repositoryFullName), ["lox/example"])
+  })
+
+  it("does not list anything before any repository has sent a webhook", async () => {
+    const { reconcile, enqueued, listed } = workersWith([], async () => [pull({ pullNumber: 1 })])
+
+    await reconcile()
+
+    assert.deepEqual(listed, [])
+    assert.deepEqual(enqueued, [])
+  })
+})
+
+describe("orphaned duplicate check cleanup", () => {
+  function duplicate(id: string, checkRunId: string): ReviewJob {
+    return {
+      id,
+      sourceDeliveryId: `delivery-${id}`,
+      eventType: "pull_request.synchronize",
+      installationId: "1",
+      repositoryId: "2",
+      repositoryFullName: "lox/example",
+      pullNumber: 7,
+      baseSha: "base",
+      headSha: "head",
+      ampProject: "lox/example",
+      pullRequestContext: null,
+      checkRunId,
+      ampThreadId: null,
+      status: "cancelled",
+      attempts: 1,
+    }
+  }
+
+  function workersWith(orphaned: ReviewJob[], options: { failCheckFor?: string[] } = {}) {
+    const marked: string[] = []
+    const cancelled: Array<{ jobId: string; checkRunId: string; reason: string }> = []
+    const database = {
+      async orphanedDuplicateChecks() {
+        return orphaned
+      },
+      async markDuplicateCheckClosed(jobId: string) {
+        marked.push(jobId)
+      },
+    } as unknown as Database
+    const github = {
+      async cancelCheck(job: ReviewJob, checkRunId: string, reason: string) {
+        if (options.failCheckFor?.includes(checkRunId)) throw new Error("GitHub unavailable")
+        cancelled.push({ jobId: job.id, checkRunId, reason })
+      },
+    } as unknown as GitHubClient
+    const workers = new ReviewWorkers(
+      { workerConcurrency: 1, reviewTimeoutMs: 1, failOn: "high" } as never,
+      database,
+      github,
+      pino({ level: "silent" }),
+      async () => ({ unavailable: "not used" }),
+    )
+    const close = () =>
+      (workers as unknown as { closeOrphanedDuplicateChecks(): Promise<void> }).closeOrphanedDuplicateChecks()
+    return { close, cancelled, marked }
+  }
+
+  it("closes the check of each duplicate the migration cancelled, then marks the job so it is not revisited", async () => {
+    const { close, cancelled, marked } = workersWith([duplicate("10", "100"), duplicate("11", "110")])
+
+    await close()
+
+    assert.deepEqual(cancelled.map((call) => call.checkRunId), ["100", "110"])
+    assert.match(cancelled[0]!.reason, /duplicate review for this revision/)
+    assert.deepEqual(marked, ["10", "11"])
+  })
+
+  it("leaves a job unmarked when GitHub rejects the cancellation so the next pass retries it", async () => {
+    const { close, cancelled, marked } = workersWith([duplicate("10", "100"), duplicate("11", "110")], {
+      failCheckFor: ["100"],
+    })
+
+    await close()
+
+    assert.deepEqual(cancelled.map((call) => call.checkRunId), ["110"])
+    assert.deepEqual(marked, ["11"], "only a closed check is recorded as closed")
+  })
+})
+
+describe("stale job detection", () => {
+  const job = {
+    id: "1",
+    repositoryFullName: "lox/example",
+    pullNumber: 1,
+    headSha: "head-1",
+  } as ReviewJob
+
+  function staleReason(currentHead: string | null) {
+    const workers = new ReviewWorkers(
+      { workerConcurrency: 1, reviewTimeoutMs: 1, failOn: "high", ampProjects: {} } as never,
+      {} as Database,
+      { currentHead: async () => currentHead } as unknown as GitHubClient,
+      pino({ level: "silent" }),
+      async () => ({ unavailable: "not used" }),
+    )
+    return (
+      workers as unknown as {
+        staleReason(job: ReviewJob): Promise<{ check: string; job: string } | null>
+      }
+    ).staleReason(job)
+  }
+
+  it("lets a job whose head is still current proceed", async () => {
+    assert.equal(await staleReason("head-1"), null)
+  })
+
+  it("cancels for a newer head, and separately for a closed or draft pull request", async () => {
+    assert.equal((await staleReason("head-2"))?.check, "A newer pull request revision is available.")
+    assert.equal((await staleReason(null))?.check, "The pull request is closed or a draft.")
   })
 })
 

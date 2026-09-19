@@ -62,9 +62,170 @@ describe("review context persistence", () => {
 
     await database.migrate()
 
-    assert.equal(queries.length, 3)
+    assert.equal(queries.length, 4)
     assert.match(queries[1]!, /ADD COLUMN IF NOT EXISTS pull_request_title/)
     assert.match(queries[2]!, /CREATE TABLE IF NOT EXISTS review_threads/)
+    assert.match(queries[3]!, /CREATE TABLE IF NOT EXISTS review_results/)
+  })
+
+  it("allows one in-flight job per head, except for check re-runs", async () => {
+    const queries: string[] = []
+    const database = Object.create(Database.prototype) as Database
+    Object.defineProperty(database, "pool", {
+      value: { query: async (text: string) => queries.push(text) },
+    })
+
+    await database.migrate()
+
+    const migration = queries[3]!
+    const dedupe = migration.search(/UPDATE review_jobs\s+SET status = 'cancelled'/)
+    const index = migration.search(
+      /CREATE UNIQUE INDEX IF NOT EXISTS review_jobs_inflight_head_idx\s+ON review_jobs \(repository_id, pull_number, head_sha\)\s+WHERE status IN \('queued', 'running'\) AND event_type <> 'check_run.rerequested'/,
+    )
+    assert.ok(index > 0)
+    assert.ok(
+      dedupe > 0 && dedupe < index,
+      "duplicates the old schema allowed must be cancelled before the index is built, or startup fails",
+    )
+    assert.match(
+      migration.slice(dedupe, index),
+      /WHERE status IN \('queued', 'running'\) AND event_type <> 'check_run.rerequested'\s+\) ranked\s+WHERE position > 1\s+\)/,
+      "every surplus duplicate is cancelled, running ones included, so startup never depends on historical rows",
+    )
+    assert.match(
+      migration.slice(dedupe, index),
+      /error = 'Duplicate in-flight review for the same pull request head'/,
+      "the worker finds cancelled duplicates that still own a check by this text",
+    )
+    assert.match(
+      migration.slice(dedupe, index),
+      /ORDER BY status <> 'running', check_run_id IS NULL, id/,
+      "the surviving job is the running one, else the one that owns a check, else the oldest",
+    )
+  })
+
+  it("treats a head that is already in flight like a redelivered webhook", async () => {
+    const queries: Array<{ text: string; values?: unknown[] }> = []
+    const database = databaseWithQueries(queries)
+
+    await database.enqueue({
+      sourceDeliveryId: "delivery-3",
+      eventType: "pull_request.synchronize",
+      installationId: "1",
+      repositoryId: "2",
+      repositoryFullName: "lox/example",
+      pullNumber: 42,
+      baseSha: "base-sha",
+      headSha: "head-sha",
+      ampProject: "lox/example",
+      pullRequestContext: null,
+    })
+
+    // A targeted clause would raise on the in-flight index instead of
+    // absorbing it, and the webhook handler would report an error for a head
+    // the reconciler had already queued.
+    assert.match(queries[0]!.text, /ON CONFLICT DO NOTHING/)
+    assert.doesNotMatch(queries[0]!.text, /ON CONFLICT \(source_delivery_id\)/)
+  })
+})
+
+describe("missing review reconciliation", () => {
+  const input: NewReviewJob = {
+    sourceDeliveryId: "reconcile:2:42:head-sha",
+    eventType: "reconcile.missing_review",
+    installationId: "1",
+    repositoryId: "2",
+    repositoryFullName: "lox/example",
+    pullNumber: 42,
+    baseSha: "base-sha",
+    headSha: "head-sha",
+    ampProject: "lox/example",
+    pullRequestContext: { title: "Example change", body: null, baseRef: "main", headRef: "example-change" },
+  }
+
+  it("inserts only when no job exists for the same repository, pull, and head", async () => {
+    const queries: Array<{ text: string; values?: unknown[] }> = []
+    const database = databaseWithQueries(queries)
+
+    const job = await database.enqueueMissing(input)
+
+    const insert = queries[0]!
+    assert.match(insert.text, /WHERE NOT EXISTS \(\s*SELECT 1 FROM review_jobs WHERE repository_id = \$4 AND pull_number = \$6 AND head_sha = \$8/)
+    assert.deepEqual([insert.values![3], insert.values![5], insert.values![7]], ["2", 42, "head-sha"])
+    assert.equal(job?.id, "1")
+    assert.equal(
+      queries.length,
+      1,
+      "a reconciled head never supersedes other heads: its listing may predate a newer push whose job must survive",
+    )
+  })
+
+  it("returns null when the insert found an existing job", async () => {
+    const database = Object.create(Database.prototype) as Database
+    Object.defineProperty(database, "pool", { value: { query: async () => ({ rows: [] }) } })
+
+    assert.equal(await database.enqueueMissing(input), null)
+  })
+
+  it("describes each known repository by its most recent job", async () => {
+    const queries: Array<{ text: string; values?: unknown[] }> = []
+    const database = Object.create(Database.prototype) as Database
+    Object.defineProperty(database, "pool", {
+      value: {
+        async query(text: string, values?: unknown[]) {
+          queries.push({ text, ...(values ? { values } : {}) })
+          return {
+            rows: [{ installation_id: "7", repository_id: "2", repository_full_name: "lox/renamed" }],
+          }
+        },
+      },
+    })
+
+    const repositories = await database.knownRepositories()
+
+    assert.match(
+      queries[0]!.text,
+      /SELECT DISTINCT ON \(repository_id\)[\s\S]*WHERE event_type LIKE 'pull_request\.%'\s+ORDER BY repository_id, id DESC/,
+      "re-run and reconciled jobs copy coordinates from older rows and must not become the newest",
+    )
+    assert.deepEqual(repositories, [
+      { installationId: "7", repositoryId: "2", repositoryFullName: "lox/renamed" },
+    ])
+  })
+})
+
+describe("review result persistence", () => {
+  it("stores the finalized conclusion, counts, and retained findings", async () => {
+    const queries: Array<{ text: string; values?: unknown[] }> = []
+    const database = databaseWithQueries(queries)
+    const finding = {
+      severity: "high" as const,
+      title: "Lost write",
+      message: "The write is dropped.",
+      suggestion: "Keep it.",
+      path: "src/a.ts",
+      startLine: 3,
+    }
+    const advisory = { ...finding, severity: "medium" as const, title: "Naming" }
+
+    await database.setResult(
+      "7",
+      { result: { summary: "One blocker.", findings: [finding, advisory] }, omitted: 2, blocking: 1, conclusion: "failure" },
+      { failOn: "high", promptIdentifier: "current@abc123def456" },
+    )
+
+    assert.match(queries[0]!.text, /INSERT INTO review_results/)
+    assert.deepEqual(queries[0]!.values!.slice(0, 8), [
+      "7",
+      "failure",
+      "high",
+      "current@abc123def456",
+      "One blocker.",
+      1,
+      1,
+      2,
+    ])
+    assert.deepEqual(JSON.parse(queries[0]!.values![8] as string), [finding, advisory])
   })
 })
 

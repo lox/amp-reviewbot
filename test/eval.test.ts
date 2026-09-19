@@ -951,7 +951,9 @@ describe("eval example packs", () => {
 
     assert.doesNotMatch(beforeGuide.build(job), /Severity is about what happens/)
     assert.match(current.build(job), /Severity is about what happens/)
-    assert.match(current.identifier, /^current@[0-9a-f]{12}$/)
+    // docs/eval-experiments.md keys every recorded result to this identifier;
+    // an intentional prompt change must update both.
+    assert.equal(current.identifier, "current@da7f479098f7")
   })
 
   it("allows public research but flags access to the target source", () => {

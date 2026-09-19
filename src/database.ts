@@ -2,8 +2,9 @@ import { readFile } from "node:fs/promises"
 import { resolve } from "node:path"
 import { Pool, type PoolClient } from "pg"
 import type { Config } from "./config.js"
+import type { FinalizedReview } from "./review.js"
 import type { ThreadUsage } from "./thread-usage.js"
-import type { JobStatus, ReviewJob } from "./types.js"
+import type { JobStatus, ReviewJob, Severity } from "./types.js"
 
 type JobRow = {
   id: string
@@ -33,10 +34,18 @@ export type NewReviewJob = Omit<
   checkRunId?: string
 }
 
+export type KnownRepository = Pick<
+  ReviewJob,
+  "installationId" | "repositoryId" | "repositoryFullName"
+>
+
 export type StaleJobRecovery = {
   requeued: number
   exhausted: ReviewJob[]
 }
+
+/** Error text migration 004 writes on the duplicates it cancels; keep in sync. */
+const duplicateInFlightError = "Duplicate in-flight review for the same pull request head"
 
 function mapJob(row: JobRow): ReviewJob {
   return {
@@ -78,7 +87,12 @@ export class Database {
   }
 
   async migrate(): Promise<void> {
-    for (const file of ["001_initial.sql", "002_review_context.sql", "003_review_threads.sql"]) {
+    for (const file of [
+      "001_initial.sql",
+      "002_review_context.sql",
+      "003_review_threads.sql",
+      "004_review_results.sql",
+    ]) {
       const sql = await readFile(resolve("migrations", file), "utf8")
       await this.pool.query(sql)
     }
@@ -92,6 +106,12 @@ export class Database {
     await this.pool.query("SELECT 1")
   }
 
+  /**
+   * Returns null for a redelivered webhook and for a head that already has a
+   * queued or running job, which the reconciler may have created first; the
+   * partial unique index in migration 004 enforces the latter so a late
+   * delivery cannot race a reconciliation pass into a second review.
+   */
   async enqueue(input: NewReviewJob): Promise<ReviewJob | null> {
     const result = await this.pool.query<JobRow>(
       `INSERT INTO review_jobs (
@@ -99,7 +119,7 @@ export class Database {
          repository_full_name, pull_number, base_sha, head_sha, amp_project,
          pull_request_title, pull_request_body, base_ref, head_ref, check_run_id
        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-       ON CONFLICT (source_delivery_id) DO NOTHING
+       ON CONFLICT DO NOTHING
        RETURNING *`,
       [
         input.sourceDeliveryId,
@@ -131,6 +151,75 @@ export class Database {
     )
 
     return mapJob(row)
+  }
+
+  /**
+   * Every repository that has queued a review here, with the installation and
+   * name from its most recent pull request webhook so a renamed or reinstalled
+   * repository is addressed the way GitHub last described it. Only webhook
+   * jobs count: a check re-run copies its coordinates from an older job and a
+   * reconciled job copies them from this query, so either could otherwise
+   * make an obsolete installation the repository's newest row.
+   */
+  async knownRepositories(): Promise<KnownRepository[]> {
+    const result = await this.pool.query<
+      Pick<JobRow, "installation_id" | "repository_id" | "repository_full_name">
+    >(
+      `SELECT DISTINCT ON (repository_id) installation_id, repository_id, repository_full_name
+       FROM review_jobs
+       WHERE event_type LIKE 'pull_request.%'
+       ORDER BY repository_id, id DESC`,
+    )
+    return result.rows.map((row) => ({
+      installationId: String(row.installation_id),
+      repositoryId: String(row.repository_id),
+      repositoryFullName: row.repository_full_name,
+    }))
+  }
+
+  /**
+   * Queues a review for a pull request head that has no job at all, for
+   * example because GitHub delivered its webhook while the service was
+   * restarting. A head that already has any job, whatever its status, is left
+   * alone: the existence check covers completed jobs, and the in-flight unique
+   * index covers a webhook or pass that inserts concurrently, since this check
+   * only sees committed rows. Unlike a webhook, this never supersedes other
+   * heads: the listing it came from may be stale, and cancelling a newer
+   * head's job would leave that head without a review for good. A stale
+   * reconciled job cancels itself when the worker compares it with the
+   * current head.
+   */
+  async enqueueMissing(input: NewReviewJob): Promise<ReviewJob | null> {
+    const result = await this.pool.query<JobRow>(
+      `INSERT INTO review_jobs (
+         source_delivery_id, event_type, installation_id, repository_id,
+         repository_full_name, pull_number, base_sha, head_sha, amp_project,
+         pull_request_title, pull_request_body, base_ref, head_ref
+       )
+       SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
+       WHERE NOT EXISTS (
+         SELECT 1 FROM review_jobs WHERE repository_id = $4 AND pull_number = $6 AND head_sha = $8
+       )
+       ON CONFLICT DO NOTHING
+       RETURNING *`,
+      [
+        input.sourceDeliveryId,
+        input.eventType,
+        input.installationId,
+        input.repositoryId,
+        input.repositoryFullName,
+        input.pullNumber,
+        input.baseSha,
+        input.headSha,
+        input.ampProject,
+        input.pullRequestContext?.title ?? null,
+        input.pullRequestContext?.body ?? null,
+        input.pullRequestContext?.baseRef ?? null,
+        input.pullRequestContext?.headRef ?? null,
+      ],
+    )
+    const row = result.rows[0]
+    return row ? mapJob(row) : null
   }
 
   async enqueueRerun(
@@ -236,6 +325,28 @@ export class Database {
     }
   }
 
+  /**
+   * Duplicates cancelled by migration 004 that owned a GitHub check when they
+   * were cancelled. Nothing else ever refers to such a check, so the recovery
+   * loop closes it and then calls `markDuplicateCheckClosed`.
+   */
+  async orphanedDuplicateChecks(): Promise<ReviewJob[]> {
+    const result = await this.pool.query<JobRow>(
+      `SELECT * FROM review_jobs
+       WHERE status = 'cancelled' AND check_run_id IS NOT NULL AND error = $1
+       ORDER BY id`,
+      [duplicateInFlightError],
+    )
+    return result.rows.map(mapJob)
+  }
+
+  async markDuplicateCheckClosed(jobId: string): Promise<void> {
+    await this.pool.query(
+      "UPDATE review_jobs SET error = $2, updated_at = NOW() WHERE id = $1",
+      [jobId, `${duplicateInFlightError}; check closed`],
+    )
+  }
+
   async setCheckRun(jobId: string, checkRunId: string): Promise<void> {
     await this.pool.query(
       "UPDATE review_jobs SET check_run_id = $2, updated_at = NOW() WHERE id = $1",
@@ -308,6 +419,44 @@ export class Database {
        SET usage_error = $2, usage_collected_at = NOW()
        WHERE thread_id = $1 AND usage_details IS NULL`,
       [threadId, error],
+    )
+  }
+
+  /**
+   * Records what a completed review reported, after changed-line filtering,
+   * so block rates and finding severities can be queried without opening
+   * GitHub checks or Amp threads.
+   */
+  async setResult(
+    jobId: string,
+    review: FinalizedReview,
+    context: { failOn: Severity; promptIdentifier: string },
+  ): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO review_results (
+         job_id, conclusion, fail_on, prompt_identifier, summary,
+         blocking_findings, advisory_findings, omitted_findings, findings
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       ON CONFLICT (job_id) DO UPDATE SET
+         conclusion = EXCLUDED.conclusion,
+         fail_on = EXCLUDED.fail_on,
+         prompt_identifier = EXCLUDED.prompt_identifier,
+         summary = EXCLUDED.summary,
+         blocking_findings = EXCLUDED.blocking_findings,
+         advisory_findings = EXCLUDED.advisory_findings,
+         omitted_findings = EXCLUDED.omitted_findings,
+         findings = EXCLUDED.findings`,
+      [
+        jobId,
+        review.conclusion,
+        context.failOn,
+        context.promptIdentifier,
+        review.result.summary,
+        review.blocking,
+        review.result.findings.length - review.blocking,
+        review.omitted,
+        JSON.stringify(review.result.findings),
+      ],
     )
   }
 
