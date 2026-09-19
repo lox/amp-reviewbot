@@ -252,7 +252,11 @@ describe("usage collection for finished reviews", () => {
     subscriptionUsed: false,
   }
 
-  function workersWith(uncollected: string[], lookups: Record<string, { usage: ThreadUsage } | { unavailable: string }>) {
+  function workersWith(
+    uncollected: string[],
+    lookups: Record<string, { usage: ThreadUsage } | { unavailable: string }>,
+    options: { failWritesFor?: string[] } = {},
+  ) {
     const stored: Array<{ threadId: string; usage?: ThreadUsage; error?: string }> = []
     const requests: number[] = []
     const database = {
@@ -261,6 +265,7 @@ describe("usage collection for finished reviews", () => {
         return uncollected
       },
       async setThreadUsage(threadId: string, collected: ThreadUsage) {
+        if (options.failWritesFor?.includes(threadId)) throw new Error("connection terminated unexpectedly")
         stored.push({ threadId, usage: collected })
       },
       async setThreadUsageError(threadId: string, error: string) {
@@ -295,6 +300,19 @@ describe("usage collection for finished reviews", () => {
       { threadId: "T-done", usage },
       { threadId: "T-gone", error: "Usage information is currently unavailable for this thread" },
     ])
+  })
+
+  it("leaves a thread uncollected when storing valid usage fails, so it is retried instead of recorded as an error", async () => {
+    const { workers, stored, looked } = workersWith(
+      ["T-flaky", "T-fine"],
+      { "T-flaky": { usage }, "T-fine": { usage } },
+      { failWritesFor: ["T-flaky"] },
+    )
+
+    await (workers as unknown as { collectUncollectedUsage(): Promise<void> }).collectUncollectedUsage()
+
+    assert.deepEqual(looked, ["T-flaky", "T-fine"], "one failed write does not stop the batch")
+    assert.deepEqual(stored, [{ threadId: "T-fine", usage }], "no usage_error row masks the valid usage")
   })
 
   it("does nothing when every finished thread already has usage", async () => {

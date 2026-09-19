@@ -9,7 +9,7 @@ import type { Config } from "./config.js"
 import { Database } from "./database.js"
 import { GitHubClient } from "./github.js"
 import { buildReviewPrompt, parseReviewResult, reviewThreadTitle } from "./review.js"
-import { readThreadUsage } from "./thread-usage.js"
+import { readThreadUsage, type ThreadUsageLookup } from "./thread-usage.js"
 import type { ReviewJob } from "./types.js"
 
 const execFileAsync = promisify(execFile)
@@ -17,6 +17,7 @@ const ampRetryDelaysMs = [5_000, 20_000]
 const staleRecoveryIntervalMs = 60_000
 const maxJobAttempts = 3
 const uncollectedUsageBatchSize = 20
+const usageCollectionIntervalMs = 60_000
 const defaultRetryPrompt =
   "Complete the review if necessary, then return only the final review JSON in the required schema."
 
@@ -211,6 +212,7 @@ export class ReviewWorkers {
       this.loops.push(this.loop(index))
     }
     this.loops.push(this.recoveryLoop())
+    this.loops.push(this.usageLoop())
   }
 
   async stop(): Promise<void> {
@@ -250,16 +252,32 @@ export class ReviewWorkers {
       }
 
       try {
+        await sleep(staleRecoveryIntervalMs, this.recoveryController.signal)
+      } catch {
+        if (this.stopping) return
+        throw new Error("Stale review recovery interrupted")
+      }
+    }
+  }
+
+  /**
+   * Runs separately from stale-job recovery because each usage lookup may wait
+   * on the Amp CLI for up to 30 seconds; a degraded lookup must not delay
+   * requeueing interrupted reviews.
+   */
+  private async usageLoop(): Promise<void> {
+    while (!this.stopping) {
+      try {
         await this.collectUncollectedUsage()
       } catch (error) {
         this.logger.error({ err: error }, "usage collection for finished reviews failed")
       }
 
       try {
-        await sleep(staleRecoveryIntervalMs, this.recoveryController.signal)
+        await sleep(usageCollectionIntervalMs, this.recoveryController.signal)
       } catch {
         if (this.stopping) return
-        throw new Error("Stale review recovery interrupted")
+        throw new Error("Usage collection interrupted")
       }
     }
   }
@@ -428,37 +446,42 @@ export class ReviewWorkers {
 
   /**
    * Looks up and stores what Amp billed for one review thread. A failed lookup
-   * is stored as the error so the thread is not retried forever; a failure to
-   * store anything leaves the row for the recovery loop to pick up.
+   * is stored as the error so the thread is not retried forever. A failed
+   * database write stores nothing, so the row stays uncollected and the usage
+   * loop retries it instead of losing a lookup that succeeded.
    */
   private async collectThreadUsage(threadId: string, log: Logger): Promise<void> {
+    let lookup: ThreadUsageLookup
     try {
-      const lookup = await this.readUsage(threadId)
-      if (!("usage" in lookup)) throw new Error(lookup.unavailable)
-      await this.database.setThreadUsage(threadId, lookup.usage)
-      log.info(
-        {
-          threadId,
-          ampUsageUsd: lookup.usage.costUsd,
-          estimatedProviderCostAtListPriceUsd: lookup.usage.estimatedProviderCostAtListPriceUsd,
-        },
-        "Amp review usage collected",
-      )
+      lookup = await this.readUsage(threadId)
     } catch (error) {
-      const reason = errorMessage(error)
-      log.warn({ err: error, threadId }, "failed to collect Amp review usage")
-      try {
-        await this.database.setThreadUsageError(threadId, reason)
-      } catch (databaseError) {
-        log.warn({ err: databaseError, threadId }, "failed to persist Amp review usage error")
+      lookup = { unavailable: errorMessage(error) }
+    }
+
+    try {
+      if ("usage" in lookup) {
+        await this.database.setThreadUsage(threadId, lookup.usage)
+        log.info(
+          {
+            threadId,
+            ampUsageUsd: lookup.usage.costUsd,
+            estimatedProviderCostAtListPriceUsd: lookup.usage.estimatedProviderCostAtListPriceUsd,
+          },
+          "Amp review usage collected",
+        )
+      } else {
+        log.warn({ threadId, reason: lookup.unavailable }, "Amp review usage unavailable")
+        await this.database.setThreadUsageError(threadId, lookup.unavailable)
       }
+    } catch (error) {
+      log.warn({ err: error, threadId }, "failed to persist Amp review usage; it will be retried")
     }
   }
 
   /**
    * Collects usage for threads whose job finished without a usage lookup, for
    * example because the worker exited between finishing the job and reading
-   * its usage. Bounded per pass so one backlog cannot stall stale-job recovery.
+   * its usage. Bounded per pass so one backlog cannot hold the loop for long.
    */
   private async collectUncollectedUsage(): Promise<void> {
     const threadIds = await this.database.uncollectedThreadIds(uncollectedUsageBatchSize)
