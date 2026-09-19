@@ -4,12 +4,75 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
-printf 'Checking Node.js version...\n'
-node_major="$(node --version | sed -E 's/^v([0-9]+).*/\1/')"
-if ((node_major < 22)); then
-  printf 'Node.js 22 or newer is required; found %s.\n' "$(node --version)" >&2
-  exit 1
+# Same directory defaults as mise itself, so a custom MISE_DATA_DIR or
+# XDG_DATA_HOME still points the script at the shims mise actually wrote.
+mise_data_dir="${MISE_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/mise}"
+shim_dir="${MISE_SHIMS_DIR:-$mise_data_dir/shims}"
+# mise expands a leading ~ in these settings; bash does not expand one that
+# came from a variable.
+shim_dir="${shim_dir/#\~\//$HOME/}"
+local_bin="$HOME/.local/bin"
+
+# Pinned release and checksums from its SHASUMS256.txt. Setup runs where
+# orb credentials may be present, so download the versioned artifact and
+# verify it instead of piping a mutable installer script into sh. Bump the
+# version and both checksums together.
+mise_version="v2026.9.11"
+declare -A mise_sha256=(
+  [x86_64]="02a19e4a5eda23cda916503ad09dbc608a249fe7a7d5686c5a74ff3a7ce3b7e0"
+  [aarch64]="d781ce1b4daad6ead469b0a57fef4bfb49c4e02025dc88111ff1bfaa8c90aad9"
+)
+
+printf 'Installing mise...\n'
+mise_bin="$(command -v mise || true)"
+if [[ -z "$mise_bin" ]]; then
+  arch="$(uname -m)"
+  case "$arch" in
+    x86_64) mise_arch="x64" ;;
+    aarch64 | arm64) arch="aarch64"; mise_arch="arm64" ;;
+    *) printf 'No pinned mise checksum for architecture %s.\n' "$arch" >&2; exit 1 ;;
+  esac
+  archive="mise-$mise_version-linux-$mise_arch.tar.gz"
+  tmp_dir="$(mktemp -d)"
+  trap 'rm -rf "$tmp_dir"' EXIT
+  curl -fsSL -o "$tmp_dir/$archive" \
+    "https://github.com/jdx/mise/releases/download/$mise_version/$archive"
+  printf '%s  %s\n' "${mise_sha256[$arch]}" "$tmp_dir/$archive" | sha256sum --check --quiet
+  tar -xzf "$tmp_dir/$archive" -C "$tmp_dir"
+  mkdir -p "$local_bin"
+  install -m 0755 "$tmp_dir/mise/bin/mise" "$local_bin/mise"
+  mise_bin="$local_bin/mise"
+fi
+
+profile_marker='# amp-reviewbot mise'
+if ! grep -Fqx "$profile_marker" "$HOME/.bash_profile" 2>/dev/null; then
+  cat >> "$HOME/.bash_profile" <<EOF
+
+# amp-reviewbot mise
+export PATH="$local_bin:$shim_dir:\$PATH"
+EOF
+fi
+
+printf 'Installing tool versions...\n'
+time "$mise_bin" install
+"$mise_bin" reshim
+
+# Agent shell commands run as non-login bash with a fixed PATH that includes
+# ~/.local/bin but not the mise shim directory, so ~/.bash_profile never
+# applies to them. Link the shims into ~/.local/bin so node/npm/npx resolve
+# to the mise-managed versions there too.
+mkdir -p "$local_bin"
+for shim in node npm npx corepack; do
+  if [[ ! -e "$shim_dir/$shim" ]]; then
+    printf 'mise did not create the %s shim in %s\n' "$shim" "$shim_dir" >&2
+    exit 1
+  fi
+done
+if [[ "$(cd "$shim_dir" && pwd -P)" != "$(cd "$local_bin" && pwd -P)" ]]; then
+  for shim in node npm npx corepack; do
+    ln -sfn "$shim_dir/$shim" "$local_bin/$shim"
+  done
 fi
 
 printf 'Installing npm dependencies...\n'
-time npm ci
+time "$mise_bin" exec -- npm ci

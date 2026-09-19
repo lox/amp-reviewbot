@@ -27,7 +27,7 @@ The `reviewbot-v1` Amp mode extends the built-in `medium` agent, preserving its 
 
 ## Requirements
 
-- Node.js 22+
+- [mise](https://mise.jdx.dev/)
 - Postgres
 - An [Amp access token](https://ampcode.com/settings/security)
 - An Amp project for every reviewed repository
@@ -74,12 +74,13 @@ Copy `.env.example` and provide:
 | `REVIEW_TIMEOUT_MINUTES` | Per-review timeout, default `30` |
 | `FAIL_ON` | Lowest failing severity, default `high` |
 
-Run locally:
+Run locally. `mise install` puts Node 22 under mise's control but does not change the current shell's `PATH`, so either [activate mise](https://mise.jdx.dev/getting-started.html#activate-mise) in your shell or run the npm commands through `mise exec`:
 
 ```sh
-npm install
-npm run build
-npm start
+mise install
+mise exec -- npm ci
+mise exec -- npm run build
+mise exec -- npm start
 ```
 
 The service exposes `GET /healthz` and `POST /webhooks/github`.
