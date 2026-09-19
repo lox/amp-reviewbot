@@ -136,6 +136,20 @@ The pilot remains separate because its outcomes have already been seen. The main
 
 Because LLMs create and check most recorded issues, report agreement with the examples, not “true accuracy.” Check every unmatched finding against the source before classifying it. If the reviewer finds a real issue missing from an example, fix the example (and record the issue in both versions of a synthetic pair) rather than call the finding a false alarm. Keep this later source check separate from the original counts.
 
+## Post-v4 tranche
+
+Every example is a buildkite-agent pull request from the v3 line. buildkite-agent v4 has shipped, so the code the reviewer sees in production has moved on: new packages, removed compatibility paths, and different release scripts. The corpus should follow, without disturbing what the existing sets measure.
+
+Add a holdout-only tranche of 10–12 human-reviewed post-v4 pull requests, using the same protocol as the existing human-review group: a non-author reviewer requested a concrete change, independent evidence confirms the issue, and the baseline is checked directly. Aim for roughly half blocking and half non-blocking, and include at least two clean versions, because the wrong-block pattern (recoverable or development-only problems rated high) is where a code-base shift is most likely to show. Skip v4 synthetic mutants at first: the human-reviewed tranche tells us whether the shift matters before we spend authoring effort on pairs.
+
+Decisions:
+
+- Existing examples are not relabelled or retired. Their labels describe the code at their commit and the saved artifacts were scored against them; touching them would invalidate every number in [eval-experiments.md](../eval-experiments.md).
+- The tranche goes to the holdout, not development. It is a check that the production prompt has not drifted against current code, and holdout results are final. It only moves into development if a v4-specific weakness turns up that needs iteration.
+- No new pack field. The example schema is strict, so an `era` field would be a framework change; the tranche is identifiable by its example IDs and by pull numbers above the v4 release, which is enough for `rescore` and the report to filter on later. Add a field only if per-era reporting is actually wanted.
+- `fast-v3` is built only after the tranche has been scored once under `current`, from settled calls, following the same selection as `fast-v2`. Adding unscored versions to a fast set would make an A/B result depend on which prompt happened to see them first.
+- Scoring the tranche is one paid run over the new versions only. `run --split holdout` would buy the 30 existing holdout reviews again, so freeze the tranche as a set and run `ab PACK SET current current`, as `gap-v1` did. It needs the same explicit confirmation as any other reviewer run and is recorded in [eval-experiments.md](../eval-experiments.md) beside the v3 holdout numbers, not merged into them.
+
 ## Before a run
 
 1. Keep the example pack private and confirm the separate reviewer identity cannot access it.
