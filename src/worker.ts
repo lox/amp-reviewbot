@@ -1,6 +1,5 @@
-import { execFile } from "node:child_process"
+import { spawn } from "node:child_process"
 import { resolve } from "node:path"
-import { promisify } from "node:util"
 import { execute } from "@ampcode/sdk"
 import type { StreamMessage } from "@ampcode/sdk"
 import type { Logger } from "pino"
@@ -12,7 +11,6 @@ import { buildReviewPrompt, currentReviewPromptIdentifier, parseReviewResult, re
 import { readThreadUsage, type ThreadUsageLookup } from "./thread-usage.js"
 import type { ReviewJob } from "./types.js"
 
-const execFileAsync = promisify(execFile)
 const ampRetryDelaysMs = [5_000, 20_000]
 const staleRecoveryIntervalMs = 60_000
 const maxJobAttempts = 3
@@ -666,11 +664,52 @@ export class ReviewWorkers {
 }
 
 async function archiveReviewThread(threadId: string): Promise<void> {
-  await execFileAsync(
+  await runArchiveCommand(
     resolve("node_modules", ".bin", "amp"),
     ["threads", "archive", threadId],
-    { timeout: 30_000 },
   )
+}
+
+export function runArchiveCommand(command: string, args: string[], timeoutMs = 30_000): Promise<void> {
+  return new Promise((resolvePromise, reject) => {
+    const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] })
+    let stdout = ""
+    let stderr = ""
+    let settled = false
+    const timeout = setTimeout(() => {
+      child.kill()
+      finish(new Error(`Archive command timed out after ${timeoutMs}ms: ${stderr || stdout}`))
+    }, timeoutMs)
+
+    child.stdout.setEncoding("utf8")
+    child.stderr.setEncoding("utf8")
+    child.stdout.on("data", (chunk: string) => {
+      stdout += chunk
+      if (stdout.includes("Thread archived successfully")) {
+        child.kill()
+        finish()
+      }
+    })
+    child.stderr.on("data", (chunk: string) => {
+      stderr += chunk
+    })
+    child.on("error", finish)
+    child.on("close", (code, signal) => {
+      if (code === 0) {
+        finish()
+      } else {
+        finish(new Error(`Archive command exited with ${signal ?? `code ${code}`}: ${stderr || stdout}`))
+      }
+    })
+
+    function finish(error?: Error): void {
+      if (settled) return
+      settled = true
+      clearTimeout(timeout)
+      if (error) reject(error)
+      else resolvePromise()
+    }
+  })
 }
 
 type StaleReason = { check: string; job: string }
