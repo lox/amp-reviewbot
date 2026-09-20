@@ -260,6 +260,7 @@ describe("cleanup for finished review threads", () => {
   ) {
     const stored: Array<{ threadId: string; usage?: ThreadUsage; error?: string }> = []
     const archived: string[] = []
+    const attempted: string[] = []
     const requests: number[] = []
     const database = {
       async pendingThreadCleanup(limit: number) {
@@ -268,6 +269,9 @@ describe("cleanup for finished review threads", () => {
       },
       async setThreadArchived(threadId: string) {
         archived.push(threadId)
+      },
+      async setThreadCleanupAttempted(threadId: string) {
+        attempted.push(threadId)
       },
       async setThreadUsage(threadId: string, collected: ThreadUsage) {
         if (options.failWritesFor?.includes(threadId)) throw new Error("connection terminated unexpectedly")
@@ -291,7 +295,7 @@ describe("cleanup for finished review threads", () => {
         if (options.failArchiveFor?.includes(threadId)) throw new Error("archive timed out")
       },
     )
-    return { workers, stored, looked, archived, requests }
+    return { workers, stored, looked, archived, attempted, requests }
   }
 
   it("archives threads an interrupted worker left behind and collects their usage", async () => {
@@ -345,8 +349,31 @@ describe("cleanup for finished review threads", () => {
     await cleanup
 
     assert.deepEqual(archived, ["T-pending"], "a saturated queue cannot starve archival")
-    assert.deepEqual(looked, [], "cleanup yields before usage or another archival can age a claimed review")
-    assert.deepEqual(stored, [])
+    assert.deepEqual(looked, ["T-pending"], "successful archival finishes its usage before yielding")
+    assert.deepEqual(stored, [{ threadId: "T-pending", usage }])
+  })
+
+  it("continues past one failed row before yielding to a waiting review", async () => {
+    const { workers, archived, attempted, looked } = workersWith(
+      [
+        { threadId: "T-poisoned", needsArchive: true, needsUsage: true },
+        { threadId: "T-progress", needsArchive: true, needsUsage: true },
+        { threadId: "T-later", needsArchive: true, needsUsage: true },
+      ],
+      { "T-progress": { usage } },
+      { failArchiveFor: ["T-poisoned"] },
+    )
+    const state = workers as unknown as {
+      reviewsWaiting: number
+      collectPendingThreadCleanup(): Promise<void>
+    }
+    state.reviewsWaiting = 1
+
+    await state.collectPendingThreadCleanup()
+
+    assert.deepEqual(attempted, ["T-poisoned", "T-progress"])
+    assert.deepEqual(archived, ["T-progress"])
+    assert.deepEqual(looked, ["T-progress"])
   })
 
   it("leaves a thread uncollected when storing valid usage fails, so it is retried instead of recorded as an error", async () => {

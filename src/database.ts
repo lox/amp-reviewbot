@@ -396,7 +396,9 @@ export class Database {
        JOIN review_jobs ON review_jobs.id = review_threads.job_id
        WHERE (review_threads.archived_at IS NULL OR review_threads.usage_collected_at IS NULL)
          AND review_jobs.status IN ('succeeded', 'failed', 'cancelled')
-       ORDER BY (review_threads.archived_at IS NULL) DESC, review_threads.created_at DESC
+       ORDER BY review_threads.cleanup_attempted_at ASC NULLS FIRST,
+                (review_threads.archived_at IS NULL) DESC,
+                review_threads.created_at
        LIMIT $1`,
       [limit],
     )
@@ -410,6 +412,13 @@ export class Database {
   async setThreadArchived(threadId: string): Promise<void> {
     await this.pool.query(
       "UPDATE review_threads SET archived_at = NOW() WHERE thread_id = $1",
+      [threadId],
+    )
+  }
+
+  async setThreadCleanupAttempted(threadId: string): Promise<void> {
+    await this.pool.query(
+      "UPDATE review_threads SET cleanup_attempted_at = NOW() WHERE thread_id = $1",
       [threadId],
     )
   }

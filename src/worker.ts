@@ -17,6 +17,7 @@ const ampRetryDelaysMs = [5_000, 20_000]
 const staleRecoveryIntervalMs = 60_000
 const maxJobAttempts = 3
 const threadCleanupBatchSize = 20
+const threadCleanupAttemptsWhileReviewsWait = 2
 const threadCleanupIntervalMs = 60_000
 const reconcileIntervalMs = 5 * 60_000
 // A head pushed more recently than this may still have its webhook in flight.
@@ -576,18 +577,19 @@ export class ReviewWorkers {
     }
   }
 
-  private async cleanupThread(cleanup: PendingThreadCleanup, log: Logger): Promise<void> {
+  private async cleanupThread(cleanup: PendingThreadCleanup, log: Logger): Promise<boolean> {
+    await this.database.setThreadCleanupAttempted(cleanup.threadId)
     if (cleanup.needsArchive) {
       try {
         await this.archiveThread(cleanup.threadId)
         await this.database.setThreadArchived(cleanup.threadId)
       } catch (error) {
         log.warn({ err: error, threadId: cleanup.threadId }, "failed to archive Amp review thread")
-        return
+        return false
       }
-      if (this.reviewsWaiting > 0) return
     }
     if (cleanup.needsUsage) await this.collectThreadUsage(cleanup.threadId, log)
+    return true
   }
 
   /**
@@ -631,10 +633,14 @@ export class ReviewWorkers {
       const pending = await this.database.pendingThreadCleanup(threadCleanupBatchSize)
       if (pending.length === 0) return
       this.logger.warn({ threads: pending.length }, "cleaning up Amp review threads left by a worker")
+      let attemptsWhileReviewsWait = 0
       for (const cleanup of pending) {
         if (this.stopping) return
-        await this.cleanupThread(cleanup, this.logger)
-        if (this.reviewsWaiting > 0) return
+        const completed = await this.cleanupThread(cleanup, this.logger)
+        if (this.reviewsWaiting > 0) {
+          attemptsWhileReviewsWait += 1
+          if (completed || attemptsWhileReviewsWait >= threadCleanupAttemptsWhileReviewsWait) return
+        }
       }
     })
   }
