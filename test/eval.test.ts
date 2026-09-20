@@ -19,9 +19,14 @@ import {
   judgeIssueWithJev,
   type SystemOne,
 } from "../eval/jev.js"
+import {
+  jevCascadeRequest,
+  judgeIssueWithJevCascade,
+  routeJevCascadePair,
+} from "../eval/jev-cascade.js"
 import { checkPack, exampleSchema, loadPack } from "../eval/pack.js"
 import { chanceSentence, formatComparison } from "../eval/compare.js"
-import { excludeRuleBreakingReviews, formatReport, reviewResources } from "../eval/report.js"
+import { excludeRuleBreakingReviews, formatReport, matcherResources, reviewResources } from "../eval/report.js"
 import { formatRepassSummary, repassRun, severityRepassIdentifier } from "../eval/repass.js"
 import { formatRescoreSummary, rescoreRun } from "../eval/rescore.js"
 import { ampExitError, evaluationAmpArgs, keepThreadTrace } from "../eval/reviewer-child.js"
@@ -57,6 +62,7 @@ import {
   reviewMode,
 } from "../src/amp.js"
 import { buildSourceSetupPrompt, preparedSourceVerificationCommand } from "../src/review.js"
+import type { ReviewFinding } from "../src/types.js"
 import { isTransientAmpError } from "../src/worker.js"
 
 const execFileAsync = promisify(execFile)
@@ -3205,6 +3211,196 @@ describe("eval judging", () => {
     }
   })
 
+  it("builds the frozen minimal Jev cascade request with exact questions", () => {
+    const issue = { ...blocking.issues[0]!, path: "src/expected`file.ts" }
+    const finding = { ...highFinding, path: "src/finding.ts", endLine: 12 }
+    const request = jevCascadeRequest(issue, finding)
+    assert.deepEqual(request.state, {
+      expected: {
+        rootCause: issue.rootCause,
+        failureBehavior: issue.failureBehavior,
+        path: issue.path,
+      },
+      finding: {
+        title: finding.title,
+        message: finding.message,
+        suggestion: finding.suggestion,
+        path: finding.path,
+      },
+    })
+    assert.deepEqual(Object.keys(request.questions), ["relation", "sameCause", "sameFailure"])
+    assert.deepEqual(request.questions.relation!.criteria, [
+      "Different defects: mechanism or failure differs, including superficially similar symptoms from different defects.",
+      "Related but unresolved: overlap or omitted identifying detail means equivalence is not established.",
+      "Same defect: finding identifies the recorded defect and failure; wording, extra detail, and suggested fixes may differ.",
+    ])
+    assert.equal(
+      request.questions.relation!.instructions,
+      "How does the defect described by finding.title, finding.message, and finding.suggestion at `src/finding.ts` relate to expected.rootCause and expected.failureBehavior at `src/expected\\`file.ts`? Suggested fixes need not agree.",
+    )
+    assert.equal(
+      request.questions.sameCause!.instructions,
+      "Does the defect described by finding.title, finding.message, and finding.suggestion at `src/finding.ts` identify the defect mechanism in expected.rootCause at `src/expected\\`file.ts`? Suggested fixes need not agree.",
+    )
+    assert.equal(
+      request.questions.sameFailure!.instructions,
+      "Does the defect described by finding.title, finding.message, and finding.suggestion at `src/finding.ts` describe the incorrect behavior or consequence in expected.failureBehavior at `src/expected\\`file.ts`? Suggested fixes need not agree.",
+    )
+  })
+
+  it("routes Jev cascade boundaries inclusively without multiplying probabilities", () => {
+    assert.equal(routeJevCascadePair({ "0": 0, "1": 0.1, "2": 0.9 }, 0.9, 0.9).route, "match")
+    assert.equal(routeJevCascadePair({ "0": 0.9, "1": 0.1, "2": 0 }, 0.1, 0.8).route, "non-match")
+    assert.equal(routeJevCascadePair({ "0": 0.9, "1": 0.1, "2": 0 }, 0.8, 0.1).route, "non-match")
+    assert.equal(routeJevCascadePair({ "0": 0.89, "1": 0.11, "2": 0 }, 0.1, 0.1).route, "escalate")
+    assert.equal(routeJevCascadePair({ "0": 0, "1": 0.1, "2": 0.9 }, 0.9, 0.89).route, "escalate")
+    assert.equal(routeJevCascadePair({ "0": 0, "1": 0, "2": 0.99 }, 0.99, 0.82).route, "escalate")
+  })
+
+  it("preserves every confident match and records pair usage and cache provenance", async () => {
+    const cacheDirectory = await mkdtemp(join(tmpdir(), "amp-reviewbot-jev-cascade-"))
+    let calls = 0
+    const responses = [
+      cascadeResponse({ "0": 0, "1": 0.05, "2": 0.95 }, 0.95, 0.95, 2, 1),
+      cascadeResponse({ "0": 0.95, "1": 0.05, "2": 0 }, 0.05, 0.8, 3, 1),
+      cascadeResponse({ "0": 0, "1": 0, "2": 1 }, 1, 1, 4, 2),
+    ]
+    const systemOne: SystemOne = async () => responses[calls++]!
+    const findings: ReviewFinding[] = [
+      highFinding,
+      { ...lowFinding, title: "Clearly different" },
+      { ...highFinding, title: "Duplicate defect" },
+    ]
+    try {
+      const run = () => judgeIssueWithJevCascade(
+        "blocking",
+        blocking.issues[0]!,
+        findings,
+        cacheDirectory,
+        testAmpVersions,
+        new AbortController().signal,
+        systemOne,
+      )
+      const result = await run()
+      assert.deepEqual(result.matchingFindingIndices, [0, 2])
+      assert.deepEqual(result.votes, [[0, 2]])
+      assert.deepEqual(result.usage, { inputTokens: 9, outputTokens: 4 })
+      assert.equal(result.cascade?.issueRoute, "jev")
+      assert.equal(result.cascade?.ampVotesAvoided, 2)
+      assert.deepEqual(result.cascade?.pairs.map((pair) => pair.findingIndex), [0, 1, 2])
+      assert.deepEqual(result.cascade?.pairs.map((pair) => pair.route), ["match", "non-match", "match"])
+      assert.equal(result.cascade?.pairs[0]?.pathEqual, true)
+      assert.equal(result.cascade?.pairs[0]?.lineOverlap, true)
+      assert.ok(result.cascade?.pairs.every((pair) => pair.cacheHit === false))
+      assert.equal(calls, 3)
+
+      const cached = await run()
+      assert.equal(calls, 3)
+      assert.ok(cached.cascade?.pairs.every((pair) => pair.cacheHit === true))
+      const artifact = makeRun([evalCase("blocking", blocking)], 1, [{
+        ...completed("blocking", 1, blocking, "failure", findings, []),
+        judgements: [cached],
+      }])
+      assert.doesNotThrow(() => evalRunSchema.parse(artifact))
+      const drifted = structuredClone(artifact)
+      if (drifted.samples[0]?.status !== "completed") assert.fail("expected completed sample")
+      drifted.samples[0].judgements[0]!.cascade!.pairs[0]!.route = "non-match"
+      assert.throws(() => evalRunSchema.parse(drifted), /does not match its pair routes/)
+      assert.deepEqual(matcherResources(artifact)?.routes, { match: 2, nonMatch: 1, escalate: 0 })
+      assert.match(formatReport(artifact), /2 match, 1 non-match, 0 escalate/)
+    } finally {
+      await rm(cacheDirectory, { recursive: true, force: true })
+    }
+  })
+
+  it("falls back the whole issue on uncertainty or provider failure without merging partial matches", async () => {
+    for (const failure of ["uncertain", "malformed", "network"] as const) {
+      const cacheDirectory = await mkdtemp(join(tmpdir(), "amp-reviewbot-jev-cascade-"))
+      let calls = 0
+      let ampCalls = 0
+      const ampMatcher = (async (_caseId, issue, findings) => {
+        ampCalls += 1
+        assert.equal(findings.length, 2, "fallback must receive the complete original candidate list")
+        return judgement([1], false, issue.id)
+      }) as typeof judgeIssue
+      const systemOne: SystemOne = async () => {
+        const index = calls++
+        if (index === 0) return cascadeResponse({ "0": 0, "1": 0, "2": 1 }, 1, 1)
+        if (failure === "uncertain") return cascadeResponse({ "0": 0.2, "1": 0.6, "2": 0.2 }, 0.5, 0.5)
+        if (failure === "malformed") return { model: jevModel, answers: {}, usage: { input_tokens: 1, output_tokens: 1 } }
+        throw new Error("offline")
+      }
+      try {
+        const result = await judgeIssueWithJevCascade(
+          "blocking",
+          blocking.issues[0]!,
+          [highFinding, { ...lowFinding, title: "Second candidate" }],
+          cacheDirectory,
+          testAmpVersions,
+          new AbortController().signal,
+          systemOne,
+          ampMatcher,
+        )
+        assert.equal(ampCalls, 1)
+        assert.deepEqual(result.matchingFindingIndices, [1], "partial Jev match must not survive fallback")
+        assert.deepEqual(result.votes, [[1], [1]])
+        assert.equal(result.cascade?.issueRoute, "amp-fallback")
+        assert.equal(result.cascade?.pairs[1]?.route, "escalate")
+        assert.ok(result.cascade?.ampProvenance)
+      } finally {
+        await rm(cacheDirectory, { recursive: true, force: true })
+      }
+    }
+  })
+
+  it("does not call either provider for a cascade issue with no candidates", async () => {
+    const result = await judgeIssueWithJevCascade(
+      "blocking",
+      blocking.issues[0]!,
+      [],
+      "/unused",
+      testAmpVersions,
+      new AbortController().signal,
+      async () => assert.fail("Jev should not be called"),
+      (async () => assert.fail("Amp should not be called")) as typeof judgeIssue,
+    )
+    assert.deepEqual(result.matchingFindingIndices, [])
+    assert.equal(result.cascade?.issueReason, "no-candidate-findings")
+  })
+
+  it("does not cache a failed Jev pair response", async () => {
+    const cacheDirectory = await mkdtemp(join(tmpdir(), "amp-reviewbot-jev-cascade-"))
+    let attempts = 0
+    let fallbacks = 0
+    const ampMatcher = (async (_caseId, issue) => {
+      fallbacks += 1
+      return judgement([], false, issue.id)
+    }) as typeof judgeIssue
+    const systemOne: SystemOne = async () => {
+      attempts += 1
+      if (attempts === 1) throw new Error("temporary outage")
+      return cascadeResponse({ "0": 1, "1": 0, "2": 0 }, 0, 0)
+    }
+    try {
+      const match = () => judgeIssueWithJevCascade(
+        "blocking",
+        blocking.issues[0]!,
+        [highFinding],
+        cacheDirectory,
+        testAmpVersions,
+        new AbortController().signal,
+        systemOne,
+        ampMatcher,
+      )
+      assert.equal((await match()).cascade?.issueRoute, "amp-fallback")
+      assert.equal((await match()).cascade?.issueRoute, "jev")
+      assert.equal(attempts, 2)
+      assert.equal(fallbacks, 1)
+    } finally {
+      await rm(cacheDirectory, { recursive: true, force: true })
+    }
+  })
+
   it("checks finding matches without requiring a source project", async () => {
     const cacheDirectory = await mkdtemp(join(tmpdir(), "amp-reviewbot-eval-"))
     const options: Array<Record<string, unknown>> = []
@@ -3608,7 +3804,7 @@ function completed(
   sample: number,
   expected: ExpectedResult,
   conclusion: "success" | "neutral" | "failure",
-  findings: Array<typeof lowFinding | typeof mediumFinding | typeof highFinding>,
+  findings: ReviewFinding[],
   judgements: Array<ReturnType<typeof judgement>>,
 ) {
   const result = { summary: "Review complete", findings }
@@ -3671,6 +3867,30 @@ function judgement(
       promptHash: createHash("sha256").update(prompt).digest("hex"),
       schemaHash: createHash("sha256").update(responseSchema).digest("hex"),
     },
+  }
+}
+
+function cascadeResponse(
+  probabilities: { "0": number; "1": number; "2": number },
+  sameCause: number,
+  sameFailure: number,
+  inputTokens = 1,
+  outputTokens = 1,
+) {
+  return {
+    model: jevModel,
+    answers: {
+      relation: {
+        type: "score",
+        score: 2,
+        confidence: Math.max(...Object.values(probabilities)),
+        legend: { "0": "different", "1": "related", "2": "same" },
+        probabilities,
+      },
+      sameCause: { type: "noul", noul: sameCause },
+      sameFailure: { type: "noul", noul: sameFailure },
+    },
+    usage: { input_tokens: inputTokens, output_tokens: outputTokens },
   }
 }
 

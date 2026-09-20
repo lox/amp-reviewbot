@@ -171,7 +171,9 @@ function judgeSetups(run: EvalRun, ids: Set<string>): Set<string> {
     for (const { provenance } of sample.judgements) {
       const provider = provenance.provider === "typesafe"
         ? `typesafe ${provenance.apiVersion ?? "API unrecorded"} `
-        : ""
+        : provenance.provider === "jev-cascade"
+          ? `jev-cascade ${provenance.apiVersion ?? "API unrecorded"} `
+          : ""
       const threshold = provenance.threshold === undefined ? "" : ` threshold ${provenance.threshold}`
       setups.add(
         `${provider}${provenance.version} ${provenance.mode}/${provenance.model ?? "unpinned"}${threshold} schema ${provenance.schemaHash.slice(0, 7)} sdk ${provenance.sdkVersion} cli ${provenance.cliVersion ?? "unrecorded"}`,

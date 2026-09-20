@@ -33,6 +33,7 @@ export function formatReport(savedRun: EvalRun): string {
       `${countLabel(score.uncheckedIssues, "recorded issue")} could not be checked against the findings; run \`finish\` to complete the comparison.`,
     )
   }
+  lines.push(...matcherResourceLines(savedRun))
   lines.push(...resourceLines(savedRun))
 
   const scores = new Map(score.cases.map((caseScore) => [caseScore.caseId, caseScore]))
@@ -80,6 +81,69 @@ export function formatReport(savedRun: EvalRun): string {
     "This result covers only these examples; it is not a general quality claim.",
   )
   return lines.join("\n")
+}
+
+export interface MatcherResources {
+  issues: number
+  autoResolved: number
+  fallbacks: number
+  fallbackReasons: Record<string, number>
+  pairs: number
+  routes: { match: number; nonMatch: number; escalate: number }
+  ampVotesAvoided: number
+  jevInputTokens: number
+  jevOutputTokens: number
+  jevApiDurationMs: number
+  ampFallbackDurationMs: number
+  cacheHits: number
+}
+
+export function matcherResources(run: EvalRun): MatcherResources | undefined {
+  const cascades = run.samples.flatMap((sample) =>
+    sample.status === "completed"
+      ? sample.judgements.flatMap((judgement) => judgement.cascade ?? [])
+      : [],
+  )
+  if (cascades.length === 0) return undefined
+  const pairs = cascades.flatMap((cascade) => cascade.pairs)
+  const fallbackReasons: Record<string, number> = {}
+  for (const cascade of cascades) {
+    if (cascade.issueRoute !== "amp-fallback") continue
+    fallbackReasons[cascade.issueReason] = (fallbackReasons[cascade.issueReason] ?? 0) + 1
+  }
+  return {
+    issues: cascades.length,
+    autoResolved: cascades.filter((cascade) => cascade.issueRoute === "jev").length,
+    fallbacks: cascades.filter((cascade) => cascade.issueRoute === "amp-fallback").length,
+    fallbackReasons,
+    pairs: pairs.length,
+    routes: {
+      match: pairs.filter((pair) => pair.route === "match").length,
+      nonMatch: pairs.filter((pair) => pair.route === "non-match").length,
+      escalate: pairs.filter((pair) => pair.route === "escalate").length,
+    },
+    ampVotesAvoided: cascades.reduce((sum, cascade) => sum + cascade.ampVotesAvoided, 0),
+    jevInputTokens: pairs.reduce((sum, pair) => sum + (pair.usage?.inputTokens ?? 0), 0),
+    jevOutputTokens: pairs.reduce((sum, pair) => sum + (pair.usage?.outputTokens ?? 0), 0),
+    jevApiDurationMs: pairs.reduce((sum, pair) => sum + pair.durationMs, 0),
+    ampFallbackDurationMs: cascades.reduce((sum, cascade) => sum + (cascade.ampDurationMs ?? 0), 0),
+    cacheHits: pairs.filter((pair) => pair.cacheHit).length,
+  }
+}
+
+function matcherResourceLines(run: EvalRun): string[] {
+  const resources = matcherResources(run)
+  if (!resources) return []
+  const reasons = Object.entries(resources.fallbackReasons)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([reason, count]) => `${reason}: ${count}`)
+    .join(", ")
+  return [
+    `Jev cascade: ${resources.autoResolved} of ${resources.issues} issues auto-resolved; ${resources.fallbacks} used whole-issue Amp fallback${reasons ? ` (${reasons})` : ""}.`,
+    `Jev pair routes: ${resources.routes.match} match, ${resources.routes.nonMatch} non-match, ${resources.routes.escalate} escalate across ${resources.pairs} requests; ${resources.cacheHits} were cache hits.`,
+    `Jev usage recorded by TypeSafe: ${resources.jevInputTokens} input and ${resources.jevOutputTokens} output tokens; summed original API latency ${minutes(resources.jevApiDurationMs)}. Amp fallback wall time was ${minutes(resources.ampFallbackDurationMs)}; Amp token and cost usage is not available in judgement artifacts.`,
+    `Projected avoidance: at least ${resources.ampVotesAvoided} Amp votes based on the incumbent's two-vote minimum. This is not measured dollar savings; cost projections require separately supplied provider prices.`,
+  ]
 }
 
 export function scorecardLines(card: Scorecard): string[] {

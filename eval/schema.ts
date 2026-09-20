@@ -246,6 +246,45 @@ export const corpusSchema = z
     }
   })
 
+const judgementProvenanceSchema = z.object({
+  provider: z.enum(["amp", "typesafe", "jev-cascade"]).optional(),
+  version: z.string(),
+  mode: z.string(),
+  model: z.string().optional(),
+  sdkVersion: z.string(),
+  cliVersion: z.string().optional(),
+  project: z.string().nullable(),
+  apiVersion: z.string().optional(),
+  threshold: z.number().min(0).max(1).optional(),
+  prompt: z.string().optional(),
+  responseSchema: z.string().optional(),
+  promptHash: z.string(),
+  schemaHash: z.string(),
+}).strict()
+
+const cascadePairSchema = z.object({
+  findingIndex: z.number().int().nonnegative(),
+  pathEqual: z.boolean(),
+  lineOverlap: z.boolean(),
+  requestHash: z.string(),
+  route: z.enum(["match", "non-match", "escalate"]),
+  reason: z.string(),
+  relation: z.object({
+    "0": z.number().min(0).max(1),
+    "1": z.number().min(0).max(1),
+    "2": z.number().min(0).max(1),
+  }).strict().optional(),
+  sameCause: z.number().min(0).max(1).optional(),
+  sameFailure: z.number().min(0).max(1).optional(),
+  usage: z.object({
+    inputTokens: z.number().int().nonnegative(),
+    outputTokens: z.number().int().nonnegative(),
+  }).strict().optional(),
+  durationMs: z.number().int().nonnegative(),
+  cacheHit: z.boolean(),
+  error: z.string().optional(),
+}).strict()
+
 const judgementFields = {
   issueId: z.string().min(1),
   matchingFindingIndices: z.array(z.number().int().nonnegative()),
@@ -260,25 +299,20 @@ const judgementFields = {
     })
     .strict()
     .optional(),
-  provenance: z.object({
-    provider: z.enum(["amp", "typesafe"]).optional(),
-    version: z.string(),
-    mode: z.string(),
-    model: z.string().optional(),
-    sdkVersion: z.string(),
-    cliVersion: z.string().optional(),
-    project: z.string().nullable(),
-    apiVersion: z.string().optional(),
-    threshold: z.number().min(0).max(1).optional(),
-    prompt: z.string().optional(),
-    responseSchema: z.string().optional(),
-    promptHash: z.string(),
-    schemaHash: z.string(),
-  }),
+  provenance: judgementProvenanceSchema,
+  cascade: z.object({
+    issueRoute: z.enum(["jev", "amp-fallback"]),
+    issueReason: z.string(),
+    pairs: z.array(cascadePairSchema),
+    ampVotesAvoided: z.number().int().nonnegative(),
+    ampDurationMs: z.number().int().nonnegative().optional(),
+    ampProvenance: judgementProvenanceSchema.optional(),
+  }).strict().optional(),
 }
 
 const judgementSchema = z.object(judgementFields).strict().superRefine((judgement, context) => {
-  if (judgement.provenance.provider === "typesafe") {
+  if (judgement.provenance.provider === "typesafe" ||
+      (judgement.provenance.provider === "jev-cascade" && judgement.cascade?.issueRoute === "jev")) {
     if (judgement.votes.length !== 1) {
       context.addIssue({
         code: "custom",
@@ -291,6 +325,13 @@ const judgementSchema = z.object(judgementFields).strict().superRefine((judgemen
       code: "custom",
       path: ["votes"],
       message: "Amp judgements must record at least two votes",
+    })
+  }
+  if ((judgement.provenance.provider === "jev-cascade") !== (judgement.cascade !== undefined)) {
+    context.addIssue({
+      code: "custom",
+      path: ["cascade"],
+      message: "Jev cascade provenance and audit data must be recorded together",
     })
   }
 })
@@ -707,6 +748,7 @@ export const evalRunSchema = z
                 run.reviewer.protocol === "research-enabled-target-frozen-v4" ||
                 run.reviewer.protocol === "research-enabled-target-frozen-v5") &&
               provenance.provider !== "typesafe" &&
+              provenance.provider !== "jev-cascade" &&
               (provenance.mode !== "reviewbot-judge-v1" ||
                 provenance.model !== "openai/gpt-5.6-sol")
             ) {
@@ -886,6 +928,61 @@ function validateCompletedSample(
           code: "custom",
           path: ["samples", sampleIndex, "judgements", judgementIndex],
           message: "TypeSafe judgement does not match its saved probabilities, threshold, or provenance",
+        })
+      }
+    }
+    if (judgement.provenance.provider === "jev-cascade") {
+      const cascade = judgement.cascade!
+      const expectedIssue = sample.expected.issues.find((issue) => issue.id === judgement.issueId)
+      const indices = cascade.pairs.map((pair) => pair.findingIndex)
+      const completeIndices = Array.from({ length: findingCount }, (_, index) => index)
+      const pairShapeValid = isDeepStrictEqual(indices, completeIndices) && cascade.pairs.every((pair) => {
+        const finding = sample.retainedResult.findings[pair.findingIndex]
+        if (expectedIssue === undefined || finding === undefined) return false
+        const pathEqual = expectedIssue.path === finding.path
+        const lineOverlap = pathEqual && expectedIssue.changedLine >= finding.startLine &&
+          expectedIssue.changedLine <= (finding.endLine ?? finding.startLine)
+        if (pair.pathEqual !== pathEqual || pair.lineOverlap !== lineOverlap) return false
+        const hasPrimitives = pair.relation !== undefined &&
+          pair.sameCause !== undefined && pair.sameFailure !== undefined && pair.usage !== undefined
+        if (!hasPrimitives) return pair.route === "escalate" && pair.error !== undefined
+        const expectedRoute = pair.relation!["2"] >= 0.9 && pair.sameCause! >= 0.9 && pair.sameFailure! >= 0.9
+          ? "match"
+          : pair.relation!["0"] >= 0.9 && (pair.sameCause! <= 0.1 || pair.sameFailure! <= 0.1)
+            ? "non-match"
+            : "escalate"
+        return pair.route === expectedRoute
+      })
+      const autoMatches = cascade.pairs.flatMap((pair) => pair.route === "match" ? [pair.findingIndex] : [])
+      const routeValid = cascade.issueRoute === "jev"
+        ? cascade.pairs.every((pair) => pair.route !== "escalate") &&
+          isDeepStrictEqual(judgement.matchingFindingIndices, autoMatches) &&
+          isDeepStrictEqual(judgement.votes, [autoMatches]) &&
+          cascade.ampProvenance === undefined
+        : cascade.pairs.some((pair) => pair.route === "escalate") &&
+          cascade.ampProvenance !== undefined && judgement.votes.length >= 2
+      const usage = cascade.pairs.reduce((total, pair) => ({
+        inputTokens: total.inputTokens + (pair.usage?.inputTokens ?? 0),
+        outputTokens: total.outputTokens + (pair.usage?.outputTokens ?? 0),
+      }), { inputTokens: 0, outputTokens: 0 })
+      const usageValid = isDeepStrictEqual(judgement.usage, usage)
+      if (!pairShapeValid || !routeValid || !usageValid) {
+        context.addIssue({
+          code: "custom",
+          path: ["samples", sampleIndex, "judgements", judgementIndex, "cascade"],
+          message: "Jev cascade judgement does not match its pair routes or whole-issue fallback",
+        })
+      }
+      const ampProvenance = cascade.ampProvenance
+      if (ampProvenance !== undefined && (
+        ampProvenance.prompt === undefined || ampProvenance.responseSchema === undefined ||
+        ampProvenance.promptHash !== createHash("sha256").update(ampProvenance.prompt ?? "").digest("hex") ||
+        ampProvenance.schemaHash !== createHash("sha256").update(ampProvenance.responseSchema ?? "").digest("hex")
+      )) {
+        context.addIssue({
+          code: "custom",
+          path: ["samples", sampleIndex, "judgements", judgementIndex, "cascade", "ampProvenance"],
+          message: "Jev cascade Amp fallback provenance hashes do not match",
         })
       }
     }

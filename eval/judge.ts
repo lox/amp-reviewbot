@@ -64,6 +64,27 @@ export async function judgeIssue(
   executeAmp: ExecuteAmp = execute,
 ): Promise<EvalJudgement> {
   const prompt = judgePrompt(issue, findings)
+  const provenance = {
+    version: judgeVersion,
+    mode: judgeMode,
+    model: pinnedModel,
+    ...versions,
+    project: judgeProject,
+    prompt,
+    responseSchema: judgeResponseSchemaDocument,
+    promptHash: hash(prompt),
+    schemaHash: judgeSchemaHash,
+  }
+  if (findings.length === 0) {
+    return {
+      issueId: issue.id,
+      matchingFindingIndices: [],
+      votes: [[], []],
+      disagreement: false,
+      models: [],
+      provenance,
+    }
+  }
   const first = await judgeVote(
     caseId,
     prompt,
@@ -87,18 +108,6 @@ export async function judgeIssue(
   const disagreement = !sameNumbers(first.matchingFindingIndices, second.matchingFindingIndices)
   const votes = [first.matchingFindingIndices, second.matchingFindingIndices]
   const models = [...new Set([...first.models, ...second.models])]
-  const provenance = {
-    version: judgeVersion,
-    mode: judgeMode,
-    model: pinnedModel,
-    ...versions,
-    project: judgeProject,
-    prompt,
-    responseSchema: judgeResponseSchemaDocument,
-    promptHash: hash(prompt),
-    schemaHash: judgeSchemaHash,
-  }
-
   if (!disagreement) {
     return {
       issueId: issue.id,
