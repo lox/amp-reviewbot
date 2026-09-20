@@ -1022,7 +1022,7 @@ function issueMatcher(matcher: MatcherName, threshold: number): IssueMatcher {
   return matcher === "jev" ? createJevMatcher(threshold) : judgeIssue
 }
 
-function withoutJudgements(run: EvalRun): EvalRun {
+export function withoutJudgements(run: EvalRun): EvalRun {
   return evalRunSchema.parse({
     ...run,
     samples: run.samples.map((sample) => {
@@ -1030,7 +1030,7 @@ function withoutJudgements(run: EvalRun): EvalRun {
       return {
         ...sample,
         durationMs: sample.reviewDurationMs ?? sample.durationMs,
-        matchingDurationMs: undefined,
+        matchingDurationMs: sample.reviewDurationMs === undefined ? undefined : 0,
         judgements: [],
         judgementErrors: [],
       }
