@@ -58,7 +58,12 @@ const probabilitiesSchema = z.object({
   "0": z.number().min(0).max(1),
   "1": z.number().min(0).max(1),
   "2": z.number().min(0).max(1),
-}).strict()
+}).strict().refine(
+  (probabilities) => Math.abs(
+    probabilities["0"] + probabilities["1"] + probabilities["2"] - 1,
+  ) <= 0.02,
+  "relation probabilities must sum to 1 within rounding tolerance",
+)
 const pairResultSchema = z.object({
   model: z.literal(jevModel),
   relation: probabilitiesSchema,
@@ -190,7 +195,9 @@ export async function judgeIssueWithJevCascade(
       }
     }
   }))
-  const unresolved = pairs.find((pair) => pair.route === "escalate")
+  const unresolvedPairs = pairs.filter((pair) => pair.route === "escalate")
+  const unresolved = unresolvedPairs.find((pair) => pair.reason === "invalid-or-unavailable-response") ??
+    unresolvedPairs[0]
   const jevUsage = pairs.reduce(
     (usage, pair) => ({
       inputTokens: usage.inputTokens + (pair.usage?.inputTokens ?? 0),

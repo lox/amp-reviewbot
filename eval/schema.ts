@@ -273,7 +273,12 @@ const cascadePairSchema = z.object({
     "0": z.number().min(0).max(1),
     "1": z.number().min(0).max(1),
     "2": z.number().min(0).max(1),
-  }).strict().optional(),
+  }).strict().refine(
+    (probabilities) => Math.abs(
+      probabilities["0"] + probabilities["1"] + probabilities["2"] - 1,
+    ) <= 0.02,
+    "relation probabilities must sum to 1 within rounding tolerance",
+  ).optional(),
   sameCause: z.number().min(0).max(1).optional(),
   sameFailure: z.number().min(0).max(1).optional(),
   usage: z.object({

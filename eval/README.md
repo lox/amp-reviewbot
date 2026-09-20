@@ -200,7 +200,7 @@ If reviews finish but checking their findings is interrupted, finish only those 
 npm run eval -- finish .eval-runs/RUN.json
 ```
 
-This uses the incumbent matcher and local CLI login by default and does not use `AMP_EVAL_REVIEWER_API_KEY`. Pass `--matcher jev` with `TYPESAFE_API_KEY` to finish with Jev instead. It writes a new result, keeps the original unchanged, and records the original file's hash so the two can be compared exactly. Normally only unfinished issues are matched; `--rematch` deliberately replaces all finding judgements in the derived artifact so two matchers or thresholds can be compared on identical saved reviews.
+This uses the incumbent matcher and local CLI login by default and does not use `AMP_EVAL_REVIEWER_API_KEY`. Pass `--matcher jev-cascade` with `TYPESAFE_API_KEY` to finish with the recommended selective cascade instead; standalone `--matcher jev` is only for reproducing its historical experiment. The command writes a new result, keeps the original unchanged, and records the original file's hash so the two can be compared exactly. Normally only unfinished issues are matched; `--rematch` deliberately replaces all finding judgements in the derived artifact so matchers can be compared on identical saved reviews.
 
 ## Reading a result
 

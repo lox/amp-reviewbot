@@ -3314,7 +3314,7 @@ describe("eval judging", () => {
   })
 
   it("falls back the whole issue on uncertainty or provider failure without merging partial matches", async () => {
-    for (const failure of ["uncertain", "malformed", "network"] as const) {
+    for (const failure of ["uncertain", "malformed", "distribution", "network"] as const) {
       const cacheDirectory = await mkdtemp(join(tmpdir(), "amp-reviewbot-jev-cascade-"))
       let calls = 0
       let ampCalls = 0
@@ -3325,9 +3325,14 @@ describe("eval judging", () => {
       }) as typeof judgeIssue
       const systemOne: SystemOne = async () => {
         const index = calls++
-        if (index === 0) return cascadeResponse({ "0": 0, "1": 0, "2": 1 }, 1, 1)
+        if (index === 0) {
+          return failure === "malformed"
+            ? cascadeResponse({ "0": 0.2, "1": 0.6, "2": 0.2 }, 0.5, 0.5)
+            : cascadeResponse({ "0": 0, "1": 0, "2": 1 }, 1, 1)
+        }
         if (failure === "uncertain") return cascadeResponse({ "0": 0.2, "1": 0.6, "2": 0.2 }, 0.5, 0.5)
         if (failure === "malformed") return { model: jevModel, answers: {}, usage: { input_tokens: 1, output_tokens: 1 } }
+        if (failure === "distribution") return cascadeResponse({ "0": 0.9, "1": 0, "2": 0.9 }, 0.95, 0.95)
         throw new Error("offline")
       }
       try {
@@ -3346,6 +3351,9 @@ describe("eval judging", () => {
         assert.deepEqual(result.votes, [[1], [1]])
         assert.equal(result.cascade?.issueRoute, "amp-fallback")
         assert.equal(result.cascade?.pairs[1]?.route, "escalate")
+        if (failure !== "uncertain") {
+          assert.equal(result.cascade?.issueReason, "invalid-or-unavailable-response")
+        }
         assert.ok(result.cascade?.ampProvenance)
       } finally {
         await rm(cacheDirectory, { recursive: true, force: true })
