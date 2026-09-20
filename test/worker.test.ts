@@ -12,10 +12,32 @@ import {
   isAmpCancellationError,
   isTransientAmpError,
   ReviewWorkers,
+  runArchiveCommand,
 } from "../src/worker.js"
 
 const validResult = JSON.stringify({ summary: "Review complete", findings: [] })
 const threadId = "T-00000000-0000-0000-0000-000000000001"
+
+describe("archive command", () => {
+  it("returns as soon as the CLI confirms archival even if the process does not exit", async () => {
+    const startedAt = Date.now()
+
+    await runArchiveCommand(
+      process.execPath,
+      ["-e", "console.log('✓ Thread archived successfully'); setInterval(() => {}, 1_000)"],
+      2_000,
+    )
+
+    assert.ok(Date.now() - startedAt < 1_000, "the success message should avoid waiting for the timeout")
+  })
+
+  it("still rejects a command that exits without confirming archival", async () => {
+    await assert.rejects(
+      runArchiveCommand(process.execPath, ["-e", "process.stderr.write('archive failed'); process.exit(2)"], 2_000),
+      /code 2: archive failed/,
+    )
+  })
+})
 
 describe("executeReviewWithRetries", () => {
   it("sets the title when creating the review thread", async () => {
