@@ -253,6 +253,13 @@ const judgementFields = {
   disagreement: z.boolean(),
   models: z.array(z.string()),
   probabilities: z.array(z.number().min(0).max(1)).optional(),
+  usage: z
+    .object({
+      inputTokens: z.number().int().nonnegative(),
+      outputTokens: z.number().int().nonnegative(),
+    })
+    .strict()
+    .optional(),
   provenance: z.object({
     provider: z.enum(["amp", "typesafe"]).optional(),
     version: z.string(),

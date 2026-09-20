@@ -39,6 +39,7 @@ import {
   orderedReviewTasks,
   recordFinishedRun,
   selectCases,
+  withoutJudgements,
 } from "../eval/run.js"
 import {
   corpusContentHash,
@@ -2351,6 +2352,12 @@ describe("eval scoring", () => {
         },
       },
     })
+    const rematched = withoutJudgements(researchRun)
+    assert.equal(rematched.samples[0]!.matchingDurationMs, 0)
+    assert.equal(rematched.samples[0]!.durationMs, rematched.samples[0]!.reviewDurationMs)
+    if (rematched.samples[0]!.status !== "completed") assert.fail("expected completed sample")
+    assert.deepEqual(rematched.samples[0]!.judgements, [])
+    assert.deepEqual(rematched.samples[0]!.judgementErrors, [])
     const researchReport = formatReport(researchRun)
     assert.match(researchReport, /Review evaluation: PUBLIC RESEARCH ALLOWED/)
     assert.match(researchReport, /could research anything public/)
@@ -3070,6 +3077,7 @@ describe("eval judging", () => {
       assert.deepEqual(result.matchingFindingIndices, [0, 1])
       assert.deepEqual(result.votes, [[0, 1]])
       assert.deepEqual(result.probabilities, [0.81, 0.99, 0.1])
+      assert.deepEqual(result.usage, { inputTokens: 1, outputTokens: 1 })
       assert.equal(result.provenance.provider, "typesafe")
       assert.equal(result.provenance.apiVersion, "v1")
       assert.equal(result.provenance.model, jevModel)
@@ -3101,6 +3109,7 @@ describe("eval judging", () => {
       return {
         model: jevModel,
         answers: { finding_0: { type: "noul", noul: 0.8 } },
+        usage: { input_tokens: 2, output_tokens: 1 },
       }
     }
 
@@ -3114,8 +3123,12 @@ describe("eval judging", () => {
         0.8,
         systemOne,
       )
-      assert.deepEqual((await match()).matchingFindingIndices, [0])
-      assert.deepEqual((await match()).matchingFindingIndices, [0])
+      const first = await match()
+      const cached = await match()
+      assert.deepEqual(first.matchingFindingIndices, [0])
+      assert.deepEqual(cached.matchingFindingIndices, [0])
+      assert.deepEqual(first.usage, { inputTokens: 2, outputTokens: 1 })
+      assert.deepEqual(cached.usage, { inputTokens: 2, outputTokens: 1 })
       assert.equal(calls, 1, "identical matcher configuration should use the cache")
 
       const stricter = await judgeIssueWithJev(
@@ -3154,7 +3167,11 @@ describe("eval judging", () => {
               cacheDirectory,
               new AbortController().signal,
               jevMatchThreshold,
-              async () => ({ model: jevModel, answers }),
+              async () => ({
+                model: jevModel,
+                answers,
+                usage: { input_tokens: 2, output_tokens: 1 },
+              }),
             ),
             /finding_1|too_big|expected/i,
           )
@@ -3162,6 +3179,29 @@ describe("eval judging", () => {
           await rm(cacheDirectory, { recursive: true, force: true })
         }
       })
+    }
+  })
+
+  it("rejects a Jev response without token usage", async () => {
+    const cacheDirectory = await mkdtemp(join(tmpdir(), "amp-reviewbot-jev-"))
+    try {
+      await assert.rejects(
+        judgeIssueWithJev(
+          "blocking",
+          blocking.issues[0]!,
+          [highFinding],
+          cacheDirectory,
+          new AbortController().signal,
+          jevMatchThreshold,
+          async () => ({
+            model: jevModel,
+            answers: { finding_0: { type: "noul", noul: 0.9 } },
+          }),
+        ),
+        /usage/i,
+      )
+    } finally {
+      await rm(cacheDirectory, { recursive: true, force: true })
     }
   })
 

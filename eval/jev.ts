@@ -18,6 +18,7 @@ export const jevModel = "jev-1.13.0"
 export const jevMatchThreshold = 0.8
 
 const matcherVersion = "jev-1"
+const cacheVersion = 2
 const provider = "typesafe" as const
 const apiVersion = "v1"
 const responseSchemaDocument = `{
@@ -27,6 +28,10 @@ const responseSchemaDocument = `{
       "type": "noul",
       "noul": "number from 0 through 1: probability that the finding matches"
     }
+  },
+  "usage": {
+    "input_tokens": "non-negative integer",
+    "output_tokens": "non-negative integer"
   }
 }`
 const responseSchemaHash = hash(responseSchemaDocument)
@@ -53,6 +58,10 @@ const answerSchema = z.object({
 const cachedResultSchema = z.object({
   model: z.literal(jevModel),
   probabilities: z.array(z.number().min(0).max(1)),
+  usage: z.object({
+    inputTokens: z.number().int().nonnegative(),
+    outputTokens: z.number().int().nonnegative(),
+  }).strict(),
 }).strict()
 
 export function createJevMatcher(
@@ -112,6 +121,7 @@ export async function judgeIssueWithJev(
   }
 
   const cacheKey = hash(JSON.stringify({
+    cacheVersion,
     provider,
     apiVersion,
     matcherVersion,
@@ -139,6 +149,7 @@ export async function judgeIssueWithJev(
     disagreement: false,
     models: [result.model],
     probabilities: result.probabilities,
+    usage: result.usage,
     provenance,
   }
 }
@@ -221,6 +232,10 @@ async function readOrCreateJevResult(
   const parsed = z.object({
     model: z.literal(jevModel),
     answers: z.object(answerShape).strict(),
+    usage: z.object({
+      input_tokens: z.number().int().nonnegative(),
+      output_tokens: z.number().int().nonnegative(),
+    }).strict(),
   }).passthrough().parse(response)
   const result = cachedResultSchema.parse({
     model: parsed.model,
@@ -228,6 +243,10 @@ async function readOrCreateJevResult(
       { length: findingCount },
       (_, index) => parsed.answers[questionId(index)]!.noul,
     ),
+    usage: {
+      inputTokens: parsed.usage.input_tokens,
+      outputTokens: parsed.usage.output_tokens,
+    },
   })
 
   await mkdir(cacheDirectory, { recursive: true })
