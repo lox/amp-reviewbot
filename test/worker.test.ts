@@ -244,7 +244,7 @@ describe("executeReviewWithRetries", () => {
   })
 })
 
-describe("usage collection for finished reviews", () => {
+describe("cleanup for finished review threads", () => {
   const usage: ThreadUsage = {
     costUsd: 0.5,
     inputTokens: 10,
@@ -254,16 +254,24 @@ describe("usage collection for finished reviews", () => {
   }
 
   function workersWith(
-    uncollected: string[],
+    pending: Array<{ threadId: string; needsArchive: boolean; needsUsage: boolean }>,
     lookups: Record<string, { usage: ThreadUsage } | { unavailable: string }>,
-    options: { failWritesFor?: string[] } = {},
+    options: { failWritesFor?: string[]; failArchiveFor?: string[] } = {},
   ) {
     const stored: Array<{ threadId: string; usage?: ThreadUsage; error?: string }> = []
+    const archived: string[] = []
+    const attempted: string[] = []
     const requests: number[] = []
     const database = {
-      async uncollectedThreadIds(limit: number) {
+      async pendingThreadCleanup(limit: number) {
         requests.push(limit)
-        return uncollected
+        return pending
+      },
+      async setThreadArchived(threadId: string) {
+        archived.push(threadId)
+      },
+      async setThreadCleanupAttempted(threadId: string) {
+        attempted.push(threadId)
       },
       async setThreadUsage(threadId: string, collected: ThreadUsage) {
         if (options.failWritesFor?.includes(threadId)) throw new Error("connection terminated unexpectedly")
@@ -283,19 +291,27 @@ describe("usage collection for finished reviews", () => {
         looked.push(threadId)
         return lookups[threadId] ?? { unavailable: "not stubbed" }
       },
+      async (threadId) => {
+        if (options.failArchiveFor?.includes(threadId)) throw new Error("archive timed out")
+      },
     )
-    return { workers, stored, looked, requests }
+    return { workers, stored, looked, archived, attempted, requests }
   }
 
-  it("stores usage for threads an interrupted worker left behind and records lookups that fail", async () => {
-    const { workers, stored, looked, requests } = workersWith(["T-done", "T-gone"], {
+  it("archives threads an interrupted worker left behind and collects their usage", async () => {
+    const pending = [
+      { threadId: "T-done", needsArchive: true, needsUsage: true },
+      { threadId: "T-gone", needsArchive: true, needsUsage: true },
+    ]
+    const { workers, stored, looked, archived, requests } = workersWith(pending, {
       "T-done": { usage },
       "T-gone": { unavailable: "Usage information is currently unavailable for this thread" },
     })
 
-    await (workers as unknown as { collectUncollectedUsage(): Promise<void> }).collectUncollectedUsage()
+    await (workers as unknown as { collectPendingThreadCleanup(): Promise<void> }).collectPendingThreadCleanup()
 
     assert.deepEqual(requests, [20], "one bounded batch per recovery pass")
+    assert.deepEqual(archived, ["T-done", "T-gone"])
     assert.deepEqual(looked, ["T-done", "T-gone"])
     assert.deepEqual(stored, [
       { threadId: "T-done", usage },
@@ -303,35 +319,115 @@ describe("usage collection for finished reviews", () => {
     ])
   })
 
+  it("blocks new reviews, drains active reviews, and still makes cleanup progress", async () => {
+    const { workers, archived, looked, stored } = workersWith(
+      [
+        { threadId: "T-pending", needsArchive: true, needsUsage: true },
+        { threadId: "T-next", needsArchive: true, needsUsage: true },
+      ],
+      { "T-pending": { usage }, "T-next": { usage } },
+    )
+    const state = workers as unknown as {
+      active: Set<AbortController>
+      activeDrainWaiters: Set<() => void>
+      cleanupBarrier?: Promise<void>
+      reviewsWaiting: number
+      collectPendingThreadCleanup(): Promise<void>
+    }
+    const activeReview = new AbortController()
+    state.active.add(activeReview)
+
+    const cleanup = state.collectPendingThreadCleanup()
+    await Promise.resolve()
+    assert.ok(state.cleanupBarrier, "the claim barrier is established before active reviews drain")
+    assert.deepEqual(archived, [])
+
+    state.reviewsWaiting = 1
+    state.active.delete(activeReview)
+    for (const resolve of state.activeDrainWaiters) resolve()
+    state.activeDrainWaiters.clear()
+    await cleanup
+
+    assert.deepEqual(archived, ["T-pending"], "a saturated queue cannot starve archival")
+    assert.deepEqual(looked, ["T-pending"], "successful archival finishes its usage before yielding")
+    assert.deepEqual(stored, [{ threadId: "T-pending", usage }])
+  })
+
+  it("continues past one failed row before yielding to a waiting review", async () => {
+    const { workers, archived, attempted, looked } = workersWith(
+      [
+        { threadId: "T-poisoned", needsArchive: true, needsUsage: true },
+        { threadId: "T-progress", needsArchive: true, needsUsage: true },
+        { threadId: "T-later", needsArchive: true, needsUsage: true },
+      ],
+      { "T-progress": { usage } },
+      { failArchiveFor: ["T-poisoned"] },
+    )
+    const state = workers as unknown as {
+      reviewsWaiting: number
+      collectPendingThreadCleanup(): Promise<void>
+    }
+    state.reviewsWaiting = 1
+
+    await state.collectPendingThreadCleanup()
+
+    assert.deepEqual(attempted, ["T-poisoned", "T-progress"])
+    assert.deepEqual(archived, ["T-progress"])
+    assert.deepEqual(looked, ["T-progress"])
+  })
+
   it("leaves a thread uncollected when storing valid usage fails, so it is retried instead of recorded as an error", async () => {
     const { workers, stored, looked } = workersWith(
-      ["T-flaky", "T-fine"],
+      [
+        { threadId: "T-flaky", needsArchive: false, needsUsage: true },
+        { threadId: "T-fine", needsArchive: false, needsUsage: true },
+      ],
       { "T-flaky": { usage }, "T-fine": { usage } },
       { failWritesFor: ["T-flaky"] },
     )
 
-    await (workers as unknown as { collectUncollectedUsage(): Promise<void> }).collectUncollectedUsage()
+    await (workers as unknown as { collectPendingThreadCleanup(): Promise<void> }).collectPendingThreadCleanup()
 
     assert.deepEqual(looked, ["T-flaky", "T-fine"], "one failed write does not stop the batch")
     assert.deepEqual(stored, [{ threadId: "T-fine", usage }], "no usage_error row masks the valid usage")
   })
 
-  it("does nothing when every finished thread already has usage", async () => {
+  it("does nothing when every finished thread is already cleaned up", async () => {
     const { workers, stored, looked } = workersWith([], {})
 
-    await (workers as unknown as { collectUncollectedUsage(): Promise<void> }).collectUncollectedUsage()
+    await (workers as unknown as { collectPendingThreadCleanup(): Promise<void> }).collectPendingThreadCleanup()
 
     assert.deepEqual(looked, [])
     assert.deepEqual(stored, [])
   })
 
   it("stops collecting once the service is shutting down", async () => {
-    const { workers, stored } = workersWith(["T-1", "T-2"], { "T-1": { usage }, "T-2": { usage } })
+    const { workers, stored } = workersWith(
+      [
+        { threadId: "T-1", needsArchive: true, needsUsage: true },
+        { threadId: "T-2", needsArchive: true, needsUsage: true },
+      ],
+      { "T-1": { usage }, "T-2": { usage } },
+    )
     await workers.stop()
 
-    await (workers as unknown as { collectUncollectedUsage(): Promise<void> }).collectUncollectedUsage()
+    await (workers as unknown as { collectPendingThreadCleanup(): Promise<void> }).collectPendingThreadCleanup()
 
     assert.deepEqual(stored, [], "a stopping worker leaves the backlog for the next process")
+  })
+
+  it("leaves archival and usage pending when archival fails", async () => {
+    const { workers, archived, stored, looked } = workersWith(
+      [{ threadId: "T-flaky", needsArchive: true, needsUsage: true }],
+      { "T-flaky": { usage } },
+      { failArchiveFor: ["T-flaky"] },
+    )
+
+    await (workers as unknown as { collectPendingThreadCleanup(): Promise<void> }).collectPendingThreadCleanup()
+
+    assert.deepEqual(archived, [], "the database must not claim failed archival succeeded")
+    assert.deepEqual(looked, [], "usage stays retryable instead of timing out behind failed archival")
+    assert.deepEqual(stored, [])
   })
 })
 

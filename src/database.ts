@@ -44,6 +44,12 @@ export type StaleJobRecovery = {
   exhausted: ReviewJob[]
 }
 
+export type PendingThreadCleanup = {
+  threadId: string
+  needsArchive: boolean
+  needsUsage: boolean
+}
+
 /** Error text migration 004 writes on the duplicates it cancels; keep in sync. */
 const duplicateInFlightError = "Duplicate in-flight review for the same pull request head"
 
@@ -92,6 +98,7 @@ export class Database {
       "002_review_context.sql",
       "003_review_threads.sql",
       "004_review_results.sql",
+      "005_thread_archival.sql",
     ]) {
       const sql = await readFile(resolve("migrations", file), "utf8")
       await this.pool.query(sql)
@@ -376,23 +383,44 @@ export class Database {
     return result.rows.map((row) => row.thread_id)
   }
 
-  /**
-   * Threads of finished jobs whose usage was never looked up, oldest first. A
-   * worker that exits between finishing a job and reading its usage leaves
-   * these behind; the recovery loop collects them.
-   */
-  async uncollectedThreadIds(limit: number): Promise<string[]> {
-    const result = await this.pool.query<{ thread_id: string }>(
-      `SELECT review_threads.thread_id
+  async pendingThreadCleanup(limit: number): Promise<PendingThreadCleanup[]> {
+    const result = await this.pool.query<{
+      thread_id: string
+      needs_archive: boolean
+      needs_usage: boolean
+    }>(
+      `SELECT review_threads.thread_id,
+              review_threads.archived_at IS NULL AS needs_archive,
+              review_threads.usage_collected_at IS NULL AS needs_usage
        FROM review_threads
        JOIN review_jobs ON review_jobs.id = review_threads.job_id
-       WHERE review_threads.usage_collected_at IS NULL
+       WHERE (review_threads.archived_at IS NULL OR review_threads.usage_collected_at IS NULL)
          AND review_jobs.status IN ('succeeded', 'failed', 'cancelled')
-       ORDER BY review_threads.created_at
+       ORDER BY review_threads.cleanup_attempted_at ASC NULLS FIRST,
+                (review_threads.archived_at IS NULL) DESC,
+                review_threads.created_at
        LIMIT $1`,
       [limit],
     )
-    return result.rows.map((row) => row.thread_id)
+    return result.rows.map((row) => ({
+      threadId: row.thread_id,
+      needsArchive: row.needs_archive,
+      needsUsage: row.needs_usage,
+    }))
+  }
+
+  async setThreadArchived(threadId: string): Promise<void> {
+    await this.pool.query(
+      "UPDATE review_threads SET archived_at = NOW() WHERE thread_id = $1",
+      [threadId],
+    )
+  }
+
+  async setThreadCleanupAttempted(threadId: string): Promise<void> {
+    await this.pool.query(
+      "UPDATE review_threads SET cleanup_attempted_at = NOW() WHERE thread_id = $1",
+      [threadId],
+    )
   }
 
   async setThreadUsage(threadId: string, usage: ThreadUsage): Promise<void> {
