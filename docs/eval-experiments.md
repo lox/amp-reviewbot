@@ -1,5 +1,19 @@
 # Prompt experiment log
 
+## Finding matcher validation
+
+The original batched standalone Jev matcher was rejected: a typed probability did not make its unvalidated `0.8` threshold accuracy preserving. It remains available only to reproduce old matcher artifacts.
+
+The replacement `jev-cascade-1` was frozen before evaluation: Jev 1.13.0, API v1, SDK 0.6.0, one minimal request per issue/finding pair, three independent relation/cause/failure questions, inclusive `0.90` match and `0.90`/`0.10` non-match boundaries, and whole-issue Amp fallback for any uncertainty or failure. Blind adjudication hid provider identity, scores, routes, severity, taxonomy, and source identifiers. No threshold, prompt, or policy changed between slices.
+
+It passed all predeclared gates on three slices:
+
+- Historical development: 362 pairs and 267 issue units; 162 auto-resolved, 102 fell back, and 3 lacked a saved incumbent. The cascade and incumbent each made one wrong pair and exact-set decision on common adjudicated units, neither involving a blocking issue. It avoided 242 of 449 saved Amp votes (53.9%) and made no correct downstream outcome incorrect. This older-corpus slice is matcher evidence, not current reviewer accuracy.
+- Corrected current development: 115 pairs and 84 issue units; 49 auto-resolved and 35 fell back. Blind adjudication found 0/54 pair errors and 0/42 exact-set errors for both matchers, with no blocking or downstream errors. It avoided 84 of 154 newly generated Amp votes (54.5%); the measured-usage cost projection was 54.5% lower, not a measured bill.
+- Frozen corrected holdout A: 108 pairs and 45 issue units; 28 auto-resolved and 17 fell back. Blind adjudication found 0/59 pair errors and 0/28 exact-set errors for both matchers, with no blocking or downstream errors. It avoided 56 of 90 newly generated Amp votes (62.2%); the development-usage-based cost projection was 62.1% lower, not measured holdout spend.
+
+Repeated samples were interpreted by source example, and no B/candidate holdout artifact informed the frozen run. These finite results support the cascade as an accuracy-preserving selective accelerator on the evaluated corpus; they are not a general accuracy claim. `amp` remains the CLI default so environments without TypeSafe credentials keep working, while `jev-cascade` is the recommended matcher for full reports.
+
 One row per predeclared A/B. A row is written when the decision page is read, whatever it says. KEEP A and REGRESSION are finished experiments; do not rerun them with the same prompt. Blocking is "blocking versions blocked", wrong is "non-blocking versions blocked". Set compositions are the corrected labels at the time of the run.
 
 | Date | Set | A | B | Blocking A / B | Wrong A / B | Verdict | Outcome |

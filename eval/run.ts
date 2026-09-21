@@ -21,6 +21,7 @@ import { checkReviewTrace, modelsFromTrace } from "./evidence.js"
 import { formatAbDecision, interleavedAbTasks, loadFrozenSet, type AbVariant } from "./ab.js"
 import { judgeIssue, type AmpVersions, type IssueMatcher } from "./judge.js"
 import { createJevMatcher, jevMatchThreshold } from "./jev.js"
+import { createJevCascadeMatcher } from "./jev-cascade.js"
 import { checkPack, describePack, loadPack } from "./pack.js"
 import { formatReport } from "./report.js"
 import { formatComparison } from "./compare.js"
@@ -46,7 +47,7 @@ import { scoreRun, type EvalScore } from "./score.js"
 
 const execFileAsync = promisify(execFile)
 const failOn = "high" as const
-type MatcherName = "amp" | "jev"
+type MatcherName = "amp" | "jev" | "jev-cascade"
 
 type RunOptions = {
   packPath: string
@@ -522,7 +523,7 @@ export async function finishJudgements(
 ): Promise<{ run: EvalRun; attempted: number }> {
   const samples = structuredClone(sourceRun.samples)
   const tasks = samples.flatMap((sample, sampleIndex) => {
-    if (sample.status !== "completed" || sample.retainedResult.findings.length === 0) return []
+    if (sample.status !== "completed") return []
     const checkedIssues = new Set(sample.judgements.map((judgement) => judgement.issueId))
     return sample.expected.issues
       .filter((issue) => !checkedIssues.has(issue.id))
@@ -969,7 +970,7 @@ function finishOptions(args: string[]): FinishOptions {
   const runPath = requiredInput(args, "--run")
   const matcher = matcherFlag(args)
   const jevThreshold = thresholdFlag(args, matcher)
-  if (matcher === "amp" && process.env.AMP_API_KEY) {
+  if (matcher !== "jev" && process.env.AMP_API_KEY) {
     throw new Error("Unset AMP_API_KEY; finishing uses the authenticated local Amp CLI")
   }
   requireMatcherCredentials(matcher)
@@ -996,7 +997,9 @@ function finishOptions(args: string[]): FinishOptions {
 
 function matcherFlag(args: string[]): MatcherName {
   const matcher = flag(args, "--matcher") ?? "amp"
-  if (matcher !== "amp" && matcher !== "jev") throw new Error("--matcher must be amp or jev")
+  if (matcher !== "amp" && matcher !== "jev" && matcher !== "jev-cascade") {
+    throw new Error("--matcher must be amp, jev, or jev-cascade")
+  }
   return matcher
 }
 
@@ -1013,13 +1016,15 @@ function thresholdFlag(args: string[], matcher: MatcherName): number {
 }
 
 function requireMatcherCredentials(matcher: MatcherName): void {
-  if (matcher === "jev" && !process.env.TYPESAFE_API_KEY) {
-    throw new Error("Set TYPESAFE_API_KEY to use --matcher jev")
+  if ((matcher === "jev" || matcher === "jev-cascade") && !process.env.TYPESAFE_API_KEY) {
+    throw new Error(`Set TYPESAFE_API_KEY to use --matcher ${matcher}`)
   }
 }
 
 function issueMatcher(matcher: MatcherName, threshold: number): IssueMatcher {
-  return matcher === "jev" ? createJevMatcher(threshold) : judgeIssue
+  if (matcher === "jev") return createJevMatcher(threshold)
+  if (matcher === "jev-cascade") return createJevCascadeMatcher()
+  return judgeIssue
 }
 
 export function withoutJudgements(run: EvalRun): EvalRun {

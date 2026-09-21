@@ -58,9 +58,13 @@ Amp still chooses models for specialist tools such as Search and Librarian. One 
 
 Each result records the configured mode and model plus the exact Amp SDK and CLI versions. It also saves model IDs from the event stream when Amp reports them. Current Amp streams sometimes omit those IDs; an empty list means “not reported,” not “no model was used.”
 
-Finding comparison defaults to the incumbent Amp majority matcher: two votes, plus a third only when the first two disagree. `--matcher jev` explicitly selects the experimental TypeSafe System One matcher instead. It sends one batched request per expected issue, with one binary (`noul`) question per candidate finding, then includes every finding whose match probability is at least the configured threshold. The initial, deliberately conservative threshold is `0.8`; it has not been validated as an accuracy-optimal threshold and is not the default matcher. Override it only for an explicit experiment with `--jev-threshold NUMBER`.
+Finding comparison defaults to the incumbent Amp majority matcher: two votes, plus a third only when the first two disagree. This remains the credential-safe default. For full reports, the recommended validated mode is `--matcher jev-cascade`; it requires both the authenticated local Amp CLI and `TYPESAFE_API_KEY`. Amp remains available as `--matcher amp`.
 
-The Jev integration pins model `jev-1.13.0`, TypeSafe API `v1`, and `@typesafe-ai/sdk` `0.6.0` rather than following a moving model alias. Saved judgements include per-finding probabilities and exact request token usage, and identify the provider, matcher version, model, API and SDK versions, threshold, full request/question definitions, response schema, and their hashes. The request and matcher configuration participate in the cache key. Existing artifacts without a provider remain Amp judgements and keep their historical interpretation.
+The cascade sends one TypeSafe request per expected-issue/candidate-finding pair. Each request contains only the expected root cause, failure behavior, and path and the finding title, message, suggestion, and path. Jev independently scores the overall relation, same cause, and same failure. A pair matches only when all three match probabilities are at least `0.90`; it is a confident non-match only when the different-defect probability is at least `0.90` and either component probability is at most `0.10`. Everything else escalates. If any pair escalates, is malformed, or fails, the incumbent judges the complete original candidate list for that issue. Confident issues preserve every matching index. Paths are audit metadata rather than matching proof, and an empty candidate list needs no provider call.
+
+`--matcher jev` retains the original standalone experiment for historical reproduction. It sends one batched request per expected issue, with one binary (`noul`) question per candidate finding, then includes every finding whose match probability reaches its configurable threshold. Its initial threshold is `0.8`; validation found that standalone matcher was not accuracy preserving. Do not use it for authoritative reports. `--jev-threshold` applies only to this legacy mode.
+
+Both Jev integrations pin model `jev-1.13.0`, TypeSafe API `v1`, and `@typesafe-ai/sdk` `0.6.0` rather than following a moving alias. Cascade judgements save every primitive probability, pair route, failure/fallback reason, path equality, token usage, timing, cache status, component provenance, and prompt/schema/request hashes. Request definitions and matcher versions participate in cache keys. Failed responses are not cached. Existing artifacts without a provider and legacy TypeSafe artifacts retain their historical interpretation.
 
 ## Commands
 
@@ -90,16 +94,16 @@ npm run eval -- run /path/to/review-eval-pack \
   --concurrency 2
 ```
 
-Do not set `AMP_API_KEY`; by default the evaluation uses the authenticated local CLI to compare findings with recorded issues and rejects an `AMP_API_KEY` inherited from the shell. Confirm that the separate review identity cannot access the example pack before running either group. To run the experimental matcher instead, set `TYPESAFE_API_KEY` and add `--matcher jev`; the separate `AMP_EVAL_REVIEWER_API_KEY` is still required for the review phase.
+Do not set `AMP_API_KEY`; by default the evaluation uses the authenticated local CLI to compare findings with recorded issues and rejects an `AMP_API_KEY` inherited from the shell. Confirm that the separate review identity cannot access the example pack before running either group. For the recommended cascade, set `TYPESAFE_API_KEY` and add `--matcher jev-cascade`; the separate `AMP_EVAL_REVIEWER_API_KEY` is still required for the review phase.
 
-### Validate the experimental Jev matcher
+### Compare matcher behavior
 
-Do not infer accuracy from a successful API call. Compare Jev against the incumbent on the exact same saved reviews before considering a threshold or model change. Given a completed Amp-matched artifact, rematch a derived copy with Jev; `--rematch` clears only the derived copy's finding judgements and matching duration, never the source review or artifact:
+Do not infer accuracy from a successful API call or agreement with Amp. Given a completed Amp-matched development artifact, rematch a derived copy with the cascade; `--rematch` clears only the derived copy's finding judgements and matching duration, never the source review or artifact:
 
 ```sh
 export TYPESAFE_API_KEY="early-access-key"
 npm run eval -- finish .eval-runs/AMP.json \
-  --matcher jev \
+  --matcher jev-cascade \
   --rematch \
   --output .eval-runs/JEV.json
 npm run eval -- compare .eval-runs/AMP.json .eval-runs/JEV.json
@@ -119,7 +123,7 @@ jq -r '.samples[] | select(.status == "completed") | . as $s |
 diff -u /tmp/amp-matches.tsv /tmp/jev-matches.tsv
 ```
 
-Record false matches, missed matches, and boundary cases separately. Tune a threshold only on the development set, predeclare it before checking holdout examples, and rerun with `--jev-threshold`. A threshold change gets a distinct cache entry and provenance record. Jev outputs are typed, not guaranteed semantically correct.
+Blindly adjudicate every auto-resolved exact issue set and every disagreement, consulting source when the retained evidence is insufficient. Record false matches, false non-matches, blocking errors, and downstream scorecard changes separately, grouped by source example. The cascade thresholds and prompt are frozen from validation; a future change is a new matcher version and experiment, not an inline threshold override. Jev outputs are typed, not guaranteed semantically correct.
 
 Read a saved result without making network or model calls:
 
@@ -196,7 +200,7 @@ If reviews finish but checking their findings is interrupted, finish only those 
 npm run eval -- finish .eval-runs/RUN.json
 ```
 
-This uses the incumbent matcher and local CLI login by default and does not use `AMP_EVAL_REVIEWER_API_KEY`. Pass `--matcher jev` with `TYPESAFE_API_KEY` to finish with Jev instead. It writes a new result, keeps the original unchanged, and records the original file's hash so the two can be compared exactly. Normally only unfinished issues are matched; `--rematch` deliberately replaces all finding judgements in the derived artifact so two matchers or thresholds can be compared on identical saved reviews.
+This uses the incumbent matcher and local CLI login by default and does not use `AMP_EVAL_REVIEWER_API_KEY`. Pass `--matcher jev-cascade` with `TYPESAFE_API_KEY` to finish with the recommended selective cascade instead; standalone `--matcher jev` is only for reproducing its historical experiment. The command writes a new result, keeps the original unchanged, and records the original file's hash so the two can be compared exactly. Normally only unfinished issues are matched; `--rematch` deliberately replaces all finding judgements in the derived artifact so matchers can be compared on identical saved reviews.
 
 ## Reading a result
 
