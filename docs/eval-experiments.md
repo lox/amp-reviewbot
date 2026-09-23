@@ -28,6 +28,7 @@ One row per predeclared A/B. A row is written when the decision page is read, wh
 | 2026-09-10 | fast-v2 (8/4/4) | current | severity calibration gate | 7/8 / 4/8 | 4/8 / 3/8 | REGRESSION | Lost #3825, #3964, #4015; removed only #3907. The three targeted wrong blocks (#2759, #3820, #3931) were unchanged. |
 | 2026-09-11 | fast-v2 (8/4/4) | current (saved A artifact) | severity re-pass over its 11 blocked reviews | 7/8 / 6/8 | 4/8 / 4/8 | KEEP A | Re-pass kept all four wrong blocks at high and lowered one real finding (#3964 mutant, high to low) after reasoning that a later `wait` step would catch the failure. 9 minutes, 0 failures or violations. Not wired into production. |
 | 2026-09-21 | fast-v2 (9/3/4, corrected after run) | current | effective-default trace | 6/9 / 7/9 | 4/7 / 4/7 | REGRESSION on frozen labels; KEEP A after source adjudication | Frozen labels made #3964 clean-control look like a new wrong block. Source reproduction established it as a real release-regex defect, making #3825 and #3964 gains against a #4015 loss. The corrected result still misses the PROMISING gate. No ship, confirmation, or holdout. |
+| 2026-09-23 | severity-blocking-evidence-v1 (6/8/4 at freeze) | current | blocking path plus recovery evidence | 5/6 / 4/6 | 6/12 / 2/12 | REGRESSION by predeclared rule; generic page said KEEP A | Removed five frozen-label wrong blocks but added a #4339 wrong block and lost #4358. Source audit confirmed #4327 clean as another real blocking loss and corrected that inherited issue on both versions. No confirmation, holdout, or ship. |
 
 ## Noise floor
 
@@ -35,7 +36,38 @@ One row per predeclared A/B. A row is written when the decision page is read, wh
 
 ## What the log says so far
 
-Three prompt-wording attempts at severity calibration (tightened high, scope gate, severity calibration gate) each lowered blocking detection by one to three calls while leaving the persistent wrong blocks in place. The reviewer's severity judgement on #2759, #3820, and #3931 has not moved under any wording, and the severity re-pass below (a change of mechanism, not wording) did not move it either. With the later #3964 label correction, the production prompt blocks 25/30 evaluable development bugs and wrongly blocks 5/21 non-blocking versions; the remaining versions were excluded for rule breaking or never scored because the prepared source no longer matched the pack. The later #4110 clean-change high (see the miss audit) moves the holdout to 17/19 blocked and 3/9 wrong. Severity-suppression experiments are closed. None reached PROMISING on a fast set; the one wide-set PROMISING (scope gate) was a holdout REGRESSION and a wash after rescoring; the two that removed a wrong block on a fast set (tightened high removed #2759, the calibration gate removed #3907) each lost at least one real block; and the re-pass removed none. `current` stays. The offline miss audit found a repeated effective-default evidence gap, but the targeted experiment above traded two corrected blocking gains for one blocking loss and therefore finished KEEP A after source adjudication. A multi-sample majority remains unjustified because only #3825 was unstable across saved current-prompt runs.
+Three prompt-wording attempts at severity calibration (tightened high, scope gate, severity calibration gate) each lowered blocking detection by one to three calls while leaving the persistent wrong blocks in place. The reviewer's severity judgement on #2759, #3820, and #3931 has not moved under any wording, and the severity re-pass below (a change of mechanism, not wording) did not move it either. The later blocking-evidence experiment did move two newly targeted medium promotions, but it also promoted a focused test failure to high and suppressed independently reproduced blocking defects; making the proof obligation more concrete did not make it selective. With the later #3964 label correction, the production prompt blocks 25/30 evaluable development bugs and wrongly blocks 5/21 non-blocking versions; the remaining versions were excluded for rule breaking or never scored because the prepared source no longer matched the pack. The later #4110 clean-change high (see the miss audit) moves the holdout to 17/19 blocked and 3/9 wrong. Severity-suppression experiments are closed. None reached PROMISING on a fast set; the one wide-set PROMISING (scope gate) was a holdout REGRESSION and a wash after rescoring. `current` stays. The offline miss audit found a repeated effective-default evidence gap, but its targeted experiment traded two corrected blocking gains for one blocking loss and therefore finished KEEP A after source adjudication. A multi-sample majority remains unjustified because only #3825 was unstable across saved current-prompt runs.
+
+## Blocking evidence trace (finished: REGRESSION)
+
+Hypothesis (2026-09-23): the reviewer promotes real medium defects and unsupported claims because it
+stops at an intermediate mismatch rather than establishing a supported production caller, an
+unrecovered terminal consequence, and the absence of the strongest adjacent recovery path. Unlike
+the earlier severity checklist and second-opinion re-pass, the candidate preserved finding
+generation and required that evidence acquisition in the first review before a finding could remain
+high. The development-only set retained both versions of nine independent source examples: six
+blocking, eight clean, and four advisory-only versions at freeze. PROMISING required at least three
+net wrong blocks removed, source-grounded improvement on two of three targeted medium promotions,
+zero blocking loss, zero new wrong blocks, and no consequential execution or rule failure. Any new
+wrong block or at least two blocking losses was REGRESSION.
+
+All 36 paired reviews completed once with no retry, execution failure, or rule violation. On frozen
+labels, A/B blocking was 5/6 versus 4/6 and wrong blocks were 6/12 versus 2/12: five wrong blocks were
+removed, one was added, and one blocking call was lost. The generic evaluator page recorded KEEP A,
+but the experiment's stricter rule makes the new #4339 wrong block a REGRESSION. The candidate did
+correctly lower #4323 and #4327's medium optimization defect; it left #4355 high, promoted #4339
+because its focused test fails in CI, and lowered the independently reproduced #4358 partial-mirror
+failure.
+
+Post-run source audit found a frozen label defect rather than improving the verdict. The incumbent's
+#4327 clean-control finding was real: a focused Git reproduction showed that connectivity-only fsck
+accepts a malformed reachable pack that full fsck and the subsequent reference clone reject. The
+inherited high issue is now recorded on both #4327 versions without changing the registered decision
+page. On corrected labels the set is 8/7/3; source adjudication gives A/B blocking of 6/8 versus 4/8
+and wrong blocks of 4/10 versus 2/10. Candidate B missed the inherited issue. The #4287 and #4348
+clean-control removals were correct, while #4323 and the default-flag part of #4327 were correct
+severity reductions. The result remains REGRESSION, and the protocol stopped without confirmation,
+holdout, or a reviewer change.
 
 ## Severity re-pass (finished: KEEP A)
 
