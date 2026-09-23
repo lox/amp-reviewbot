@@ -1,11 +1,8 @@
 # amp-reviewbot
 
-`amp-reviewbot` is a GitHub App that reviews pull requests in fresh [Amp orbs](https://ampcode.com/manual/orbs) and publishes the result as a GitHub check run with line annotations.
+`amp-reviewbot` reviews pull requests in fresh [Amp orbs](https://ampcode.com/docs/orbs) and posts a GitHub check with line annotations. High and critical findings block by default; lower-severity findings are advisory.
 
-Each review gets an Amp thread labeled `reviewbot`. GitHub delivery IDs and a Postgres job queue make webhook handling idempotent, and a newer PR revision cancels an obsolete review.
-Review threads are archived after each run; the corresponding GitHub check keeps a direct link to the archived thread. Reviewbot runs `amp threads usage --details` for every thread used by a job, including fresh retries, and stores the results in `review_threads`. Amp credits and estimated provider cost at list price are separate values; the estimate remains null when Amp does not report `Est. list price`. If a worker exits or a cleanup operation fails, a separate loop retries archival and missing usage collection without competing with an active review.
-Interrupted worker jobs are recovered periodically and reuse their existing GitHub check with a fresh Amp thread. After three worker attempts, the check fails instead of remaining pending.
-Every completed review also records its conclusion, finding counts, findings, and the prompt identifier in `review_results`, so production behaviour can be queried alongside the eval history in [`docs/eval-experiments.md`](docs/eval-experiments.md). GitHub does not retry failed webhook deliveries, so every five minutes the worker lists the open pull requests of each repository that has already sent a webhook and queues a review for any head that is between five minutes and seven days old and has never been queued. Before reviewing, the worker re-reads the pull request and cancels the job if it is closed, a draft, or on a newer head. See [`docs/plans/production-monitoring.md`](docs/plans/production-monitoring.md).
+Each review has an Amp thread linked from the check. A new PR revision cancels the old review.
 
 ## How it works
 
@@ -22,9 +19,9 @@ The queued job freezes the PR title, description, and base/head branch names wit
 
 The service keeps the GitHub App private key. Review orbs receive repository access from their Amp project, but never receive the GitHub App credential.
 
-Reviewbot keeps one self-contained [`general-code-reviewing`](.agents/skills/general-code-reviewing/SKILL.md) skill under `.agents/skills`. Its ship-risk and simplicity passes are embedded directly into every review prompt without skill metadata, so target-repository orbs do not depend on globally installed skills.
+Every prompt includes the ship-risk and simplicity passes from [`general-code-reviewing`](.agents/skills/general-code-reviewing/SKILL.md). Review orbs do not need that skill installed separately.
 
-The `reviewbot-v1` Amp mode extends the built-in `medium` agent, preserving its prompt and tools while pinning the main reviewer and Oracle to `openai/gpt-5.6-sol`. Amp continues to route specialist tools such as Search and Librarian because replacing their different models with one model would change how the production agent works.
+The `reviewbot-v1` mode uses Amp's `medium` prompt and tools, with the main reviewer and Oracle pinned to `openai/gpt-5.6-sol`. Amp still chooses the models for Search, Librarian and other specialist tools.
 
 ## Requirements
 
@@ -53,9 +50,12 @@ Create a GitHub App with:
 
 Checks write permission automatically enables the `check_run` events used by GitHub's **Re-run** control.
 
-Install the App on repositories that have corresponding Amp projects. The Amp account behind `AMP_API_KEY` must be allowed to start orb threads for those projects and must have the exact [pinned agent plugin](plugins/pinned-models.js) installed as a personal or workspace plugin. Do not install it as a project plugin: loading the same mode from both the project and the account makes the mode ambiguous.
+Install the App on repositories that have corresponding Amp projects. The account behind `AMP_API_KEY` needs:
 
-The plugin must be installed through Amp, not only included in the service image. The local CLI sends its mode name when it starts an orb, and the orb loads the matching definition from that account's plugins. A missing plugin makes the review fail rather than silently use a different model. The plugin also prepares frozen source for the separate evaluation runner; normal production review prompts do not activate that hook. The model and version are part of the mode name so a future mode can be installed before the service switches to it.
+- Permission to start orb threads for those projects.
+- The exact [pinned agent plugin](plugins/pinned-models.js), installed through Amp as a personal or workspace plugin. Including it in the service image is not enough: the orb loads plugins from the account running it.
+
+Do not also install the plugin at project level. Duplicate mode names are ambiguous, and a missing or ambiguous mode fails the review rather than falling back to another model.
 
 ## Configure
 
@@ -75,7 +75,7 @@ Copy `.env.example` and provide:
 | `REVIEW_TIMEOUT_MINUTES` | Per-review timeout, default `30` |
 | `FAIL_ON` | Lowest failing severity, default `high` |
 
-Run locally. `mise install` puts Node 22 under mise's control but does not change the current shell's `PATH`, so either [activate mise](https://mise.jdx.dev/getting-started.html#activate-mise) in your shell or run the npm commands through `mise exec`:
+Run locally with `mise exec`, or [activate mise](https://mise.jdx.dev/getting-started.html#activate-mise) in your shell first. `mise install` alone does not update `PATH`.
 
 ```sh
 mise install
@@ -133,7 +133,7 @@ Pull-request contents are untrusted. The review prompt explicitly avoids executi
 - Configure review tools and permissions at the Amp project level; SDK tool restrictions are local-only and are ignored by the orb executor.
 - Treat tests and package lifecycle scripts from a PR as arbitrary code.
 
-The initial implementation receives the final review through the Amp SDK stream. Amp OIDC is therefore not needed. If asynchronous orb callbacks are added later, use `amp orb id-token --audience ...` rather than a static callback credential.
+Review results arrive through the Amp SDK stream; no callback credential is needed.
 
 ## Check conclusions
 
@@ -146,6 +146,25 @@ The initial implementation receives the final review through the Amp SDK stream.
 
 Amp output is schema-validated and capped at 20 findings. Findings outside GitHub's changed lines are omitted from annotations.
 
+## Recovery and review records
+
+Postgres stores the job queue and deduplicates GitHub deliveries. Interrupted jobs reuse their GitHub check with a fresh Amp thread. After three worker attempts, the check fails rather than staying pending.
+
+GitHub does not retry failed webhook deliveries. Every five minutes, the worker checks repositories with prior webhook jobs for missing reviews:
+
+- It considers open, non-draft PRs updated between five minutes and seven days ago.
+- It queues a review only if that repository, PR and head SHA have no existing job.
+- Before reviewing, it checks again and cancels if the PR is closed, a draft or on a newer head.
+
+Review threads are labelled `reviewbot` and archived after each run. Their links remain available on the GitHub check.
+
+| Table | Records |
+| --- | --- |
+| `review_threads` | Usage from `amp threads usage --details` for every thread, including retries. Amp credits and estimated provider list-price cost are separate; an unreported estimate stays null. |
+| `review_results` | Completed review conclusions, finding counts, retained findings and prompt identifiers. |
+
+A separate cleanup loop retries archival and missing usage collection without competing with active reviews. See [production monitoring](docs/plans/production-monitoring.md) for reconciliation rules and SQL queries.
+
 ## Development
 
 ```sh
@@ -154,7 +173,9 @@ npm test
 npm run build
 ```
 
-The initial repeated-sample review evaluation is documented in [`eval/README.md`](eval/README.md).
+- [Evaluation guide](eval/README.md): run and compare reviews against recorded issues.
+- [Experiment record](docs/eval-experiments.md): prompt experiments, results and label corrections.
+- [Evaluation plan](docs/plans/review-quality-evaluation.md): methodology, limits and planned work.
 
 ## License
 
