@@ -41,15 +41,48 @@ Approval, merge, draft status, and silence do not prove that a version is correc
 
 ## Run path
 
-There are two loops. The inner loop is deliberately small: `npm run eval -- ab PACK fast-v1 A_VARIANT B_VARIANT` runs one review from each prompt variant over a frozen 16-version set, interleaved under one concurrency limit. Variants are the current prompt, the built-in pre-severity-guide prompt, or plain-text files of additional trusted instructions; candidate code is never loaded on the corpus machine. The set was selected with 10 settled blocking versions from varied bug mechanisms and source pull requests, 3 clean versions, and 3 undisputed advisory-only versions. One adjudicated label correction now makes that 11 blocking, 3 clean, and 2 advisory-only without changing membership. It lives in the private pack. Membership, blocking policy, runner, mode, and model stay fixed; labels change only after explicit adjudication and offline re-scoring. Only the prompt changes during an experiment.
+### Fast prompt checks
 
-The inner loop reads the binary production decision directly from each saved `conclusion`. It does not run issue-matching judges, usage lookups, advisory scoring, repeat classification, trace gating, or sign tests. It still saves raw output and traces, uses the separate reviewer identity, prepares the exact isolated source, and applies production parsing and changed-line filtering. The rule is applied to paired calls and works in both directions. A candidate is **PROMISING** when it nets at least 3 more blocking versions with no net new wrong blocks, or removes at least 2 net wrong blocks with no net blocking loss, and no missing review could change that result. A net loss of at least 2 blocking detections, or at least 1 net new wrong block, is a **REGRESSION**. Every other outcome is **KEEP A** and ends the experiment. These thresholds are product choices, not statistical claims. People must read the high findings behind gains before promoting a candidate. If that audit corrects a label, preserve the registered verdict under the labels frozen for execution and separately report the corrected-label interpretation; do not use a correction to advance a candidate retroactively.
+`npm run eval -- ab PACK fast-v1 A_VARIANT B_VARIANT` runs one review per prompt over a frozen 16-version set, interleaved under one concurrency limit.
 
-The outer loop runs about weekly: incumbent versus one selected candidate on the larger development set. It audits the validity of blocking findings and suspicious traces, batches label corrections, runs `npm run eval -- rescore PACK RUN.json [...]` to re-score saved reviewer outputs after those corrections, and adds varied blocking mutants and hard non-blocking examples. Re-scoring is offline: it preserves the source artifact, writes a derived artifact beside it, and excludes versions whose commit, PR context, prepared source, or non-label issue meaning changed. Finding-match judges, advisory and silence scoring, repeat stability, and sign tests belong here. The holdout is used only after candidate selection. A label edit is not a reason to buy the same reviews again.
+- Variants are `current`, `pre-severity-guide`, or plain-text files of additional trusted instructions. Candidate code never runs on the corpus machine.
+- The private set started with 10 blocking, 3 clean, and 3 advisory-only versions. One adjudicated label correction makes that 11/3/2 without changing membership.
+- Membership, blocking policy, runner, mode, and model stay fixed. Labels change only after explicit adjudication and offline re-scoring.
 
-Holdout results are final. The first candidate to reach the holdout, a four-check scope gate in the Finding Bar, was PROMISING on the 60-version development set (blocking 19/21 versus 18/21, wrong blocks 12/39 versus 18/39) and a REGRESSION on the 30-version holdout (blocking 5/5 on both sides, wrong blocks 17/25 versus 16/25, three added). It shipped before the holdout run and was reverted afterwards. Both prompts wrongly blocked a large share of the non-blocking versions (31–46% on the development set, 64–68% on the holdout), and offline adjudication of the development-set flips found that most of those "wrong" blocks were real high-severity bugs with stale medium labels. That audit then covered every version the pre-gate prompt wrongly blocked: 26 of 34 were real high-severity bugs, 7 were false positives, and 1 stayed uncertain. After the corrections the development split was 35 blocking, 6 clean, and 19 advisory-only, while the holdout was 19, 7, and 4. Later adjudications added highs to #4110 and #3964, making the final splits 36/5/19 and 20/6/4 respectively; the same saved reviews score 25/30 blocking and 5/21 wrong blocks on development, and 17/19 and 3/9 on holdout. The remaining wrong blocks share one pattern: recoverable, unreachable-in-practice, or development-only problems rated high. A severity-calibration gate written against that pattern was then a REGRESSION on the corrected `fast-v2` set, losing three blocking calls to remove one wrong block, and an eval-only severity re-pass over the blocking findings was KEEP A: it kept every wrong block and lowered one real one. Severity-suppression experiments are closed; a read-only miss audit found a repeated effective-default evidence gap, but the targeted candidate finished KEEP A after source adjudication, gaining #3825 and corrected #3964 while losing #4015. A multi-sample majority trial is not justified because only one development miss was unstable between saved runs. Every experiment and its verdict is recorded in [eval-experiments.md](../eval-experiments.md); read it before proposing a prompt change.
+The fast loop scores each saved `conclusion`. It skips issue matching, usage lookups, advisory scoring, repeat classification, trace gating, and sign tests. It still saves raw output and traces, uses the separate reviewer identity, prepares isolated source, and applies production parsing and changed-line filtering.
 
-The enabled run path is:
+Apply the rule to paired calls:
+
+- **PROMISING:** at least 3 net additional blocking versions caught with no net new wrong blocks, or at least 2 net wrong blocks removed with no net blocking loss. No missing review may change that result.
+- **REGRESSION:** at least 2 net blocking detections lost, or at least 1 net new wrong block.
+- **KEEP A:** everything else. End the experiment.
+
+These are product thresholds, not statistical claims. Read the high findings behind gains before promoting a candidate. If that audit corrects a label, keep the verdict under the original labels and report the corrected interpretation separately. A correction must not advance a candidate retroactively.
+
+### Full evaluation
+
+About weekly, compare the incumbent with one selected candidate on the larger development set:
+
+- Audit blocking findings and suspicious traces.
+- Batch label corrections, then run `npm run eval -- rescore PACK RUN.json [...]` on saved reviews.
+- Add varied blocking mutants and hard non-blocking examples.
+- Check issue matches, advisory findings, silence on clean versions, repeat stability, and sign tests.
+
+Re-scoring is offline. It preserves the source artifact and writes a derived copy beside it. Versions are excluded if their commit, PR context, prepared source, or issue meaning beyond labels changed. A label edit is not a reason to buy the same reviews again.
+
+Use the holdout only after selecting a candidate. Its result is final.
+
+### What has held up so far
+
+`current` stays. The scope gate shipped before its holdout run, failed there, and was reverted. Later source checks corrected many supposed wrong blocks: the labels, rather than the reviews, were wrong.
+
+With corrected labels, the saved reviews block 25/30 evaluable development bugs with 5/21 wrong blocks, and 17/19 holdout bugs with 3/9 wrong blocks. Severity-suppression experiments are closed: wording changes and a second severity pass did not improve the result.
+
+The effective-default experiment also finished KEEP A after source adjudication. Only one development miss varied across saved runs, so a multi-sample majority trial is not justified. Read the [experiment record](../eval-experiments.md) for the full results and label history before proposing another prompt change.
+
+### Source preparation
+
+The full run follows this path:
 
 ```text
 private example pack on the trusted machine
@@ -136,19 +169,61 @@ The pilot remains separate because its outcomes have already been seen. The main
 
 Because LLMs create and check most recorded issues, report agreement with the examples, not “true accuracy.” Check every unmatched finding against the source before classifying it. If the reviewer finds a real issue missing from an example, fix the example (and record the issue in both versions of a synthetic pair) rather than call the finding a false alarm. Keep this later source check separate from the original counts.
 
-## Post-v4 tranche
+## Post-v4 tranche (planned)
 
 Every example is a buildkite-agent pull request from the v3 line. buildkite-agent v4 has shipped, so the code the reviewer sees in production has moved on: new packages, removed compatibility paths, and different release scripts. The corpus should follow, without disturbing what the existing sets measure.
 
-Author two post-v4 tranches at once, before either is scored, mirroring how the v3 corpus was split before tuning started: a development tranche of 10–12 human-reviewed pull requests plus 4 synthetic pairs, and a holdout tranche of 6–8 human-reviewed pull requests plus 2 synthetic pairs. Human-reviewed examples follow the existing protocol: a non-author reviewer requested a concrete change, independent evidence confirms the issue, and the baseline is checked directly. Aim for roughly half blocking and half advisory-only (a confirmed issue below `high`) among them, because the wrong-block pattern (recoverable or development-only problems rated high) is where a code-base shift is most likely to show, and every persistent wrong block so far has been on an advisory-only or clean version. The synthetic pairs are there for their `clean-control` baselines: the pack schema requires a human-review example to carry a known issue, so clean versions exist only as pair baselines, and without them a tranche cannot see the other primary failure, invented blocking findings on clean post-v4 code. A drift conclusion needs all three kinds of version, so the pairs are part of the initial tranche rather than deferred.
+Author both tranches before scoring either:
 
-Decisions:
+- Development: 10–12 human-reviewed pull requests plus 4 synthetic pairs.
+- Holdout: 6–8 human-reviewed pull requests plus 2 synthetic pairs.
+
+Human-reviewed examples follow the existing protocol: a non-author reviewer requested a concrete change, independent evidence confirms the issue, and the baseline is checked directly. Aim for roughly half blocking and half advisory-only, meaning a confirmed issue below `high`.
+
+The mix matters. Every persistent wrong block so far is on an advisory-only or clean version, usually for a recoverable or development-only problem rated high. Synthetic pairs provide the `clean-control` baselines: the strict pack schema requires human-review examples to carry a known issue, so clean versions only exist as pair baselines. A drift result needs blocking, advisory-only, and clean versions from the start.
+
+### Corpus decisions
 
 - Existing examples are not relabelled or retired because v4 shipped. Their labels describe the code at their commit, and a v3 behaviour that v4 later removed or changed was still correct or incorrect at that commit. A v3 label proven wrong at its own commit is still corrected through the existing adjudication-and-`rescore` process (see the label audit in [eval-experiments.md](../eval-experiments.md)); that process re-derives the affected numbers rather than invalidating them.
-- The development tranche is the one that gets scored. Finding out whether the production prompt has drifted against current code means scoring `current` on it and reading the results, and examples whose outcomes have been read and used to motivate a prompt change are development examples by definition, whatever split they were filed under. The holdout tranche is frozen at the same time, before any post-v4 scoring, so that neither the development results nor the candidate they lead to can influence which examples it holds; it stays unscored (not even a `current`-vs-`current` screen) until a candidate prompt is selected, and its single A/B is final. That A/B goes through the full-scoring path, not `ab`: `run --set` once per prompt with three repeats and finding-match judging, then `compare`. `ab` takes one sample per prompt and scores only the binary call, so a block for an unrelated finding would count as catching the recorded bug and one stochastic flip could decide the verdict; it is a screen, and a final holdout verdict is the one place a screen is not acceptable. The verdict follows a rule fixed here, before the tranche is ever scored, because `compare` reports numbers and not a decision and a trade-off chosen after seeing held-out results would defeat the holdout. Each version's call is the majority of its three repeats. Both runs must be complete (no `INCOMPLETE` marker, every version scored under both prompts); otherwise there is no verdict and the run is repaired with `finish` or rerun, never read partially. The candidate ships only if, against `current` on the same versions, it has a net gain of at least two blocking versions caught with no net new wrong block, or a net removal of at least two wrong blocks (advisory-only or clean versions blocked) with no net blocking loss. Any net blocking loss or any net new wrong block is a regression. Everything else is KEEP A. The thresholds are sized for the holdout tranche as specified above, which has 5–6 blocking versions (3–4 human-reviewed plus the 2 mutants), 2 clean baselines, and 3–4 advisory-only versions, and they are not revised once the tranche is authored; if authoring comes up short of that composition, the tranche is filled out before it is frozen rather than the rule changed after its membership is known. If no candidate ever emerges the holdout tranche is simply never run.
+- Score the development tranche under `current`. Once its outcomes inform a prompt change, it is development evidence regardless of how it was originally filed.
+- Freeze the holdout at the same time, before any post-v4 scoring. Do not run even a `current`-vs-`current` screen until a candidate is selected.
+- If no candidate emerges, never run the holdout.
 - No new pack field. The example schema is strict, so an `era` field would be a framework change. The tranche is identifiable by its example IDs and by pull numbers above the v4 release, but `report` formats a whole saved run and `rescore` processes every case in one, and neither filters by example or set, so the reporting boundary is the saved run itself: the tranche is only ever run on its own (through `--set`, below), so every artifact that contains it contains nothing else. Add a field, and set-based filtering to `report` and `rescore`, only if mixed runs and per-era reporting are actually wanted.
 - `fast-v3`, if one is ever needed, is built from the post-v4 development tranche, never from the holdout tranche: selecting a tuning set from held-back examples would leak them into the inner loop. As with `fast-v2`, it is selected from settled calls after the development tranche has been scored once under `current`; adding unscored versions to a fast set would make an A/B result depend on which prompt happened to see them first.
-- Scoring the tranche means running only the new versions. `run --split development` would buy all 60 existing development versions again (three samples each; it selects every development case, including the ones earlier artifacts dropped or excluded), and `run` selects by split and version kind, not by example, so the first step is a small framework change: a `--set NAME` option on `run` that restricts a split to a frozen set's members, and a `--prompt VARIANT` option (the same variant reference `ab` accepts, defaulting to `current`) so a candidate can be scored through the same three-repeat, finding-matched path as `current` and the two saved runs compared with `compare`. Through that path the tranche gets the standard protocol (three repeats, finding-match judging, `finish`) and a score that can sit beside the v3 numbers in [eval-experiments.md](../eval-experiments.md), recorded separately rather than merged into them. Until then, `ab PACK SET current current` is only a preliminary screen, as `gap-v1` was: one sample per version, binary calls only, and a block for an unrelated finding counts the same as a block for the recorded bug. Record a screen as a screen, not as the tranche's score. Either run needs the same explicit confirmation as any other reviewer run.
+
+### Holdout protocol and verdict
+
+Run the single final A/B through full scoring, not `ab`:
+
+1. Run `run --set` once per prompt with three repeats and finding-match judging.
+2. Use each version's majority call.
+3. Run `compare` on the two saved runs.
+
+`ab` is only a screen. It takes one sample per prompt and scores the binary call, so an unrelated block can count as catching the recorded bug and one stochastic flip can decide the result.
+
+Both full runs must be complete: no `INCOMPLETE` marker and every version scored under both prompts. Otherwise there is no verdict. Repair with `finish` or rerun; never read a partial holdout.
+
+The candidate ships only if it does one of these against `current` on the same versions:
+
+- catches at least 2 net additional blocking versions with no net new wrong block; or
+- removes at least 2 net wrong blocks on advisory-only or clean versions with no net blocking loss.
+
+Any net blocking loss or net new wrong block is a REGRESSION. Everything else is KEEP A.
+
+These thresholds assume 5–6 blocking versions (3–4 human-reviewed plus 2 mutants), 2 clean baselines, and 3–4 advisory-only versions. Do not revise them after authoring. If the tranche misses that composition, fill it before freezing.
+
+### Required runner work
+
+Score only the new versions. `run --split development` would buy all 60 existing development versions again, with three samples each, including cases earlier artifacts dropped or excluded.
+
+The required framework change is still planned:
+
+- add `--set NAME` to `run`, restricting a split to a frozen set's members;
+- add `--prompt VARIANT`, using the same variant reference as `ab` and defaulting to `current`.
+
+This gives the tranche the normal three repeats, finding-match judging, and `finish` path. Record its score beside the v3 numbers in [eval-experiments.md](../eval-experiments.md), not merged into them.
+
+Until that work ships, `ab PACK SET current current` is only a preliminary screen, as `gap-v1` was. It uses one sample per version and binary calls only; an unrelated block counts the same as finding the recorded bug. Label it as a screen. Either command still needs explicit confirmation before paid model calls.
 
 ## Before a run
 

@@ -1,6 +1,6 @@
 # Review evaluation
 
-Production makes one call per pull request: block it or let it through. With `FAIL_ON=high`, any high or critical finding fails the check; anything less leaves it neutral.
+Production makes one call per pull request: block it or let it through. With `FAIL_ON=high`, a high or critical finding fails the check. Anything lower leaves it neutral.
 
 The fast A/B loop scores that binary call directly from the saved `conclusion`. The larger report also asks an LLM judge whether findings match recorded issues. That matching is useful for diagnosis and auditing, but it is not needed to decide whether production blocked a version.
 
@@ -10,7 +10,7 @@ Each full saved run leads with a scorecard of three diagnostic numbers:
 2. **OK PRs wrongly blocked** — versions with no recorded blocking bug where the check would have failed.
 3. **Clean PRs left alone** — versions with no recorded issues where the reviewer reported nothing.
 
-A fourth line, recorded advisory issues found, is informational. Nobody can enumerate every real nit in a pull request, so the list of non-blocking issues is always incomplete and that number only means something relative to another run on the same examples.
+A fourth line, recorded advisory issues found, is informational. No list of non-blocking issues is complete, so compare this number only between runs on the same examples.
 
 A pull-request example passes a repeat when every one of its versions gets the right call: blocked for the recorded bug, or not blocked. The answers are counts, not prose comparisons. A saved run keeps the exact evidence behind those counts.
 
@@ -38,9 +38,36 @@ The runner calculates changed lines from the exact Git diff. It does not store a
 
 The reviewer gets the same public research tools as a real review. It may read public documentation, package registries, dependency source, and unrelated repositories.
 
-There is one restriction: for the repository being reviewed, it must use only the copy we provide. It must not look up the target pull request through GitHub, nor clone, fetch, or inspect another copy of that repository. The supplied copy contains only the history needed for the exact base and reviewed commits. It has no remote, later commits, other branches, or evaluation labels.
+For the target repository, it may use only the copy we provide. It must not:
 
-The pinned plugin prepares the source in the clean orb before the model starts. A failed or malformed setup cancels the turn. The reviewer's first tool call must then run a short exact Git check proving that the expected base and reviewed commits are present and that no remote remains. The saved trace also checks that the review used the chosen Amp mode and stayed in that workspace, research tools did not name the target pull request or repository, and the prepared repository did not run `git fetch` or `git pull`. A research request that explicitly tells a subagent not to inspect the target ("do not inspect example/repository or PR #42") counts as following the rule, and `git fetch` inside a quoted search pattern or in a throwaway repository (`git -C "$tmp/work" fetch`, or a `-C`, `--git-dir`, or `--work-tree` path that resolves outside the prepared workspace) does not count as updating the prepared source. Reading Git documentation (`git fetch -h`, `git help fetch`) and running non-Git experiments in another directory (a throwaway Go module under `/tmp`) are also allowed. A review that fails one of these checks is excluded from the counts like a review that never finished, the report says how many were excluded, and the result is marked incomplete; the other reviews in the run stay comparable. A review that Amp never started has no trace to check; it is reported as an unfinished review instead. The check uses the workspace named by the first shell command because Amp reports the trusted machine's path during startup and the mounted orb path in tool calls.
+- look up the target pull request on GitHub
+- clone, fetch, or inspect another copy of the repository
+- inspect later commits, other branches, or evaluation labels
+
+The supplied copy contains only the history needed for the exact base and reviewed commits. It has no remote.
+
+The pinned plugin prepares the source in a clean orb before the model starts. A failed or malformed setup cancels the turn. The reviewer's first tool call must run a short, exact Git check proving that:
+
+- the expected base and reviewed commits are present
+- no remote remains
+
+The saved trace then checks that:
+
+- the review used the chosen Amp mode and stayed in that workspace
+- research tools did not name the target pull request or repository
+- the prepared repository did not run `git fetch` or `git pull`
+
+These do not count as violations:
+
+- a research request that explicitly tells a subagent not to inspect the target, such as "do not inspect example/repository or PR #42"
+- `git fetch` in a quoted search pattern
+- `git fetch` in a throwaway repository, such as `git -C "$tmp/work" fetch`, or a `-C`, `--git-dir`, or `--work-tree` path that resolves outside the prepared workspace
+- reading Git documentation with `git fetch -h` or `git help fetch`
+- non-Git experiments elsewhere, such as a throwaway Go module under `/tmp`
+
+A review that fails a trace check is excluded from the counts, just like one that never finished. The report gives the excluded count and marks the result incomplete; the other reviews remain comparable. If Amp never started the review, there is no trace to check, so it is reported as unfinished instead.
+
+The check uses the workspace named by the first shell command. Amp reports the trusted machine's path during startup and the mounted orb path in tool calls.
 
 This is a rule plus a trace check, not a secure sandbox. A reviewer trying to cheat could hide a lookup in another process. Preventing all public access would make the test unlike a real review, so we accept that risk. The results measure a reviewer following the instructions in a realistic environment; they do not prove resistance to deliberate cheating.
 
@@ -58,13 +85,36 @@ Amp still chooses models for specialist tools such as Search and Librarian. One 
 
 Each result records the configured mode and model plus the exact Amp SDK and CLI versions. It also saves model IDs from the event stream when Amp reports them. Current Amp streams sometimes omit those IDs; an empty list means “not reported,” not “no model was used.”
 
-Finding comparison defaults to the incumbent Amp majority matcher: two votes, plus a third only when the first two disagree. This remains the credential-safe default. For full reports, the recommended validated mode is `--matcher jev-cascade`; it requires both the authenticated local Amp CLI and `TYPESAFE_API_KEY`. Amp remains available as `--matcher amp`.
+Finding comparison defaults to the incumbent Amp majority matcher: two votes, then a third only if they disagree. This is the credential-safe default. Amp remains available as `--matcher amp`.
 
-The cascade sends one TypeSafe request per expected-issue/candidate-finding pair. Each request contains only the expected root cause, failure behavior, and path and the finding title, message, suggestion, and path. Jev independently scores the overall relation, same cause, and same failure. A pair matches only when all three match probabilities are at least `0.90`; it is a confident non-match only when the different-defect probability is at least `0.90` and either component probability is at most `0.10`. Everything else escalates. If any pair escalates, is malformed, or fails, the incumbent judges the complete original candidate list for that issue. Confident issues preserve every matching index. Paths are audit metadata rather than matching proof, and an empty candidate list needs no provider call.
+For full reports, use the validated `--matcher jev-cascade`. It requires the authenticated local Amp CLI and `TYPESAFE_API_KEY`.
+
+The cascade sends one TypeSafe request per expected-issue/candidate-finding pair. Each request contains only:
+
+- the expected root cause, failure behavior, and path
+- the finding title, message, suggestion, and path
+
+Jev independently scores the overall relation, same cause, and same failure:
+
+- **Match:** all three match probabilities are at least `0.90`.
+- **Confident non-match:** the different-defect probability is at least `0.90`, and either component probability is at most `0.10`.
+- **Escalate:** everything else.
+
+If any pair escalates, is malformed, or fails, the incumbent judges the complete original candidate list for that issue. Confident issues preserve every matching index. Paths are audit metadata, not proof of a match. An empty candidate list needs no provider call.
 
 `--matcher jev` retains the original standalone experiment for historical reproduction. It sends one batched request per expected issue, with one binary (`noul`) question per candidate finding, then includes every finding whose match probability reaches its configurable threshold. Its initial threshold is `0.8`; validation found that standalone matcher was not accuracy preserving. Do not use it for authoritative reports. `--jev-threshold` applies only to this legacy mode.
 
-Both Jev integrations pin model `jev-1.13.0`, TypeSafe API `v1`, and `@typesafe-ai/sdk` `0.6.0` rather than following a moving alias. Cascade judgements save every primitive probability, pair route, failure/fallback reason, path equality, token usage, timing, cache status, component provenance, and prompt/schema/request hashes. Request definitions and matcher versions participate in cache keys. Failed responses are not cached. Existing artifacts without a provider and legacy TypeSafe artifacts retain their historical interpretation.
+Both Jev integrations pin model `jev-1.13.0`, TypeSafe API `v1`, and `@typesafe-ai/sdk` `0.6.0` rather than following a moving alias.
+
+Cascade judgements save:
+
+- every primitive probability and pair route
+- failure or fallback reasons and path equality
+- token usage, timing, and cache status
+- component provenance
+- prompt, schema, and request hashes
+
+Request definitions and matcher versions participate in cache keys. Failed responses are not cached. Existing artifacts without a provider and legacy TypeSafe artifacts keep their historical interpretation.
 
 ## Commands
 
@@ -139,7 +189,19 @@ npm run eval -- compare .eval-runs/BASELINE.json .eval-runs/CANDIDATE.json
 
 ### Fast prompt loop
 
-The private pack owns named set files under `sets/`. A set may contain any positive number of versions, but every member must exist in the pack and belong to the requested split. A/B defaults to the development split; `--split holdout` explicitly unlocks a holdout-only set and prints a warning before reviews start. Mixed-split sets are rejected. The decision page derives its blocking, clean, and advisory-only composition from current labels. `fast-v1.json` names 16 settled versions, originally selected as 10 with blocking bugs, 3 clean versions, and 3 advisory-only versions. Keep disputed cases out and do not change membership while iterating. Label corrections require an explicit adjudication and offline re-score; one approved correction currently makes the split 11 blocking, 3 clean, and 2 advisory-only. Keep `FAIL_ON=high`, the runner, mode, and model fixed so only the prompt variant changes during an experiment.
+The private pack owns named set files under `sets/`.
+
+Set rules:
+
+- A set may contain any positive number of versions.
+- Every member must exist in the pack and belong to the requested split.
+- A/B defaults to the development split.
+- `--split holdout` unlocks a holdout-only set and prints a warning before reviews start.
+- Mixed-split sets are rejected.
+
+The decision page derives its blocking, clean, and advisory-only composition from current labels. `fast-v1.json` names 16 settled versions. It started with 10 blocking, 3 clean, and 3 advisory-only versions. One approved label correction makes the current split 11 blocking, 3 clean, and 2 advisory-only.
+
+Keep disputed cases out. Do not change membership while iterating. Label corrections need explicit adjudication and an offline re-score. Keep `FAIL_ON=high`, the runner, mode, and model fixed so the prompt variant is the only experimental variable.
 
 Run two production prompt versions once each. A variant is `current`, `pre-severity-guide`, or a path to a plain-text file containing additional trusted review instructions. The built-ins reproduce the current production prompt and its immediate predecessor. A file is data, not executable code, so prompt experiments cannot run candidate code on the trusted corpus machine. Reviews are paired by version, A/B order within each pair is randomized, and both sides share one concurrency limit (3 by default):
 
@@ -158,15 +220,21 @@ For a new prompt idea, put only its additional instructions in a text file and p
 
 Both artifacts are saved under the pack's `.eval-runs`. The command prints one decision page using only each completed review's deterministic `conclusion`; it does not run finding-match judges or usage lookups. Traces, exact-source setup, source isolation, reviewer identity, raw output, filtering, and conclusions are still saved for inspection.
 
-The built-in PROMISING, REGRESSION, and KEEP A thresholds are absolute counts sized for a 16-version set. The decision page prints the rule and the paired changes it was applied to; predeclare a separate rule before interpreting a larger set.
+The built-in PROMISING, REGRESSION, and KEEP A thresholds are absolute counts sized for a 16-version set. The decision page prints the rule and the paired changes it used. Predeclare another rule before interpreting a larger set.
 
-The rule counts only versions both prompts completed. A blocking gain is a blocking version A passed and B blocked; a blocking loss is the reverse. A wrong block is a block on a clean or advisory-only version; B can add or remove them. The rule is a product choice and works in both directions, so a candidate that catches more bugs and one that stops blocking good changes can each win:
+Count only versions both prompts completed:
+
+- A **blocking gain** is a blocking version that A passed and B blocked.
+- A **blocking loss** is the reverse.
+- A **wrong block** is a block on a clean or advisory-only version. B can add or remove these.
+
+The rule is a product choice and works both ways. A candidate can win by catching more bugs or by stopping blocks on good changes:
 
 - **PROMISING B:** net blocking gain of at least 3 with no net new wrong blocks, or net wrong blocks removed of at least 2 with no net blocking loss, and no execution failure that could change that result. Read the retained high findings behind the changed calls before doing anything larger.
 - **REGRESSION:** net blocking loss of at least 2, or at least 1 net new wrong block.
 - **KEEP A:** every other result, including an incomplete result that cannot earn PROMISING B.
 
-KEEP A is a finished experiment, not a reason to enlarge or rerun it. Record every decision page in [docs/eval-experiments.md](../docs/eval-experiments.md) and read it before writing a new variant. Use the full `run`, `finish`, `report`, and `compare` path when you need repeat stability, issue matching, advisory recall, clean-version silence, sign tests, or usage accounting.
+KEEP A ends the experiment. Do not enlarge or rerun it. Record every decision page in [docs/eval-experiments.md](../docs/eval-experiments.md), and read that file before writing a new variant. Use the full `run`, `finish`, `report`, and `compare` path for repeat stability, issue matching, advisory recall, clean-version silence, sign tests, or usage accounting.
 
 After pack labels or membership change, re-score one or more saved artifacts without running a reviewer or finding-match judge:
 
@@ -233,7 +301,11 @@ Example 2 (pull request #1300): FAIL (right call in 1/3 repeats)
   Version, recorded non-blocking issues: not blocked in 1 of 3; wrongly blocked in 2; 5 of 6 recorded advisory issues found; 2 unmatched findings need source checking
 ```
 
-The "Of the rest" split on the first line says where blocked-PR misses come from. "Found the bug at lower urgency" means the reviewer described the recorded bug but rated it medium or low, so the fix is urgency calibration; "missed it" means the bug was never described, so the fix is detection. "Blocked for something else" means the check failed on a finding that matched no recorded blocking bug; that block may be right, but it gets no credit until the source is checked and the issue recorded.
+The "Of the rest" split explains blocked-PR misses:
+
+- **Found the bug at lower urgency:** the reviewer described the recorded bug but rated it medium or low. This is an urgency-calibration miss.
+- **Missed it:** the bug was never described. This is a detection miss.
+- **Blocked for something else:** the check failed on a finding that matched no recorded blocking bug. The block may be right, but gets no credit until someone checks the source and records the issue.
 
 The "Wrongly blocked" list is the curation queue. Each entry is a version the reviewer would have blocked although no recorded issue justifies it. Read the finding and the source. If the block was right, record the issue in the example pack so the next run credits it; if it was wrong, the count stands.
 
@@ -253,7 +325,22 @@ The last sentence is a plain-language sign test: if the two reviewers were reall
 
 The advisory line compares recorded non-blocking issues found. Because that list is incomplete, treat it as a relative signal, and remember that a candidate which finds different real issues than the recorded ones gets no credit for them.
 
-The saved file keeps enough detail to reproduce and inspect the counts: exact commits and context, prompts, full tool traces, Amp mode, exact SDK and CLI versions, model IDs when Amp reports them, raw and filtered findings, matching decisions, timing, how many times Amp had to be run again for the review (the production worker's retry rules apply, and a CLI that exits before streaming anything is also run again because no thread was started), what Amp billed for the review thread (`amp threads usage --details`, read after the review returns; subagent threads are included, a thread abandoned by a restart is not), the estimated provider cost at list price when Amp reports it, execution order, source checks, and errors. Usage totals cover every review including excluded ones, since they still cost money. Credits are $0 when a subscription covered the inference; the report says so. When Amp reports no usage for a thread (it currently answers "Usage information is currently unavailable for this thread" for threads run under some accounts) or the lookup fails, the file records the reason, and the report quotes it. A run without usage falls back to tokens summed from the traces, which omit subagent turns and cost. A report re-applies the latest trace checks to the stored traces without changing the original file, so a fixed check changes what an older report says. Treat the file as private and potentially sensitive.
+The saved file keeps enough detail to reproduce and inspect the counts:
+
+- exact commits, pull-request context, and prompts
+- full tool traces, execution order, source checks, and errors
+- Amp mode and exact SDK and CLI versions
+- model IDs when Amp reports them
+- raw and filtered findings, matching decisions, and timing
+- review retries under the production worker's retry rules; a CLI that exits before streaming anything is retried because no thread started
+- Amp billing from `amp threads usage --details`, read after the review returns; this includes subagent threads but not a thread abandoned by a restart
+- estimated provider cost at list price when Amp reports it
+
+Usage totals include excluded reviews because they still cost money. Credits are `$0` when a subscription covered inference, and the report says so.
+
+When Amp reports no usage for a thread—it currently returns "Usage information is currently unavailable for this thread" for some accounts—or the lookup fails, the file records the reason and the report quotes it. Without usage data, a run falls back to tokens summed from traces. Those totals omit subagent turns and cost.
+
+A report re-applies the latest trace checks to stored traces without changing the original file. Fixing a check can therefore change what an older report says. Treat the file as private and potentially sensitive.
 
 Each source pull request is one example. For a synthetic before-and-after pair, one repeat passes only when the reviewer gets both versions right.
 

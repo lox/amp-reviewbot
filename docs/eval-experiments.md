@@ -2,9 +2,17 @@
 
 ## Finding matcher validation
 
-The original batched standalone Jev matcher was rejected: a typed probability did not make its unvalidated `0.8` threshold accuracy preserving. It remains available only to reproduce old matcher artifacts.
+The original batched Jev matcher was rejected. A typed probability did not make its unvalidated `0.8` threshold accuracy-preserving. It remains available only to reproduce old matcher artifacts.
 
-The replacement `jev-cascade-1` was frozen before evaluation: Jev 1.13.0, API v1, SDK 0.6.0, one minimal request per issue/finding pair, three independent relation/cause/failure questions, inclusive `0.90` match and `0.90`/`0.10` non-match boundaries, and whole-issue Amp fallback for any uncertainty or failure. Blind adjudication hid provider identity, scores, routes, severity, taxonomy, and source identifiers. No threshold, prompt, or policy changed between slices.
+The replacement, `jev-cascade-1`, was frozen before evaluation:
+
+- Jev 1.13.0, API v1, SDK 0.6.0;
+- one minimal request per issue/finding pair;
+- three independent relation, cause, and failure questions;
+- inclusive `0.90` match and `0.90`/`0.10` non-match boundaries; and
+- whole-issue Amp fallback for any uncertainty or failure.
+
+Blind adjudication hid provider identity, scores, routes, severity, taxonomy, and source identifiers. No threshold, prompt, or policy changed between slices.
 
 It passed all predeclared gates on three slices:
 
@@ -12,7 +20,11 @@ It passed all predeclared gates on three slices:
 - Corrected current development: 115 pairs and 84 issue units; 49 auto-resolved and 35 fell back. Blind adjudication found 0/54 pair errors and 0/42 exact-set errors for both matchers, with no blocking or downstream errors. It avoided 84 of 154 newly generated Amp votes (54.5%); the measured-usage cost projection was 54.5% lower, not a measured bill.
 - Frozen corrected holdout A: 108 pairs and 45 issue units; 28 auto-resolved and 17 fell back. Blind adjudication found 0/59 pair errors and 0/28 exact-set errors for both matchers, with no blocking or downstream errors. It avoided 56 of 90 newly generated Amp votes (62.2%); the development-usage-based cost projection was 62.1% lower, not measured holdout spend.
 
-Repeated samples were interpreted by source example, and no B/candidate holdout artifact informed the frozen run. These finite results support the cascade as an accuracy-preserving selective accelerator on the evaluated corpus; they are not a general accuracy claim. `amp` remains the CLI default so environments without TypeSafe credentials keep working, while `jev-cascade` is the recommended matcher for full reports.
+Repeated samples were interpreted by source example. No B/candidate holdout artifact informed the frozen run. On these examples, the cascade reduced Amp calls without worsening accuracy. That is not a claim about all reviews.
+
+`amp` remains the CLI default so environments without TypeSafe credentials keep working. Use `jev-cascade` for full reports.
+
+## Prompt experiments
 
 One row per predeclared A/B. A row is written when the decision page is read, whatever it says. KEEP A and REGRESSION are finished experiments; do not rerun them with the same prompt. Blocking is "blocking versions blocked", wrong is "non-blocking versions blocked". Set compositions are the corrected labels at the time of the run.
 
@@ -35,13 +47,42 @@ One row per predeclared A/B. A row is written when the decision page is read, wh
 
 ## What the log says so far
 
-Three prompt-wording attempts at severity calibration (tightened high, scope gate, severity calibration gate) each lowered blocking detection by one to three calls while leaving the persistent wrong blocks in place. The reviewer's severity judgement on #2759, #3820, and #3931 has not moved under any wording, and the severity re-pass below (a change of mechanism, not wording) did not move it either. With the later #3964 label correction, the production prompt blocks 25/30 evaluable development bugs and wrongly blocks 5/21 non-blocking versions; the remaining versions were excluded for rule breaking or never scored because the prepared source no longer matched the pack. The later #4110 clean-change high (see the miss audit) moves the holdout to 17/19 blocked and 3/9 wrong. Severity-suppression experiments are closed. None reached PROMISING on a fast set; the one wide-set PROMISING (scope gate) was a holdout REGRESSION and a wash after rescoring; the two that removed a wrong block on a fast set (tightened high removed #2759, the calibration gate removed #3907) each lost at least one real block; and the re-pass removed none. `current` stays. The offline miss audit found a repeated effective-default evidence gap, but the targeted experiment above traded two corrected blocking gains for one blocking loss and therefore finished KEEP A after source adjudication. A multi-sample majority remains unjustified because only #3825 was unstable across saved current-prompt runs.
+Severity-suppression experiments are closed. `current` stays.
+
+- Three wording attempts—tightened high, scope gate, and severity calibration gate—each lost one to three blocking calls while leaving the persistent wrong blocks in place.
+- No wording moved the severity judgement on #2759, #3820, or #3931. The severity re-pass below changed the mechanism and still did not move them.
+- No candidate reached PROMISING on a fast set. The scope gate reached PROMISING on the wide set, then produced a holdout REGRESSION and was a wash after rescoring.
+- Tightened high removed wrong block #2759 and the calibration gate removed #3907, but each lost at least one real block. The re-pass removed none.
+- After the #3964 label correction, production blocks 25/30 evaluable development bugs and wrongly blocks 5/21 non-blocking versions. Other versions broke the rules or were never scored because the prepared source no longer matched the pack.
+- The later #4110 clean-change high moves the holdout to 17/19 blocked and 3/9 wrong. See the miss audit.
+- The offline miss audit found a repeated effective-default evidence gap. The targeted experiment gained corrected blocks #3825 and #3964 but lost #4015, so it finished KEEP A after source adjudication.
+- A multi-sample majority is still unjustified: only #3825 was unstable across saved `current` runs.
 
 ## Severity re-pass (finished: KEEP A)
 
-Hypothesis (2026-09-11): a fresh thread that only re-rates the retained blocking findings, with the code in view and nothing else to find, lowers the wrong blocks (#2759, #3820, #3931, #3907) while keeping the real ones. `npm run eval -- repass PACK A.json` derives B from the saved fast-v2 A artifact (`2026-09-10T22-51-26-509Z-fast-v2-A.json`, 7/8 blocking, 4/8 wrong) by re-passing only its 11 blocked reviews, so the review side is held constant and the result isolates the re-pass. The same rule applies: PROMISING needs net wrong blocks removed of at least 2 with no net blocking loss; any blocking loss of 2 or a net new wrong block (impossible for a lower-only pass) is a REGRESSION. If PROMISING, repeat on the dev-all-v1 A artifact and then the holdout A artifact before wiring the re-pass into the production worker.
+Hypothesis (2026-09-11): a fresh thread that only re-rates retained blocking findings, with the code in view and nothing else to find, lowers the wrong blocks (#2759, #3820, #3931, #3907) while keeping the real ones.
 
-Result: KEEP A. With only the four wrong blocks in view and the code available, the re-pass confirmed every one of them as high; it found nothing to lower in #2759, #3820, #3931, or #3907. The one finding it did lower was real (#3964 mutant, "Release pipeline runs after failed tests"): the re-pass argued that a later `wait` step precedes the release triggers, which is the same kind of over-confident reasoning that produces the wrong blocks in the first place. Reading the four wrong blocks together with this result: the reviewer treats "a misconfigured or non-default input reaches a bad path" as high, and neither wording nor a second look changes that. The remaining levers are labels (whether those four are advisory is a product judgement; see the label audit), a rule-based check the model does not get to argue with (for example, evidence that the path is reachable from shipped defaults), or accepting the current wrong-block rate (5/21 development, 3/9 holdout on final corrected labels). The `repass` command stays in the eval as a measured negative result and a template for the next mechanism.
+`npm run eval -- repass PACK A.json` derives B from the saved fast-v2 A artifact (`2026-09-10T22-51-26-509Z-fast-v2-A.json`, 7/8 blocking, 4/8 wrong). It re-passes only the 11 blocked reviews, holding the review side constant so the result isolates the re-pass.
+
+The usual rule applies:
+
+- PROMISING: remove at least 2 net wrong blocks with no net blocking loss.
+- REGRESSION: lose at least 2 blocking calls, or add a net wrong block. The latter is impossible for a lower-only pass.
+- If PROMISING: repeat on the dev-all-v1 A artifact, then the holdout A artifact, before wiring the re-pass into production.
+
+Result: KEEP A.
+
+- The re-pass kept #2759, #3820, #3931, and #3907 at high.
+- It lowered one real finding: #3964 mutant, "Release pipeline runs after failed tests." It reasoned that a later `wait` step precedes the release triggers—the same over-confident reasoning behind the wrong blocks.
+- Taken together, the reviewer treats "a misconfigured or non-default input reaches a bad path" as high. Neither wording nor a second look changes that.
+
+The remaining levers are:
+
+- labels, if the product judgement changes on whether those four are advisory; see the label audit;
+- a rule-based check the model cannot argue around, such as proof that the path is reachable from shipped defaults; or
+- accepting the current wrong-block rate: 5/21 development and 3/9 holdout on final corrected labels.
+
+The `repass` command stays as a measured negative result and a template for another mechanism.
 
 ## Miss audit
 
@@ -57,7 +98,14 @@ On 2026-09-11 every blocking version `current` completed and did not block was r
 | agent-3868-synthetic-concurrency/clean-change | holdout | detection | Only a separate medium negative-timeout finding. |
 | agent-4110-synthetic-concurrency/clean-change | holdout | detection | No finding about replaying non-idempotent calls on the HTTP/2 failure. |
 
-No miss was a changed-line filtering drop. Only #3825 flipped between `current` runs (the fast-set rows above that mention #4270 concern its mutant version, a different blocking version that `current` blocks; the miss here is its clean-control version, which no saved `current` run blocked), so the instability gate for a multi-sample majority A/B (at least three unstable development misses) is not met and that trial is off. The two calibration misses are the mirror image of the persistent wrong blocks: the reviewer describes the defect and places it on the wrong side of the medium/high line, in both directions. Prompt wording did not move that line for the wrong blocks and there is no reason to expect it to move for the misses. The development audit grouped #3464 and #3825 under failure to establish the effective default; #3964 added a related external-contract miss after its label was corrected. The targeted mechanism changed the intended evidence gathering but did not beat `current`, as recorded above. The two holdout detection misses remain distinct aggregate facts and did not inform the candidate.
+No miss came from changed-line filtering.
+
+- Only #3825 flipped between `current` runs, so the multi-sample majority trial is off. Its gate requires at least three unstable development misses.
+- The #4270 fast-set rows concern its mutant, which `current` blocks. The miss here is the clean-control version; no saved `current` run blocked it.
+- The two calibration misses mirror the persistent wrong blocks: the reviewer describes the defect but puts it on the wrong side of the medium/high line. Wording did not move that line for wrong blocks, so there is no evidence it would move the misses.
+- The development audit grouped #3464 and #3825 as failures to establish the effective default. Correcting #3964 added a related external-contract miss.
+- The targeted evidence-gathering mechanism did not beat `current`, as recorded above.
+- The two holdout detection misses remain separate aggregate facts. They did not inform the candidate.
 
 Eval hygiene: the five development blocking versions dropped for a prepared-source mismatch (#4061 mutant, both #4101, #4239 mutant, #4270 mutant) had never been scored under `current`. On 2026-09-19 they were frozen as `sets/gap-v1.json` and an A/A run of `current` over exactly those ten reviews was started; its result is recorded here when it lands. #2807 stays excluded unless a rerun of it completes without breaking the rules.
 
