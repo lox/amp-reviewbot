@@ -24,6 +24,7 @@
     "zod": "4.4.3"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "0.5.8",
     "@types/node": "26.2.0",
     "@types/pg": "8.23.1",
     "tsx": "4.23.12",

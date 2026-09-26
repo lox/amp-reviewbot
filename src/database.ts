@@ -113,6 +113,52 @@ export class Database {
     await this.pool.query("SELECT 1")
   }
 
+  /** Database-wide snapshots, not process counters; do not sum across replicas. */
+  async metrics(): Promise<Record<string, string | number | null>> {
+    const result = await this.pool.query<Record<string, string | number | null>>({
+      text: `WITH jobs AS (
+        SELECT count(*) AS reviews,
+          count(*) FILTER (WHERE status = 'queued') AS queued,
+          count(*) FILTER (WHERE status = 'running') AS running,
+          count(*) FILTER (WHERE status = 'succeeded') AS succeeded,
+          count(*) FILTER (WHERE status = 'failed') AS failed,
+          count(*) FILTER (WHERE status = 'cancelled') AS cancelled,
+          COALESCE(max(EXTRACT(EPOCH FROM now() - created_at))
+            FILTER (WHERE status = 'queued'), 0) AS oldest_queued_seconds
+        FROM review_jobs
+      ), recent AS (
+        SELECT count(*) AS completed_24h,
+          avg(EXTRACT(EPOCH FROM completed_at - created_at)) AS latency_mean_seconds_24h,
+          percentile_cont(0.95) WITHIN GROUP
+            (ORDER BY EXTRACT(EPOCH FROM completed_at - created_at)) AS latency_p95_seconds_24h
+        FROM review_jobs
+        WHERE status IN ('succeeded', 'failed') AND completed_at > now() - interval '24 hours'
+      ), queue_delay AS (
+        SELECT count(*) AS started_24h,
+          avg(EXTRACT(EPOCH FROM started_at - created_at)) AS queue_delay_mean_seconds_24h,
+          percentile_cont(0.95) WITHIN GROUP
+            (ORDER BY EXTRACT(EPOCH FROM started_at - created_at)) AS queue_delay_p95_seconds_24h
+        FROM review_jobs
+        WHERE started_at > now() - interval '24 hours'
+      ), usage AS (
+        SELECT COALESCE(sum(amp_usage_usd), 0) AS amp_usage_usd,
+          COALESCE(sum(estimated_provider_cost_at_list_price_usd), 0) AS provider_list_price_usd,
+          count(*) FILTER (WHERE amp_usage_usd IS NOT NULL) AS threads_with_amp_usage,
+          count(*) FILTER (WHERE estimated_provider_cost_at_list_price_usd IS NOT NULL) AS threads_with_provider_estimate,
+          count(*) FILTER (WHERE usage_collected_at IS NULL) AS threads_usage_pending,
+          count(*) FILTER (WHERE usage_error IS NOT NULL) AS threads_usage_errors
+        FROM review_threads
+      ), results AS (
+        SELECT count(*) AS results,
+          count(*) FILTER (WHERE conclusion = 'failure') AS blocked,
+          COALESCE(sum(blocking_findings), 0) AS blocking_findings,
+          COALESCE(sum(advisory_findings), 0) AS advisory_findings
+        FROM review_results
+      ) SELECT * FROM jobs CROSS JOIN recent CROSS JOIN queue_delay CROSS JOIN usage CROSS JOIN results`,
+    })
+    return result.rows[0]!
+  }
+
   /**
    * Returns null for a redelivered webhook and for a head that already has a
    * queued or running job, which the reconciler may have created first; the

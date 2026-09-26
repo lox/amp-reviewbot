@@ -165,6 +165,9 @@ Review threads are labelled `reviewbot` and archived after each run. Their links
 
 A separate cleanup loop retries archival and missing usage collection without competing with active reviews. See [production monitoring](docs/plans/production-monitoring.md) for reconciliation rules and SQL queries.
 
+Review counts, queue depth, latency, findings, and recorded costs are exported for
+Fly's managed Grafana. See [metrics setup and panel queries](docs/metrics.md).
+
 ## Development
 
 ```sh

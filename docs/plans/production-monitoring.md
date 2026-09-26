@@ -91,7 +91,7 @@ This table is planned, not built. Start by reading the queries above regularly.
 
 ## Non-goals
 
-- No dashboards or alerting service. `fly logs` plus the warn-level reconciler log is enough at current volume.
+- No separate alerting service. Review counts, latency, costs and findings now have a private Prometheus exporter for Fly's managed Grafana; see [metrics setup](../metrics.md) for panel queries and rollout steps. SQL remains useful for per-review investigation.
 - No retention policy for `review_results.findings`. Rows are small and volume is a few reviews per day.
 - No automatic re-review when the prompt changes. `prompt_identifier` makes the change visible in the data; it does not trigger work.
 
