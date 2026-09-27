@@ -1,0 +1,64 @@
+{
+  "id": 18,
+  "title": "Recent reviews",
+  "type": "table",
+  "description": "Latest snapshot per finished review, filtered by completion time. The exporter tracks the latest 100 finished jobs within seven days; this is not a complete historical ledger. Queue is creation to latest start; execution is latest start to finish. Costs include all retry threads but may be partial: compare coverage counts and check pending/errors. Unknown costs/timings are shown as —, not zero. Scroll right for coverage details.",
+  "gridPos": { "x": 0, "y": 12, "w": 24, "h": 12 },
+  "datasource": { "type": "victoriametrics-logs-datasource", "uid": "application_logs_vlog" },
+  "targets": [{
+    "refId": "A",
+    "datasource": { "type": "victoriametrics-logs-datasource", "uid": "application_logs_vlog" },
+    "queryType": "instant",
+    "editorMode": "code",
+    "maxLines": 100,
+    "expr": "options(ignore_global_time_filter=true) _time:7d fly.app.name:=\"lox-amp-reviewbot\" \"review_summary\" | unpack_json | filter event:=\"review_summary\" | stats by (reviewId) row_max(_time) as snapshot | unpack_json from snapshot | filter completedAt:string_range(\"${__from:date:iso}\", \"${__to:date:iso}\") | sort by (completedAt desc) | limit 100 | format if (queueSeconds:\"\") \"NaN\" as queueSeconds | format if (executionSeconds:\"\") \"NaN\" as executionSeconds | format if (ampUsageUsd:\"\") \"NaN\" as ampUsageUsd | format if (providerEstimateUsd:\"\") \"NaN\" as providerEstimateUsd | fields _time, completedAt, reviewId, pullRequest, pullRequestUrl, status, conclusion, attempts, queueSeconds, executionSeconds, totalSeconds, ampUsageUsd, providerEstimateUsd, threads, ampUsageThreads, providerEstimateThreads, usagePending, usageErrors"
+  }],
+  "transformations": [
+    { "id": "extractFields", "options": { "source": "labels", "format": "json", "replace": true } },
+    { "id": "convertFieldType", "options": { "conversions": [
+      { "targetField": "completedAt", "destinationType": "time" },
+      { "targetField": "attempts", "destinationType": "number" },
+      { "targetField": "queueSeconds", "destinationType": "number" },
+      { "targetField": "executionSeconds", "destinationType": "number" },
+      { "targetField": "totalSeconds", "destinationType": "number" },
+      { "targetField": "ampUsageUsd", "destinationType": "number" },
+      { "targetField": "providerEstimateUsd", "destinationType": "number" },
+      { "targetField": "threads", "destinationType": "number" },
+      { "targetField": "ampUsageThreads", "destinationType": "number" },
+      { "targetField": "providerEstimateThreads", "destinationType": "number" },
+      { "targetField": "usagePending", "destinationType": "number" },
+      { "targetField": "usageErrors", "destinationType": "number" }
+    ] } },
+    { "id": "organize", "options": { "indexByName": {
+      "completedAt": 0, "pullRequest": 1, "reviewId": 2, "status": 3, "conclusion": 4,
+      "queueSeconds": 5, "executionSeconds": 6, "totalSeconds": 7, "attempts": 8,
+      "ampUsageUsd": 9, "providerEstimateUsd": 10, "threads": 11,
+      "ampUsageThreads": 12, "providerEstimateThreads": 13, "usagePending": 14, "usageErrors": 15,
+      "pullRequestUrl": 16
+    } } }
+  ],
+  "fieldConfig": {
+    "defaults": { "noValue": "—", "custom": { "align": "auto", "filterable": true, "minWidth": 85 }, "mappings": [{ "type": "special", "options": { "match": "nan", "result": { "text": "—" } } }] },
+    "overrides": [
+      { "matcher": { "id": "byName", "options": "completedAt" }, "properties": [{ "id": "displayName", "value": "Finished" }, { "id": "unit", "value": "dateTimeAsLocal" }, { "id": "custom.width", "value": 170 }] },
+      { "matcher": { "id": "byName", "options": "pullRequest" }, "properties": [{ "id": "displayName", "value": "Pull request" }, { "id": "custom.width", "value": 225 }, { "id": "links", "value": [{ "title": "Open PR", "url": "${__data.fields.pullRequestUrl}", "targetBlank": true }] }] },
+      { "matcher": { "id": "byName", "options": "pullRequestUrl" }, "properties": [{ "id": "custom.hidden", "value": true }] },
+      { "matcher": { "id": "byName", "options": "reviewId" }, "properties": [{ "id": "displayName", "value": "Run" }, { "id": "custom.width", "value": 65 }] },
+      { "matcher": { "id": "byName", "options": "status" }, "properties": [{ "id": "displayName", "value": "Execution" }] },
+      { "matcher": { "id": "byName", "options": "conclusion" }, "properties": [{ "id": "displayName", "value": "Conclusion" }] },
+      { "matcher": { "id": "byRegexp", "options": ".*Seconds$" }, "properties": [{ "id": "unit", "value": "s" }, { "id": "decimals", "value": 1 }] },
+      { "matcher": { "id": "byName", "options": "queueSeconds" }, "properties": [{ "id": "displayName", "value": "Queue" }] },
+      { "matcher": { "id": "byName", "options": "executionSeconds" }, "properties": [{ "id": "displayName", "value": "Run time" }] },
+      { "matcher": { "id": "byName", "options": "totalSeconds" }, "properties": [{ "id": "displayName", "value": "Total" }] },
+      { "matcher": { "id": "byName", "options": "attempts" }, "properties": [{ "id": "displayName", "value": "Attempts" }] },
+      { "matcher": { "id": "byName", "options": "ampUsageUsd" }, "properties": [{ "id": "displayName", "value": "Amp USD" }, { "id": "unit", "value": "currencyUSD" }, { "id": "decimals", "value": 3 }] },
+      { "matcher": { "id": "byName", "options": "providerEstimateUsd" }, "properties": [{ "id": "displayName", "value": "Provider est." }, { "id": "unit", "value": "currencyUSD" }, { "id": "decimals", "value": 2 }] },
+      { "matcher": { "id": "byName", "options": "threads" }, "properties": [{ "id": "displayName", "value": "Threads" }] },
+      { "matcher": { "id": "byName", "options": "ampUsageThreads" }, "properties": [{ "id": "displayName", "value": "Amp recorded" }] },
+      { "matcher": { "id": "byName", "options": "providerEstimateThreads" }, "properties": [{ "id": "displayName", "value": "Provider recorded" }] },
+      { "matcher": { "id": "byName", "options": "usagePending" }, "properties": [{ "id": "displayName", "value": "Pending" }] },
+      { "matcher": { "id": "byName", "options": "usageErrors" }, "properties": [{ "id": "displayName", "value": "Errors" }] }
+    ]
+  },
+  "options": { "showHeader": true, "cellHeight": "sm", "sortBy": [{ "displayName": "Finished", "desc": true }], "footer": { "show": false } }
+}

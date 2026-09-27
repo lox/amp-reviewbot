@@ -113,6 +113,41 @@ export class Database {
     await this.pool.query("SELECT 1")
   }
 
+  /** Bounded snapshots for the recent-review log table, including late usage updates. */
+  async recentReviewSummaries(): Promise<Record<string, unknown>[]> {
+    const result = await this.pool.query(`
+      WITH recent AS (
+        SELECT * FROM review_jobs
+        WHERE completed_at > now() - interval '7 days'
+          AND status IN ('succeeded', 'failed', 'cancelled')
+        ORDER BY completed_at DESC, id DESC LIMIT 100
+      )
+      SELECT j.id::text AS "reviewId",
+        j.repository_full_name || '#' || j.pull_number AS "pullRequest",
+        'https://github.com/' || j.repository_full_name || '/pull/' || j.pull_number AS "pullRequestUrl",
+        j.status, r.conclusion, j.attempts,
+        j.completed_at AS "completedAt",
+        EXTRACT(EPOCH FROM j.started_at - j.created_at)::double precision AS "queueSeconds",
+        EXTRACT(EPOCH FROM j.completed_at - j.started_at)::double precision AS "executionSeconds",
+        EXTRACT(EPOCH FROM j.completed_at - j.created_at)::double precision AS "totalSeconds",
+        u.*
+      FROM recent j
+      LEFT JOIN review_results r ON r.job_id = j.id
+      CROSS JOIN LATERAL (
+        SELECT count(*)::int AS "threads",
+          sum(amp_usage_usd)::double precision AS "ampUsageUsd",
+          sum(estimated_provider_cost_at_list_price_usd)::double precision AS "providerEstimateUsd",
+          count(amp_usage_usd)::int AS "ampUsageThreads",
+          count(estimated_provider_cost_at_list_price_usd)::int AS "providerEstimateThreads",
+          count(*) FILTER (WHERE usage_collected_at IS NULL)::int AS "usagePending",
+          count(*) FILTER (WHERE usage_error IS NOT NULL)::int AS "usageErrors"
+        FROM review_threads WHERE job_id = j.id
+      ) u
+      ORDER BY j.completed_at DESC, j.id DESC
+    `)
+    return result.rows
+  }
+
   /** Database-wide snapshots, not process counters; do not sum across replicas. */
   async metrics(): Promise<Record<string, string | number | null>> {
     const result = await this.pool.query<Record<string, string | number | null>>({
