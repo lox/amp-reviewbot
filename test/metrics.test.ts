@@ -1,4 +1,5 @@
 import assert from "node:assert/strict"
+import { execFileSync } from "node:child_process"
 import { once } from "node:events"
 import { it } from "node:test"
 import { PGlite } from "@electric-sql/pglite"
@@ -18,6 +19,14 @@ it("aggregates durable jobs, latency and retry costs without multiplying results
   const empty = await database.metrics()
   assert.equal(Number(empty.reviews), 0)
   assert.equal(Number(empty.amp_usage_usd), 0)
+  assert.equal(Number(empty.cost_reviews_24h), 0)
+  assert.equal(Number(empty.cost_amp_usd_7d), 0)
+  assert.equal(empty.cost_amp_median_usd_24h, null)
+  const panels = execFileSync(process.execPath, ["docs/cost-panels.mjs"], { encoding: "utf8" })
+  JSON.parse(panels)
+  for (const [, name] of panels.matchAll(/reviewbot_(cost_\w+)\{/g)) {
+    assert.ok(Object.hasOwn(empty, name!), `dashboard metric ${name} must be exported`)
+  }
   assert.equal(empty.latency_p95_seconds_24h, null)
   assert.equal(empty.queue_delay_mean_seconds_24h, null)
   assert.equal(empty.queue_delay_p95_seconds_24h, null)
@@ -43,7 +52,21 @@ it("aggregates durable jobs, latency and retry costs without multiplying results
     VALUES (1, 'failure', 'high', 'test', 'private summary', 2, 3, 0, '[]');`)
   const { queue_delay_p95_seconds_24h, ...metrics } = await database.metrics()
   assert.ok(Math.abs(Number(queue_delay_p95_seconds_24h) - 350.5) < 1e-9)
-  assert.deepEqual(Object.fromEntries(Object.entries(metrics).map(([key, value]) => [key, Number(value)])), {
+  assert.equal(Number(metrics.cost_reviews_24h), 3)
+  assert.equal(Number(metrics.cost_reviews_7d), 4)
+  assert.equal(Number(metrics.cost_reviews_without_threads_7d), 1)
+  assert.equal(Number(metrics.cost_amp_usd_24h), 5)
+  assert.equal(Number(metrics.cost_provider_usd_24h), 6)
+  assert.equal(Number(metrics.cost_amp_complete_reviews_24h), 2)
+  assert.equal(Number(metrics.cost_provider_complete_reviews_24h), 1)
+  assert.equal(Number(metrics.cost_amp_median_usd_24h), 2.5)
+  assert.equal(Number(metrics.cost_amp_p95_usd_24h), 2.95)
+  assert.equal(Number(metrics.cost_provider_median_usd_24h), 4)
+  assert.equal(Number(metrics.cost_provider_p95_usd_24h), 4)
+  assert.equal(Number(metrics.cost_error_threads_24h), 1)
+  assert.equal(Number(metrics.cost_pending_threads_24h), 0)
+  assert.deepEqual(Object.fromEntries(Object.entries(metrics).filter(([key]) => !key.startsWith("cost_"))
+    .map(([key, value]) => [key, Number(value)])), {
     reviews: 6, queued: 1, running: 1, succeeded: 2, failed: 1, cancelled: 1,
     oldest_queued_seconds: 42, completed_24h: 2, latency_mean_seconds_24h: 180,
     started_24h: 4, queue_delay_mean_seconds_24h: 130,
@@ -51,6 +74,48 @@ it("aggregates durable jobs, latency and retry costs without multiplying results
     threads_with_amp_usage: 3, threads_with_provider_estimate: 2, threads_usage_pending: 1,
     threads_usage_errors: 1, results: 1, blocked: 1, blocking_findings: 2, advisory_findings: 3,
   })
+  await pg.exec("ROLLBACK")
+})
+
+it("buckets costs at UTC midnight, preserves real zeroes and refreshes late usage", async (t) => {
+  const pg = new PGlite()
+  t.after(() => pg.close())
+  const database = Object.create(Database.prototype) as Database
+  Object.defineProperty(database, "pool", { value: {
+    query: (query: string | { text: string }) => typeof query === "string"
+      ? pg.exec(query) : pg.query(query.text),
+  } })
+  await database.migrate()
+  await pg.exec(`BEGIN;
+    SET TIME ZONE 'Australia/Melbourne';
+    INSERT INTO review_jobs (id, source_delivery_id, event_type, installation_id, repository_id,
+      repository_full_name, pull_number, base_sha, head_sha, amp_project, status, completed_at)
+    SELECT id, id::text, 'test', 1, 1, 'private/repo', id, 'base', id::text, 'project', 'succeeded', finished
+    FROM (VALUES
+      (1, date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'),
+      (2, (date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC') - interval '1 microsecond'),
+      (3, now() - interval '7 days'),
+      (4, now() - interval '7 days' + interval '1 microsecond')
+    ) v(id, finished);
+    INSERT INTO review_threads (thread_id, job_id, amp_usage_usd, usage_collected_at)
+    VALUES ('zero', 1, 0, now()), ('late', 2, NULL, NULL),
+      ('excluded', 3, 1000, now()), ('included', 4, 7, now());`)
+  const before = await database.costMetrics()
+  assert.equal(Number(before.cost_reviews_day_0), 1)
+  assert.equal(Number(before.cost_reviews_day_1), 1)
+  assert.equal(Number(before.cost_amp_median_usd_day_0), 0)
+  assert.equal(before.cost_amp_median_usd_day_1, null)
+  assert.equal(Number(before.cost_amp_complete_reviews_day_0), 1)
+  assert.equal(Number(before.cost_provider_complete_reviews_day_0), 0)
+  assert.equal(Number(before.cost_reviews_7d), 3)
+  assert.equal(Number(before.cost_amp_usd_7d), 7)
+  assert.equal(Number(before.cost_pending_threads_day_1), 1)
+  await pg.exec("UPDATE review_threads SET amp_usage_usd=9, usage_collected_at=now() WHERE thread_id='late'")
+  const after = await database.costMetrics()
+  assert.equal(Number(after.cost_amp_usd_day_1), 9)
+  assert.equal(Number(after.cost_amp_usd_7d), 16)
+  assert.equal(Number(after.cost_pending_threads_day_1), 0)
+  assert.equal(Number(after.cost_amp_complete_reviews_day_1), 1)
   await pg.exec("ROLLBACK")
 })
 

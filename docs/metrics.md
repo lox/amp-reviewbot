@@ -54,6 +54,41 @@ Missing usage is not a known zero cost; display pending/errors beside cost and u
 `reviewbot_threads_with_amp_usage` / `reviewbot_threads_with_provider_estimate` to
 inspect coverage. Costs appear when cleanup records usage, not while reviews run.
 
+### Windowed review costs
+
+`reviewbot_cost_<measure>_<period>` gauges aggregate Postgres directly, without the
+recent-review log table's 100-row limit. Periods are rolling `24h`, rolling `7d`,
+and UTC calendar days `day_0` (today, partial) through `day_6`. Daily intervals
+include midnight at the start and exclude midnight at the end. Rolling intervals
+exclude the exact lower boundary and include now.
+
+| Measure | Meaning |
+| --- | --- |
+| `amp_usd`, `provider_usd` | Recorded partial totals, including all retry threads |
+| `reviews` | Finished succeeded, failed and cancelled reviews in the cohort |
+| `amp_complete_reviews`, `provider_complete_reviews` | Reviews with at least one thread and every thread's corresponding cost recorded |
+| `amp_median_usd`, `amp_p95_usd`, `provider_median_usd`, `provider_p95_usd` | Per-review percentiles, calculated separately over each measure's complete reviews |
+| `pending_threads`, `error_threads` | Missing collection counts for threads belonging to the cohort |
+| `reviews_without_threads` | Finished jobs with no recorded thread; excluded from cost percentile samples |
+
+Costs belong to the review's **completion time**, not collection or invoice time.
+Late usage updates revise earlier days. An empty sum is zero **recorded** cost,
+not proof of free reviews; pair totals with coverage. Empty percentile populations
+export `NaN`. Real recorded zeroes are valid samples. Coverage is complete reviews
+divided by all finished reviews; a zero denominator is unknown. These measures
+exclude running jobs, subscriptions and Fly hosting, and are not billing invoices.
+Usage lookup errors are not retried or backfilled by this metrics change.
+
+Generate Grafana panels with `node docs/cost-panels.mjs > /tmp/cost-panels.json`.
+After deploying, add these panels to the existing dashboard with unique IDs and
+unoccupied grid positions. The daily grouped bars use **instant** queries for all
+seven buckets, so late updates are visible without rewriting Prometheus history.
+They use UTC even when the dashboard displays Melbourne time. The separate rolling
+24h trend follows the dashboard time range; instant panels show the selected end
+time's snapshot. Use `max`, never `sum`, across Fly replicas; do not apply `rate()`
+or `increase()` to these gauges. Amp and provider bars are deliberately unstacked.
+The recent-reviews table can be sorted by either cost column for investigations.
+
 Snapshots survive restarts and include existing database history, but deleting rows
 reduces totals. Fly retains time series for approximately 15 days; Postgres remains
 the source of historical detail. Scrapes aggregate the tables without joining raw

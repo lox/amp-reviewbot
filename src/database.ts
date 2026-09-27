@@ -191,7 +191,56 @@ export class Database {
         FROM review_results
       ) SELECT * FROM jobs CROSS JOIN recent CROSS JOIN queue_delay CROSS JOIN usage CROSS JOIN results`,
     })
-    return result.rows[0]!
+    return { ...result.rows[0]!, ...await this.costMetrics() }
+  }
+
+  /** Completion-time cohorts; day buckets use UTC and include late-recorded usage. */
+  async costMetrics(): Promise<Record<string, string | number | null>> {
+    const result = await this.pool.query<Record<string, string | number | null>>({
+      text: `WITH windows AS (
+        SELECT '24h' AS period, now() - interval '24 hours' AS since, now() AS until
+        UNION ALL SELECT '7d', now() - interval '7 days', now()
+        UNION ALL SELECT 'day_' || n,
+          (date_trunc('day', now() AT TIME ZONE 'UTC') - n * interval '1 day') AT TIME ZONE 'UTC',
+          (date_trunc('day', now() AT TIME ZONE 'UTC') + (1 - n) * interval '1 day') AT TIME ZONE 'UTC'
+        FROM generate_series(0, 6) n
+      ), costs AS (
+        SELECT j.id, j.completed_at,
+          count(t.thread_id) AS threads,
+          sum(t.amp_usage_usd) AS amp_usd,
+          sum(t.estimated_provider_cost_at_list_price_usd) AS provider_usd,
+          count(t.amp_usage_usd) AS amp_recorded,
+          count(t.estimated_provider_cost_at_list_price_usd) AS provider_recorded,
+          count(t.thread_id) FILTER (WHERE t.usage_collected_at IS NULL) AS pending,
+          count(t.thread_id) FILTER (WHERE t.usage_error IS NOT NULL) AS errors
+        FROM review_jobs j LEFT JOIN review_threads t ON t.job_id = j.id
+        WHERE j.status IN ('succeeded', 'failed', 'cancelled')
+          AND j.completed_at > now() - interval '7 days' AND j.completed_at <= now()
+        GROUP BY j.id
+      ) SELECT w.period,
+        count(c.id) AS reviews,
+        COALESCE(sum(c.pending), 0) AS pending_threads,
+        COALESCE(sum(c.errors), 0) AS error_threads,
+        count(c.id) FILTER (WHERE c.threads = 0) AS reviews_without_threads,
+        COALESCE(sum(c.amp_usd), 0) AS amp_usd,
+        COALESCE(sum(c.provider_usd), 0) AS provider_usd,
+        count(c.id) FILTER (WHERE c.threads > 0 AND c.amp_recorded = c.threads) AS amp_complete_reviews,
+        count(c.id) FILTER (WHERE c.threads > 0 AND c.provider_recorded = c.threads) AS provider_complete_reviews,
+        percentile_cont(0.5) WITHIN GROUP (ORDER BY c.amp_usd)
+          FILTER (WHERE c.threads > 0 AND c.amp_recorded = c.threads) AS amp_median_usd,
+        percentile_cont(0.95) WITHIN GROUP (ORDER BY c.amp_usd)
+          FILTER (WHERE c.threads > 0 AND c.amp_recorded = c.threads) AS amp_p95_usd,
+        percentile_cont(0.5) WITHIN GROUP (ORDER BY c.provider_usd)
+          FILTER (WHERE c.threads > 0 AND c.provider_recorded = c.threads) AS provider_median_usd,
+        percentile_cont(0.95) WITHIN GROUP (ORDER BY c.provider_usd)
+          FILTER (WHERE c.threads > 0 AND c.provider_recorded = c.threads) AS provider_p95_usd
+      FROM windows w LEFT JOIN costs c ON CASE WHEN w.period LIKE 'day_%'
+        THEN c.completed_at >= w.since AND c.completed_at < w.until
+        ELSE c.completed_at > w.since AND c.completed_at <= w.until END
+      GROUP BY w.period`,
+    })
+    return Object.fromEntries(result.rows.flatMap(({ period, ...values }) =>
+      Object.entries(values).map(([name, value]) => [`cost_${name}_${period}`, value])))
   }
 
   /**
