@@ -17,6 +17,10 @@ primary_region = "syd"
   FAIL_ON = "high"
   AMP_THREAD_VISIBILITY = "private"
 
+[metrics]
+  port = 9091
+  path = "/metrics"
+
 [http_service]
   internal_port = 8080
   force_https = true
