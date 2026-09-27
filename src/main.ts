@@ -3,6 +3,7 @@ import { loadConfig } from "./config.js"
 import { Database } from "./database.js"
 import { GitHubClient } from "./github.js"
 import { createMetricsServer } from "./metrics.js"
+import { logReviewSummaries } from "./review-summaries.js"
 import { createHttpServer } from "./server.js"
 import { ReviewWorkers } from "./worker.js"
 
@@ -16,6 +17,8 @@ const github = new GitHubClient(config)
 const workers = new ReviewWorkers(config, database, github, logger)
 const server = createHttpServer(config, database, logger)
 const metricsServer = createMetricsServer(database, logger)
+const summariesController = new AbortController()
+const summaries = logReviewSummaries(database, logger, summariesController.signal)
 
 workers.start()
 metricsServer.listen(9091, "0.0.0.0")
@@ -28,10 +31,12 @@ async function shutdown(signal: string): Promise<void> {
   if (shuttingDown) return
   shuttingDown = true
   logger.info({ signal }, "shutting down")
+  summariesController.abort()
   await Promise.all([server, metricsServer].map((listener) => new Promise<void>((resolve, reject) => {
     listener.close((error) => (error ? reject(error) : resolve()))
   })))
   await workers.stop()
+  await summaries
   await database.close()
 }
 

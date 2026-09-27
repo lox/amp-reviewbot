@@ -64,3 +64,49 @@ Database failures return HTTP 503 rather than misleading zeroes.
 Deployment and dashboard creation are separate delivery steps. After deployment,
 verify `reviewbot_reviews{app="lox-amp-reviewbot"}` in Grafana Explore before adding
 panels. The webhook listener continues to return 404 for `/metrics`.
+
+## Recent reviews table
+
+The service reads the latest 100 finished jobs from the last seven days every
+60 seconds and emits `event: "review_summary"` JSON logs when a snapshot changes.
+Startup re-emits that bounded history. This includes failed/cancelled jobs and
+jobs with no thread; it does not delay reviews or trigger usage lookups. Late
+usage updates are reflected while a job remains in that recent window. This is
+a recent activity view, not a complete historical ledger or an exactly-once event stream.
+Keep `LOG_LEVEL=info` (the default) to enable these records.
+
+Use **Application Logs (VictoriaLogs)**, not Prometheus, for a Grafana Table panel.
+The [panel JSON](recent-reviews-panel.json) contains the query, transformations,
+column formatting and PR links. Add it to the existing dashboard with a unique
+panel ID and non-overlapping grid position after deploying the exporter.
+Choose Raw Logs (`queryType: instant`), extract JSON fields from `labels`, then
+convert duration/cost/count fields to numbers and `completedAt` to a time field.
+Use seconds for durations and USD for both cost columns. Link `pullRequestUrl`
+directly to the PR. This query keeps the latest snapshot per review, avoiding
+duplicate rows from cost updates, restarts and blue/green machines:
+
+```logsql
+options(ignore_global_time_filter=true)
+_time:7d fly.app.name:="lox-amp-reviewbot" "review_summary"
+| unpack_json
+| filter event:="review_summary"
+| stats by (reviewId) row_max(_time) as snapshot
+| unpack_json from snapshot
+| filter completedAt:string_range("${__from:date:iso}", "${__to:date:iso}")
+| sort by (completedAt desc)
+| limit 100
+| fields _time, completedAt, reviewId, pullRequest, pullRequestUrl, status, conclusion, attempts, queueSeconds, executionSeconds, totalSeconds, ampUsageUsd, providerEstimateUsd, threads, ampUsageThreads, providerEstimateThreads, usagePending, usageErrors
+```
+
+The time picker filters **completion time**, not when a snapshot was logged.
+`queueSeconds` is creation to latest start; `executionSeconds` is latest start to
+completion, not total execution across interrupted attempts. `totalSeconds`
+includes all queueing and retries. Null timings mean a job never started, not
+a zero-second review. For speed comparisons, separate failed/cancelled jobs and
+compare similar workloads with sample counts; concurrency mainly changes queueing.
+
+Costs sum every thread of that job, including retries. Unknown totals stay null;
+partial totals must be read alongside `ampUsageThreads` / `providerEstimateThreads`
+versus `threads`, plus `usagePending` and `usageErrors`. A zero recorded cost is
+different from missing usage. No review text or findings are logged in these
+snapshots. PR URLs and review IDs are log fields only, never Prometheus labels.
