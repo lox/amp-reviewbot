@@ -341,8 +341,8 @@ describe("cleanup for finished review threads", () => {
     ])
   })
 
-  it("blocks new reviews, drains active reviews, and still makes cleanup progress", async () => {
-    const { workers, archived, looked, stored } = workersWith(
+  it("leaves cleanup pending instead of draining active reviews", async () => {
+    const { workers, archived, looked, stored, requests } = workersWith(
       [
         { threadId: "T-pending", needsArchive: true, needsUsage: true },
         { threadId: "T-next", needsArchive: true, needsUsage: true },
@@ -351,28 +351,19 @@ describe("cleanup for finished review threads", () => {
     )
     const state = workers as unknown as {
       active: Set<AbortController>
-      activeDrainWaiters: Set<() => void>
       cleanupBarrier?: Promise<void>
-      reviewsWaiting: number
       collectPendingThreadCleanup(): Promise<void>
     }
     const activeReview = new AbortController()
     state.active.add(activeReview)
 
-    const cleanup = state.collectPendingThreadCleanup()
-    await Promise.resolve()
-    assert.ok(state.cleanupBarrier, "the claim barrier is established before active reviews drain")
+    await state.collectPendingThreadCleanup()
+
+    assert.equal(state.cleanupBarrier, undefined)
+    assert.deepEqual(requests, [], "cleanup does not query or wait while a review is active")
     assert.deepEqual(archived, [])
-
-    state.reviewsWaiting = 1
-    state.active.delete(activeReview)
-    for (const resolve of state.activeDrainWaiters) resolve()
-    state.activeDrainWaiters.clear()
-    await cleanup
-
-    assert.deepEqual(archived, ["T-pending"], "a saturated queue cannot starve archival")
-    assert.deepEqual(looked, ["T-pending"], "successful archival finishes its usage before yielding")
-    assert.deepEqual(stored, [{ threadId: "T-pending", usage }])
+    assert.deepEqual(looked, [])
+    assert.deepEqual(stored, [])
   })
 
   it("continues past one failed row before yielding to a waiting review", async () => {

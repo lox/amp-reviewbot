@@ -206,7 +206,6 @@ export class ReviewWorkers {
   private readonly loops: Promise<void>[] = []
   private readonly recoveryController = new AbortController()
   private readonly promptIdentifier: string
-  private readonly activeDrainWaiters = new Set<() => void>()
   private cleanupBarrier: Promise<void> | undefined
   private reviewsWaiting = 0
 
@@ -568,10 +567,6 @@ export class ReviewWorkers {
       clearTimeout(timeout)
       clearInterval(cancellationPoll)
       this.active.delete(controller)
-      if (this.active.size === 0) {
-        for (const resolve of this.activeDrainWaiters) resolve()
-        this.activeDrainWaiters.clear()
-      }
     }
   }
 
@@ -626,8 +621,9 @@ export class ReviewWorkers {
 
   private async collectPendingThreadCleanup(): Promise<void> {
     await this.withCleanupBarrier(async () => {
-      await this.waitForActiveReviews()
-      if (this.stopping) return
+      // Amp CLI cleanup must not overlap a review, but cleanup is bookkeeping:
+      // wait for an idle pass instead of draining active review capacity.
+      if (this.stopping || this.active.size > 0) return
       const pending = await this.database.pendingThreadCleanup(threadCleanupBatchSize)
       if (pending.length === 0) return
       this.logger.warn({ threads: pending.length }, "cleaning up Amp review threads left by a worker")
@@ -641,11 +637,6 @@ export class ReviewWorkers {
         }
       }
     })
-  }
-
-  private async waitForActiveReviews(): Promise<void> {
-    if (this.active.size === 0) return
-    await new Promise<void>((resolve) => this.activeDrainWaiters.add(resolve))
   }
 
   private async withCleanupBarrier(operation: () => Promise<void>): Promise<void> {
