@@ -15,7 +15,6 @@ const ampRetryDelaysMs = [5_000, 20_000]
 const staleRecoveryIntervalMs = 60_000
 const maxJobAttempts = 3
 const threadCleanupBatchSize = 20
-const threadCleanupAttemptsWhileReviewsWait = 2
 const threadCleanupIntervalMs = 60_000
 const reconcileIntervalMs = 5 * 60_000
 // A head pushed more recently than this may still have its webhook in flight.
@@ -206,8 +205,6 @@ export class ReviewWorkers {
   private readonly loops: Promise<void>[] = []
   private readonly recoveryController = new AbortController()
   private readonly promptIdentifier: string
-  private cleanupBarrier: Promise<void> | undefined
-  private reviewsWaiting = 0
 
   constructor(
     private readonly config: Config,
@@ -399,14 +396,6 @@ export class ReviewWorkers {
           await sleep(1_000)
           continue
         }
-        if (this.cleanupBarrier) {
-          this.reviewsWaiting += 1
-          try {
-            await this.cleanupBarrier
-          } finally {
-            this.reviewsWaiting -= 1
-          }
-        }
         if (this.stopping) {
           await this.database.requeue(job.id)
           break
@@ -570,7 +559,7 @@ export class ReviewWorkers {
     }
   }
 
-  private async cleanupThread(cleanup: PendingThreadCleanup, log: Logger): Promise<boolean> {
+  private async cleanupThread(cleanup: PendingThreadCleanup, log: Logger): Promise<void> {
     await this.database.setThreadCleanupAttempted(cleanup.threadId)
     if (cleanup.needsArchive) {
       try {
@@ -578,11 +567,10 @@ export class ReviewWorkers {
         await this.database.setThreadArchived(cleanup.threadId)
       } catch (error) {
         log.warn({ err: error, threadId: cleanup.threadId }, "failed to archive Amp review thread")
-        return false
+        return
       }
     }
     if (cleanup.needsUsage) await this.collectThreadUsage(cleanup.threadId, log)
-    return true
   }
 
   /**
@@ -620,36 +608,15 @@ export class ReviewWorkers {
   }
 
   private async collectPendingThreadCleanup(): Promise<void> {
-    await this.withCleanupBarrier(async () => {
-      // Amp CLI cleanup must not overlap a review, but cleanup is bookkeeping:
-      // wait for an idle pass instead of draining active review capacity.
-      if (this.stopping || this.active.size > 0) return
-      const pending = await this.database.pendingThreadCleanup(threadCleanupBatchSize)
-      if (pending.length === 0) return
-      this.logger.warn({ threads: pending.length }, "cleaning up Amp review threads left by a worker")
-      let attemptsWhileReviewsWait = 0
-      for (const cleanup of pending) {
-        if (this.stopping) return
-        const completed = await this.cleanupThread(cleanup, this.logger)
-        if (this.reviewsWaiting > 0) {
-          attemptsWhileReviewsWait += 1
-          if (completed || attemptsWhileReviewsWait >= threadCleanupAttemptsWhileReviewsWait) return
-        }
-      }
-    })
-  }
-
-  private async withCleanupBarrier(operation: () => Promise<void>): Promise<void> {
-    let release = () => {}
-    const barrier = new Promise<void>((resolve) => {
-      release = resolve
-    })
-    this.cleanupBarrier = barrier
-    try {
-      await operation()
-    } finally {
-      release()
-      if (this.cleanupBarrier === barrier) this.cleanupBarrier = undefined
+    // Cleanup only touches finished threads and is durably retryable, so it
+    // runs independently rather than withholding review capacity.
+    if (this.stopping) return
+    const pending = await this.database.pendingThreadCleanup(threadCleanupBatchSize)
+    if (pending.length === 0) return
+    this.logger.warn({ threads: pending.length }, "cleaning up Amp review threads left by a worker")
+    for (const cleanup of pending) {
+      if (this.stopping) return
+      await this.cleanupThread(cleanup, this.logger)
     }
   }
 }
