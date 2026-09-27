@@ -1,10 +1,19 @@
 import assert from "node:assert/strict"
+import { readFile } from "node:fs/promises"
 import { setImmediate } from "node:timers/promises"
 import { it } from "node:test"
 import { PGlite } from "@electric-sql/pglite"
 import pino from "pino"
 import { Database } from "../src/database.js"
 import { logReviewSummaries } from "../src/review-summaries.js"
+
+it("protects nullable panel fields from Grafana 11.2.2's null-to-zero conversion", async () => {
+  const panel = JSON.parse(await readFile("docs/recent-reviews-panel.json", "utf8"))
+  const query: string = panel.targets[0].expr
+  for (const field of ["queueSeconds", "executionSeconds", "ampUsageUsd", "providerEstimateUsd"]) {
+    assert.ok(query.includes(`| format if (${field}:"") "NaN" as ${field}`), field)
+  }
+})
 
 it("snapshots timings and partial retry costs without duplicating reviews or inventing zero costs", async (t) => {
   const pg = new PGlite()

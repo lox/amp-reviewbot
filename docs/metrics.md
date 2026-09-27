@@ -95,8 +95,16 @@ _time:7d fly.app.name:="lox-amp-reviewbot" "review_summary"
 | filter completedAt:string_range("${__from:date:iso}", "${__to:date:iso}")
 | sort by (completedAt desc)
 | limit 100
+| format if (queueSeconds:"") "NaN" as queueSeconds
+| format if (executionSeconds:"") "NaN" as executionSeconds
+| format if (ampUsageUsd:"") "NaN" as ampUsageUsd
+| format if (providerEstimateUsd:"") "NaN" as providerEstimateUsd
 | fields _time, completedAt, reviewId, pullRequest, pullRequestUrl, status, conclusion, attempts, queueSeconds, executionSeconds, totalSeconds, ampUsageUsd, providerEstimateUsd, threads, ampUsageThreads, providerEstimateThreads, usagePending, usageErrors
 ```
+
+The `NaN` sentinels are intentional: Fly's Grafana 11.2.2 converts empty/null
+fields to zero when changing field type to Number, but converts `NaN` to null.
+Do not remove this step; real zero costs must remain distinct from missing usage.
 
 The time picker filters **completion time**, not when a snapshot was logged.
 `queueSeconds` is creation to latest start; `executionSeconds` is latest start to
