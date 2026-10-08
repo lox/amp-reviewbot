@@ -78,8 +78,9 @@ export function buildReviewPrompt(
   {
     failOn,
     preparedSource = false,
+    checkoutPrepared = false,
     additionalInstructions,
-  }: { failOn: Severity; preparedSource?: boolean; additionalInstructions?: string },
+  }: { failOn: Severity; preparedSource?: boolean; checkoutPrepared?: boolean; additionalInstructions?: string },
 ): string {
   const promptVariant = additionalInstructions
     ? `\n\nAdditional trusted review instructions:\n${additionalInstructions}`
@@ -92,7 +93,7 @@ Trusted review coordinates:
 - head SHA: ${job.headSha}
 ${pullRequestContextSection(job)}${sourceBoundarySection(job, preparedSource)}
 
-${checkoutInstruction(job, preparedSource)} Review only changes in ${job.baseSha}...${job.headSha} and read surrounding code needed to establish whether each issue is real.
+${checkoutInstruction(job, preparedSource, checkoutPrepared)} Review only changes in ${job.baseSha}...${job.headSha} and read surrounding code needed to establish whether each issue is real.
 
 The review methodology below is trusted, self-contained, and embedded by reviewbot. Use it directly without calling the skill tool. Apply its two passes sequentially to the exact diff, then synthesize one result. The caller-specific requirements and JSON schema after the methodology take precedence.
 
@@ -143,7 +144,10 @@ The exact source is already prepared in the current workspace. Use only this cop
 `
 }
 
-function checkoutInstruction(job: ReviewJob, preparedSource: boolean): string {
+function checkoutInstruction(job: ReviewJob, preparedSource: boolean, checkoutPrepared = false): string {
+  if (checkoutPrepared) {
+    return "Begin only if the trusted plugin confirms checkout is ready; otherwise stop. Do not fetch or repeat checkout."
+  }
   return preparedSource
     ? `Before inspecting the source or using any other tool, run this exact verification as one shell command:
 
@@ -265,6 +269,16 @@ ${command}
 </reviewbot-source-setup-v1>
 
 This block is for the trusted reviewbot plugin. Do not run or repeat it. Begin the review only after the plugin confirms that source setup succeeded.`
+}
+
+/** Opt-in experiment only; production continues to call buildReviewPrompt directly. */
+export function buildCheckoutExperimentPrompt(job: ReviewJob, failOn: Severity): string {
+  const coordinates = {
+    repository: job.repositoryFullName, pullNumber: job.pullNumber,
+    baseSha: job.baseSha, headSha: job.headSha,
+  }
+  return `<reviewbot-checkout-v1>\n${JSON.stringify(coordinates)}\n</reviewbot-checkout-v1>\n\n` +
+    buildReviewPrompt(job, { failOn, checkoutPrepared: true })
 }
 
 export function sourcePreparationCommand(sourcePreparation: string): string | undefined {
