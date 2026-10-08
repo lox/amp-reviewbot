@@ -81,6 +81,53 @@ Production and evaluation reviews use the tracked `reviewbot-v1` Amp mode. It ex
 
 Every Amp account involved must install the exact [`pinned-models.js`](../plugins/pinned-models.js) file as a personal or workspace plugin: the production service account, the separate evaluation review account, and the local account used for finding comparisons. Besides pinning the agents, this plugin performs evaluation source setup before the model starts; ordinary production prompts do not activate that hook. An orb loads the plugin from the account running it, so keeping the file only in this repository is not enough. Do not also install it as a project plugin because duplicate mode keys are ambiguous. A missing or ambiguous mode stops the run instead of falling back to an unpinned model.
 
+### Opt-in checkout latency experiment
+
+`buildCheckoutExperimentPrompt(job, failOn)` prepares the production review prompt
+with a separate `<reviewbot-checkout-v1>` JSON block. The trusted plugin accepts
+only `repository`, `pullNumber`, `baseSha`, and `headSha`; it does not accept shell
+commands. Ordinary production prompts and the frozen-source evaluation path are
+unchanged. This is a live-repository timing experiment, **not** a frozen quality
+evaluation: its checkout retains its remote and other repository history.
+
+The hook checks the configured GitHub origin and refuses tracked local changes.
+It fetches the PR head ref and exact base commit, unshallows when necessary,
+verifies both SHAs and their merge base, and detaches at the requested head. Git
+hooks and recursive submodule operations are disabled; repository setup scripts
+are not invoked. It does not clean untracked files, install dependencies, or
+initialize submodules/LFS. A moved PR head, missing base, wrong repository,
+malformed block, or command failure cancels the turn. Git preparation has a
+120-second timeout. Use disposable orbs; failed fetches can still update Git refs.
+
+Before an Orb trial, explicitly publish the updated plugin to the experimental
+account's existing personal/workspace plugin installation. A GitHub merge alone
+does not install it. Do not enable it for production jobs yet. Use the existing
+`executeAmpWithPluginReady` adapter from `eval/reviewer-child.ts` for both arms;
+it passes `--plugin-ready-timeout 30`, unlike the ordinary production SDK call.
+That flag waits for plugin registration, not the checkout timeout.
+
+For each selected live PR, capture one `ReviewJob` and reuse its exact coordinates
+and context in both arms. Generate the baseline with
+`buildReviewPrompt(job, { failOn: "high" })` and the treatment with
+`buildCheckoutExperimentPrompt(job, "high")`. Launch fresh orbs with the same
+project, `reviewbot-v1` mode and settings. Alternate arm order across repeats.
+Do not publish experiment results as GitHub checks or comments.
+
+Record wall time from execute invocation, timestamps of system/assistant/result
+events, thread IDs, usage and final review JSON. The plugin logs
+`reviewbot_checkout` with status and `durationMs` and appends a readiness receipt
+containing the verified SHAs to the turn. Confirm that receipt in the exported
+thread before accepting a treatment run: the prompt instruction alone is not a
+guarantee if the plugin is missing or its hook was skipped. Inspect traces for
+repeated checkout/fetch calls and time to useful source inspection. Failed runs
+stay in the results; do not retry only the treatment until it succeeds.
+
+Compare paired wall times and recorded costs, not plugin preparation time against
+the baseline's whole launch time. Check source correctness and findings in both
+arms before deciding whether to roll out. Keep the model, reasoning and review
+method unchanged. Publishing the plugin and enabling production are separate
+approval steps; rollback is simply returning to ordinary production prompts.
+
 Amp still chooses models for specialist tools such as Search and Librarian. One plugin setting covers all specialists, so overriding it would replace their deliberately different routing and make the test less like production. The result therefore names the pinned main model without claiming that every supporting model is fixed.
 
 Each result records the configured mode and model plus the exact Amp SDK and CLI versions. It also saves model IDs from the event stream when Amp reports them. Current Amp streams sometimes omit those IDs; an empty list means “not reported,” not “no model was used.”
